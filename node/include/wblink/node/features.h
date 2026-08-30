@@ -28,8 +28,15 @@ inline const char* feature_fec_scheme(FecScheme scheme) {
     return "none";
 }
 
+// `arq_enabled` is the §11.7 operator latch (PROTOCOL.md §15.5). `arq_effective`
+// is whether ARQ can actually run: the §3.4 best-effort fallback switches NACK
+// generation off inside the RX engine, which the latch cannot see, so for two
+// hours on 2026-08-30 this endpoint reported ARQ enabled on a stream that had
+// not sent a NACK since it latched. On a TX node the two are equal — a sender
+// has no receive engine to be downgraded.
 inline std::string build_features_json(const Loaded& l, bool arq_enabled,
-                                       bool fps_ladder_enabled) {
+                                       bool fps_ladder_enabled,
+                                       bool arq_effective) {
     const StreamCfg* video = nullptr;
     for (const StreamCfg& stream : l.cfg.streams) {
         if (stream.stream_type == stream_type::kRtp) {
@@ -55,6 +62,8 @@ inline std::string build_features_json(const Loaded& l, bool arq_enabled,
         out += "\"binding\":\"none\",\"arq_mode\":\"none\",";
         out += "\"arq_enabled\":";
         out += arq_enabled ? "true" : "false";
+        out += ",\"arq_effective\":";
+        out += arq_effective ? "true" : "false";
         out += ",\"fec\":{\"scheme\":\"none\",\"i_permille\":0,";
         out += "\"p_permille\":0,\"e_permille\":0,\"min_k\":0,\"min_r\":0},";
         out += "\"spatial_recovery\":{\"mode\":\"off\",\"freeze_frame\":false},";
@@ -73,6 +82,8 @@ inline std::string build_features_json(const Loaded& l, bool arq_enabled,
                    : "receive";
         out += "\",\"arq_enabled\":";
         out += arq_enabled ? "true" : "false";
+        out += ",\"arq_effective\":";
+        out += arq_effective ? "true" : "false";
         out += ",\"fec\":{\"scheme\":\"";
         out += feature_fec_scheme(video->fec.scheme);
         out += "\",\"i_permille\":" +
@@ -105,7 +116,24 @@ inline std::string build_features_json(const Loaded& l, bool arq_enabled,
     out += l.cfg.venc.fps_ladder.enabled ? "true" : "false";
     out += ",\"fps_ladder_enabled\":";
     out += fps_ladder_enabled ? "true" : "false";
-    out += "}}";
+
+    // §11.1 channel policy. This is the only place the allowlist is readable
+    // over REST: a rejected §15.5a claim returns one opaque string covering
+    // allowlist, active-campaign and rate-limit alike, so an operator aiming
+    // the radio had no way to see which channels the node would even accept.
+    // It belongs here rather than in §15.3 because it is loaded configuration,
+    // not a running measurement, and /features is defined as exactly that. The
+    // PSK stays out — the key VALUE is the secret, the channel policy is not.
+    out += "},\"csa\":{\"home_chan\":" +
+           std::to_string(l.cfg.policy.csa.home_chan);
+    out += ",\"channel_allowlist\":[";
+    bool first_chan = true;
+    for (uint16_t mhz : l.cfg.policy.csa.channel_allowlist) {
+        if (!first_chan) out += ',';
+        first_chan = false;
+        out += std::to_string(mhz);
+    }
+    out += "]}}";
     return out;
 }
 

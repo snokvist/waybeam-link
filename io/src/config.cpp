@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/config.h"
 
+#include "wblink/adapter_elect.h"  // default_tx_priority (§15.2 auto)
 #include "wblink/calib_dwell.h"  // kMaxDwellFrames (§3.16)
 
 #include "wblink/fps_ladder.h"  // §9.11 ladder-membership validation
@@ -111,6 +112,207 @@ Result<BindCfg> parse_bind(const json& j, Dir dir, const char* where) {
     return Result<BindCfg>::ok(std::move(b));
 }
 
+// §10.2/§10.3/§10.5 per-adapter power keys, shared by the two §15.2 adapter
+// forms: an array stanza, and the auto block's tx_template (Pass 195), whose
+// keys reach the ELECTED tx adapter. Factored rather than duplicated because
+// the clamps and the role rejections in here ARE the safety argument for these
+// keys — two copies of them is two chances to diverge on a power ceiling.
+//
+// `ac` arrives with name and role already set (role drives the rx-side
+// rejections) and comes back with the power fields filled. `where` prefixes
+// every message: "adapter wlan0" from the array form, "adapters.auto" from the
+// object form.
+//
+// The json parameter MUST be named `j`: tests/config_registry_test.py seeds its
+// path reconstruction on that name, and any other name drops every accessor
+// here into its `skipped` list, which is a hard failure rather than a silent
+// undercount — but a confusing one, so it is stated here instead.
+// §11.1 center frequency, in MHz, for every key that carries one. Read WIDE
+// and checked BEFORE the uint16 cast: get<uint16_t> static_casts, so 65536
+// lands on 0 — which is the auto form's own "unset" sentinel — and a
+// Hz-for-MHz typo (5825000) wraps to 57832. Neither is caught downstream,
+// because mhz_to_channel() ends in a uint8 cast that TRUNCATES rather than
+// returning its 0 sentinel: 57832 comes out as channel 70 (5350 MHz, DFS) and
+// flies. The upper bound is 5900 rather than a 6 GHz band edge for the same
+// reason — 6285 MHz truncates to channel 1 and would tune 2.4 GHz.
+// nullptr = acceptable; 0 means "unset" and is the caller's to interpret.
+const char* channel_range_error(int64_t mhz) {
+    if (mhz == 0) return nullptr;
+    if (mhz < 2400 || mhz > 5900) {
+        return "is outside 2400..5900 — the value is a CENTER FREQUENCY in "
+               "MHz (\u00a711.1), and out-of-range values do NOT fail closed: "
+               "they truncate into a valid-looking channel";
+    }
+    return nullptr;
+}
+
+Result<AdapterCfg> parse_adapter_power(const json& j, AdapterCfg ac,
+                                       const std::string& where) {
+    ac.power_map = j.value("power_map", std::string{});
+    // §10.2/§10.7 Pass 125: the rule is per-ADAPTER role, not per-node
+    // role. A map on a role:"rx" diversity adapter is never actuated on
+    // either node kind; a map on the single role:"tx" adapter IS —
+    // the tx-node selector commit (§10.4) or the rx-node's designated
+    // §6.4 uplink (§10.7). The old node-role test both permitted a
+    // never-applied map on a tx-node diversity adapter and blocked the
+    // one adapter that can use it on an rx node.
+    if (ac.role == Role::kRx && !ac.power_map.empty()) {
+        return Result<AdapterCfg>::fail(
+            where +
+            ": power_map on a role:\"rx\" adapter is never applied "
+            "(§10.2) — put it on the role:\"tx\" adapter");
+    }
+    if (j.contains("max_power_qdb")) {
+        ac.max_power_qdb = j.at("max_power_qdb").get<int32_t>();
+        // §10.3: its absolute-REFERENCE role went with
+        // kernel-monitor (Pass 164), but it is NOT inert — on an
+        // absolute backend it is still the §10.3 ceiling (clamps
+        // power_presets_qdb here, feeds §15.3/§15.5, clamps a §10.5
+        // latch, bounds a §10.7 sweep). On a relative one those roles
+        // are the offset keys' since Pass 166/167 and its liveness is
+        // an open question, deliberately not settled. The range check
+        // stays either way: the pre-150 "disable the ceiling" idiom of
+        // a huge value (the sample configs shipped 2000 = 500 dBm)
+        // must not read as authored intent.
+        if (*ac.max_power_qdb < -40 || *ac.max_power_qdb > 120) {
+            return Result<AdapterCfg>::fail(
+                where + ": max_power_qdb " +
+                std::to_string(*ac.max_power_qdb) +
+                " out of range -40..120 qdb — it is the \u00a710.3 "
+                "ceiling on an absolute backend; on a relative one "
+                "use power_offset_max_qdb "
+                "(\u00a710.3/\u00a710.5)");
+        }
+    }
+    // §10.5 (Pass 150): relative offset + its bound. Parsed for every
+    // adapter; only role:"tx" ever applies them.
+    if (j.contains("power_offset_max_qdb")) {
+        ac.power_offset_max_qdb =
+            j.at("power_offset_max_qdb").get<int32_t>();
+    }
+    if (j.contains("power_offset_qdb")) {
+        ac.power_offset_qdb = j.at("power_offset_qdb").get<int32_t>();
+    }
+    if (ac.power_offset_qdb < -511 || ac.power_offset_qdb > 511 ||
+        ac.power_offset_max_qdb < -511 ||
+        ac.power_offset_max_qdb > 511) {
+        return Result<AdapterCfg>::fail(
+            where +
+            ": power_offset_qdb/power_offset_max_qdb must be "
+            "-511..511 qdb (§10.5)");
+    }
+    // The boot point may not start above its own bound — otherwise a
+    // node boots at a power the runtime latch would refuse to set.
+    if (ac.power_offset_qdb > ac.power_offset_max_qdb) {
+        return Result<AdapterCfg>::fail(
+            where + ": power_offset_qdb (" +
+            std::to_string(ac.power_offset_qdb) +
+            ") exceeds power_offset_max_qdb (" +
+            std::to_string(ac.power_offset_max_qdb) + ") (§10.5)");
+    }
+    // §11.7 0x0A TX_POWER preset list (Pass 135). Same rx rejection as
+    // power_map above, and for the same reason: an rx adapter never
+    // resolves power, so a list there would be silently inert.
+    if (j.contains("power_presets_qdb")) {
+        if (ac.role == Role::kRx) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_presets_qdb on a role:\"rx\" adapter is never "
+                "applied (§10.3) — put it on the role:\"tx\" adapter");
+        }
+        if (!j.at("power_presets_qdb").is_array()) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_presets_qdb must be an array — an object loads in nlohmann's "
+                "SORTED-KEY order, silently reordering the \u00a711.7 0x0A "
+                "ladder so cmd_arg 0 selects a different rung than the one "
+                "authored first");
+        }
+        for (const json& v : j.at("power_presets_qdb")) {
+            ac.power_presets_qdb.push_back(v.get<int32_t>());
+        }
+        // §11.7 preset-index bound (Pass 68): at most 5 choices.
+        if (ac.power_presets_qdb.size() > kVcmdMaxArg + 1u) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_presets_qdb holds more than 5 entries — "
+                "§11.7 cmd_arg indexes at most 5 choices");
+        }
+        if (ac.power_presets_qdb.empty()) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_presets_qdb is empty — omit the key instead");
+        }
+        // A tier may only LOWER power (Pass 135): the boot ceiling is
+        // the operator's hard limit and no runtime path may pass it.
+        // Logged when it binds — a silently lowered preset would read
+        // back as a value the operator never chose.
+        if (ac.max_power_qdb) {
+            for (int32_t& q : ac.power_presets_qdb) {
+                if (q > *ac.max_power_qdb) {
+                    wb_logf("config: %s: power preset %d "
+                            "qdb clamped to max_power_qdb %d "
+                            "(§10.3)\n",
+                            where.c_str(), q, *ac.max_power_qdb);
+                    q = *ac.max_power_qdb;
+                }
+            }
+        }
+    }
+    // §11.7 0x0A offset-space preset list (Pass 166). Every rule of
+    // the absolute list above, with max_power_qdb ->
+    // power_offset_max_qdb. Kept as a separate block rather than a
+    // shared helper: the two differ in which key clamps them and in
+    // one being optional-typed, and a helper taking both would have
+    // to branch on that anyway.
+    if (j.contains("power_offset_presets_qdb")) {
+        if (ac.role == Role::kRx) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_offset_presets_qdb on a role:\"rx\" adapter "
+                "is never applied (§10.3) — put it on the "
+                "role:\"tx\" adapter");
+        }
+        if (!j.at("power_offset_presets_qdb").is_array()) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_offset_presets_qdb must be an array — an object loads in nlohmann's "
+                "SORTED-KEY order, silently reordering the \u00a711.7 0x0A "
+                "ladder so cmd_arg 0 selects a different rung than the one "
+                "authored first");
+        }
+        for (const json& v : j.at("power_offset_presets_qdb")) {
+            ac.power_offset_presets_qdb.push_back(v.get<int32_t>());
+        }
+        if (ac.power_offset_presets_qdb.size() > kVcmdMaxArg + 1u) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_offset_presets_qdb holds more than 5 entries "
+                "— §11.7 cmd_arg indexes at most 5 choices");
+        }
+        if (ac.power_offset_presets_qdb.empty()) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_offset_presets_qdb is empty — omit the key "
+                "instead");
+        }
+        // A tier may only LOWER power (Pass 135/166). Unlike the
+        // absolute clamp this one always runs: power_offset_max_qdb
+        // is not optional, it defaults to 0, and a config that omits
+        // it gets exactly the §10.5 posture that default encodes.
+        for (int32_t& q : ac.power_offset_presets_qdb) {
+            if (q > ac.power_offset_max_qdb) {
+                wb_logf("config: %s: power offset preset %d "
+                        "qdb clamped to power_offset_max_qdb %d "
+                        "(§10.3/§10.5)\n",
+                        where.c_str(), q, ac.power_offset_max_qdb);
+                q = ac.power_offset_max_qdb;
+            }
+        }
+    }
+    return Result<AdapterCfg>::ok(std::move(ac));
+}
+
 }  // namespace
 
 Result<Config> load_config_json(const std::string& json_text) {
@@ -151,9 +353,109 @@ Result<Config> load_config_json(const std::string& json_text) {
             cfg.profile_table_path = j.at("profile_table").get<std::string>();
         }
 
+        // adapters — the §15.2 array form, or the Pass 195 auto OBJECT form.
+        // The shape is decided ONCE, here. It has to be: nlohmann's
+        // value("adapters", json::array()) returns whatever is stored, so the
+        // stanza loop below would happily iterate an object's VALUES as if
+        // they were stanzas and then throw on a missing "name" — a JSON type
+        // error where the operator wrote a legal config.
+        const bool adapters_is_object =
+            j.contains("adapters") && j.at("adapters").is_object();
+        if (adapters_is_object) {
+            const json& ao = j.at("adapters");
+            if (!ao.contains("auto")) {
+                return Result<Config>::fail(
+                    "adapters: the object form carries an \"auto\" object "
+                    "(§15.2); an array of stanzas is the other shape");
+            }
+            const json& aa = ao.at("auto");
+            if (!aa.is_object()) {
+                // Otherwise nlohmann's own type_error surfaces one line below
+                // the hand-written message for the sibling typo — the exact
+                // "raw JSON type error" this branch exists to prevent.
+                return Result<Config>::fail(
+                    "adapters.auto must be an object (§15.2)");
+            }
+            AdapterAutoCfg& au = cfg.adapter_auto;
+            au.enabled = true;
+            // Read WIDE, then range-check. get<uint16_t> static_casts without
+            // checking, so 65536 would land on 0 — which is this loader's own
+            // "unset" sentinel, silently substituting home_chan for a channel
+            // the operator did write. A Hz-for-MHz typo (5825000) would wrap
+            // to 57832 and fly. The auto form concentrates one channel value
+            // across every synthesized stanza, so one typo reaches them all.
+            {
+                const int64_t chan = aa.value("channel", int64_t{0});
+                if (const char* e = channel_range_error(chan)) {
+                    return Result<Config>::fail(
+                        "adapters.auto: channel " + std::to_string(chan) +
+                        std::string(" MHz ") + e);
+                }
+                au.channel_mhz = static_cast<uint16_t>(chan);
+            }
+            const uint32_t abw = aa.value("bw", 20u);
+            if (abw != 20 && abw != 40 && abw != 80) {
+                return Result<Config>::fail(
+                    "adapters.auto: bw must be 20, 40 or 80");
+            }
+            au.bw = static_cast<uint8_t>(abw);
+            const uint64_t amax = aa.value("max_adapters", uint64_t{4});
+            // Bounded, not merely truncated to u8: a typo'd 40 would otherwise
+            // ask the node to claim forty radios, and every one of those claims
+            // detaches a kernel driver on the way.
+            if (amax > 8) {
+                return Result<Config>::fail(
+                    "adapters.auto: max_adapters must be 0..8 (0 = no cap)");
+            }
+            au.max_adapters = static_cast<uint8_t>(amax);
+            if (aa.contains("tx_priority")) {
+                // Type-checked, unlike the pre-195 preset lists: nlohmann
+                // iterates an OBJECT by value and a scalar as one element, so
+                // {"a":"b"} would load as the single-entry priority ["b"] and
+                // "8812EU" as ["8812EU"] — a silently wrong election order
+                // reported by --strict as an "unknown key", which blames the
+                // wrong thing. The registry declares this kArray; the loader
+                // now agrees.
+                if (!aa.at("tx_priority").is_array()) {
+                    return Result<Config>::fail(
+                        "adapters.auto: tx_priority must be an array of part "
+                        "names (§15.2)");
+                }
+                for (const json& v : aa.at("tx_priority")) {
+                    const std::string p = v.get<std::string>();
+                    if (p.empty()) {
+                        return Result<Config>::fail(
+                            "adapters.auto: tx_priority holds an empty name");
+                    }
+                    au.tx_priority.push_back(p);
+                }
+                // Empty is not "no preference" — plan_adapters reads an empty
+                // list as "use the seed", so an explicit [] would silently mean
+                // the opposite of what it looks like.
+                if (au.tx_priority.empty()) {
+                    return Result<Config>::fail(
+                        "adapters.auto: tx_priority is empty — omit the key to "
+                        "take the default order");
+                }
+            }
+            // Power keys go to the ELECTED tx adapter, so the template is
+            // parsed as a role:"tx" stanza would be: same clamps, same
+            // rejections, one parser (§10.2/§10.3/§10.5).
+            au.tx_template.role = Role::kTx;
+            auto pw = parse_adapter_power(aa, au.tx_template, "adapters.auto");
+            if (!pw) return Result<Config>::fail(pw.error);
+            au.tx_template = std::move(*pw.value);
+        }
+
         // adapters
         std::set<std::string> adapter_names;
         for (const json& a : j.value("adapters", json::array())) {
+            // The object form has no stanzas to walk. Guarded inside the loop
+            // rather than around it so the range expression keeps the exact
+            // shape tests/config_registry_test.py reconstructs key paths from
+            // — an object here would otherwise be iterated by VALUE and the
+            // auto block read as a nameless stanza.
+            if (adapters_is_object) break;
             AdapterCfg ac;
             ac.name = a.at("name").get<std::string>();
             if (ac.name.empty()) {
@@ -209,157 +511,26 @@ Result<Config> load_config_json(const std::string& json_text) {
                                     ("adapter " + ac.name).c_str());
             if (!arole) return Result<Config>::fail(arole.error);
             ac.role = *arole.value;
-            ac.channel_mhz = a.at("channel").get<uint16_t>();
+            {
+                const int64_t chan = a.at("channel").get<int64_t>();
+                if (const char* e = channel_range_error(chan)) {
+                    return Result<Config>::fail("adapter " + ac.name +
+                                                ": channel " +
+                                                std::to_string(chan) +
+                                                std::string(" MHz ") + e);
+                }
+                ac.channel_mhz = static_cast<uint16_t>(chan);
+            }
             const uint32_t bw = a.value("bw", 20u);
             if (bw != 20 && bw != 40 && bw != 80) {
                 return Result<Config>::fail("adapter " + ac.name + ": bw must be 20, 40 or 80");
             }
             ac.bw = static_cast<uint8_t>(bw);
-            ac.power_map = a.value("power_map", std::string{});
-            // §10.2/§10.7 Pass 125: the rule is per-ADAPTER role, not per-node
-            // role. A map on a role:"rx" diversity adapter is never actuated on
-            // either node kind; a map on the single role:"tx" adapter IS —
-            // the tx-node selector commit (§10.4) or the rx-node's designated
-            // §6.4 uplink (§10.7). The old node-role test both permitted a
-            // never-applied map on a tx-node diversity adapter and blocked the
-            // one adapter that can use it on an rx node.
-            if (ac.role == Role::kRx && !ac.power_map.empty()) {
-                return Result<Config>::fail(
-                    "adapter " + ac.name +
-                    ": power_map on a role:\"rx\" adapter is never applied "
-                    "(§10.2) — put it on the role:\"tx\" adapter");
-            }
-            if (a.contains("max_power_qdb")) {
-                ac.max_power_qdb = a.at("max_power_qdb").get<int32_t>();
-                // §10.3: its absolute-REFERENCE role went with
-                // kernel-monitor (Pass 164), but it is NOT inert — on an
-                // absolute backend it is still the §10.3 ceiling (clamps
-                // power_presets_qdb here, feeds §15.3/§15.5, clamps a §10.5
-                // latch, bounds a §10.7 sweep). On a relative one those roles
-                // are the offset keys' since Pass 166/167 and its liveness is
-                // an open question, deliberately not settled. The range check
-                // stays either way: the pre-150 "disable the ceiling" idiom of
-                // a huge value (the sample configs shipped 2000 = 500 dBm)
-                // must not read as authored intent.
-                if (*ac.max_power_qdb < -40 || *ac.max_power_qdb > 120) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name + ": max_power_qdb " +
-                        std::to_string(*ac.max_power_qdb) +
-                        " out of range -40..120 qdb — it is the \u00a710.3 "
-                        "ceiling on an absolute backend; on a relative one "
-                        "use power_offset_max_qdb "
-                        "(\u00a710.3/\u00a710.5)");
-                }
-            }
-            // §10.5 (Pass 150): relative offset + its bound. Parsed for every
-            // adapter; only role:"tx" ever applies them.
-            if (a.contains("power_offset_max_qdb")) {
-                ac.power_offset_max_qdb =
-                    a.at("power_offset_max_qdb").get<int32_t>();
-            }
-            if (a.contains("power_offset_qdb")) {
-                ac.power_offset_qdb = a.at("power_offset_qdb").get<int32_t>();
-            }
-            if (ac.power_offset_qdb < -511 || ac.power_offset_qdb > 511 ||
-                ac.power_offset_max_qdb < -511 ||
-                ac.power_offset_max_qdb > 511) {
-                return Result<Config>::fail(
-                    "adapter " + ac.name +
-                    ": power_offset_qdb/power_offset_max_qdb must be "
-                    "-511..511 qdb (§10.5)");
-            }
-            // The boot point may not start above its own bound — otherwise a
-            // node boots at a power the runtime latch would refuse to set.
-            if (ac.power_offset_qdb > ac.power_offset_max_qdb) {
-                return Result<Config>::fail(
-                    "adapter " + ac.name + ": power_offset_qdb (" +
-                    std::to_string(ac.power_offset_qdb) +
-                    ") exceeds power_offset_max_qdb (" +
-                    std::to_string(ac.power_offset_max_qdb) + ") (§10.5)");
-            }
-            // §11.7 0x0A TX_POWER preset list (Pass 135). Same rx rejection as
-            // power_map above, and for the same reason: an rx adapter never
-            // resolves power, so a list there would be silently inert.
-            if (a.contains("power_presets_qdb")) {
-                if (ac.role == Role::kRx) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name +
-                        ": power_presets_qdb on a role:\"rx\" adapter is never "
-                        "applied (§10.3) — put it on the role:\"tx\" adapter");
-                }
-                for (const json& v : a.at("power_presets_qdb")) {
-                    ac.power_presets_qdb.push_back(v.get<int32_t>());
-                }
-                // §11.7 preset-index bound (Pass 68): at most 5 choices.
-                if (ac.power_presets_qdb.size() > kVcmdMaxArg + 1u) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name +
-                        ": power_presets_qdb holds more than 5 entries — "
-                        "§11.7 cmd_arg indexes at most 5 choices");
-                }
-                if (ac.power_presets_qdb.empty()) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name +
-                        ": power_presets_qdb is empty — omit the key instead");
-                }
-                // A tier may only LOWER power (Pass 135): the boot ceiling is
-                // the operator's hard limit and no runtime path may pass it.
-                // Logged when it binds — a silently lowered preset would read
-                // back as a value the operator never chose.
-                if (ac.max_power_qdb) {
-                    for (int32_t& q : ac.power_presets_qdb) {
-                        if (q > *ac.max_power_qdb) {
-                            wb_logf("config: adapter %s: power preset %d "
-                                    "qdb clamped to max_power_qdb %d "
-                                    "(§10.3)\n",
-                                    ac.name.c_str(), q, *ac.max_power_qdb);
-                            q = *ac.max_power_qdb;
-                        }
-                    }
-                }
-            }
-            // §11.7 0x0A offset-space preset list (Pass 166). Every rule of
-            // the absolute list above, with max_power_qdb ->
-            // power_offset_max_qdb. Kept as a separate block rather than a
-            // shared helper: the two differ in which key clamps them and in
-            // one being optional-typed, and a helper taking both would have
-            // to branch on that anyway.
-            if (a.contains("power_offset_presets_qdb")) {
-                if (ac.role == Role::kRx) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name +
-                        ": power_offset_presets_qdb on a role:\"rx\" adapter "
-                        "is never applied (§10.3) — put it on the "
-                        "role:\"tx\" adapter");
-                }
-                for (const json& v : a.at("power_offset_presets_qdb")) {
-                    ac.power_offset_presets_qdb.push_back(v.get<int32_t>());
-                }
-                if (ac.power_offset_presets_qdb.size() > kVcmdMaxArg + 1u) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name +
-                        ": power_offset_presets_qdb holds more than 5 entries "
-                        "— §11.7 cmd_arg indexes at most 5 choices");
-                }
-                if (ac.power_offset_presets_qdb.empty()) {
-                    return Result<Config>::fail(
-                        "adapter " + ac.name +
-                        ": power_offset_presets_qdb is empty — omit the key "
-                        "instead");
-                }
-                // A tier may only LOWER power (Pass 135/166). Unlike the
-                // absolute clamp this one always runs: power_offset_max_qdb
-                // is not optional, it defaults to 0, and a config that omits
-                // it gets exactly the §10.5 posture that default encodes.
-                for (int32_t& q : ac.power_offset_presets_qdb) {
-                    if (q > ac.power_offset_max_qdb) {
-                        wb_logf("config: adapter %s: power offset preset %d "
-                                "qdb clamped to power_offset_max_qdb %d "
-                                "(§10.3/§10.5)\n",
-                                ac.name.c_str(), q, ac.power_offset_max_qdb);
-                        q = ac.power_offset_max_qdb;
-                    }
-                }
+            {
+                // §10.2/§10.3/§10.5 power keys — one parser, both §15.2 forms.
+                auto pw = parse_adapter_power(a, ac, "adapter " + ac.name);
+                if (!pw) return Result<Config>::fail(pw.error);
+                ac = std::move(*pw.value);
             }
             cfg.adapters.push_back(std::move(ac));
         }
@@ -793,7 +964,16 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pc.value("bind_release_s", csa.bind_release_s);
                 csa.persist_channel =
                     pc.value("persist_channel", csa.persist_channel);
-                csa.home_chan = pc.value("home_chan", csa.home_chan);
+                {
+                    const int64_t hc =
+                        pc.value("home_chan", int64_t{csa.home_chan});
+                    if (const char* e = channel_range_error(hc)) {
+                        return Result<Config>::fail(
+                            "policy.csa.home_chan " + std::to_string(hc) +
+                            std::string(" MHz ") + e);
+                    }
+                    csa.home_chan = static_cast<uint16_t>(hc);
+                }
                 csa.adjacent_guard_mhz =
                     pc.value("adjacent_guard_mhz", csa.adjacent_guard_mhz);
                 if (pc.contains("channel_allowlist")) {
@@ -1403,6 +1583,32 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
         }
 
+        // §15.2 (Pass 195) the auto form's cross-checks. They live here
+        // because each needs a block parsed after `adapters`: the channel
+        // fallback needs policy.csa, the rest need air.
+        if (cfg.adapter_auto.enabled) {
+            if (cfg.air.kind != AirCfg::Kind::kRadio) {
+                return Result<Config>::fail(
+                    "adapters.auto: the auto form is a radio-backend feature "
+                    "(§15.2) — the udp dev backend has no devices to "
+                    "discover; write an adapters array instead");
+            }
+            if (cfg.adapter_auto.channel_mhz == 0) {
+                // policy.csa.home_chan is the node's power-on channel and had
+                // no reader at all before this (§11.5 CLARIFIED Pass 195).
+                // Taking the default from it is what makes one channel value
+                // enough for a whole config.
+                cfg.adapter_auto.channel_mhz = cfg.policy.csa.home_chan;
+                cfg.adapter_auto.channel_from_home_chan =
+                    cfg.adapter_auto.channel_mhz != 0;
+            }
+            if (cfg.adapter_auto.channel_mhz == 0) {
+                return Result<Config>::fail(
+                    "adapters.auto: no channel — set adapters.auto.channel or "
+                    "policy.csa.home_chan (§15.2); there is no safe default");
+            }
+        }
+
         // §15.1: <=4 UDP bindings node-wide (conservatively counting the
         // stats binding against the pool).
         if (udp_bindings > 4) {
@@ -1549,6 +1755,26 @@ std::string dump_config_summary(const Config& cfg) {
     ss << "node " << cfg.node.originator
        << " role=" << (cfg.node.role == Role::kTx ? "tx" : "rx")
        << " preferred=" << cfg.node.preferred_originator << "\n";
+    if (cfg.adapter_auto.enabled) {
+        // §15.2 (Pass 195). The summary is printed at load, BEFORE the
+        // backend has found anything, so at that point the array below is
+        // legitimately empty — say why, or the operator reads "adapters (0)"
+        // as a config that forgot its radios. load_finish() prints this
+        // once, BEFORE the backend exists — there is no second summary after
+        // the election. What describes the resolved set is the backend's own
+        // declaration table (adapter_elect.h describe_plan) and §15.5
+        // /api/v1/info.
+        const AdapterAutoCfg& au = cfg.adapter_auto;
+        ss << "adapters: AUTO (ch=" << au.channel_mhz
+           << " bw=" << unsigned(au.bw)
+           << " max=" << unsigned(au.max_adapters) << " priority=";
+        const std::vector<std::string>& prio =
+            au.tx_priority.empty() ? default_tx_priority() : au.tx_priority;
+        for (size_t i = 0; i < prio.size(); ++i) {
+            ss << (i ? "," : "") << prio[i];
+        }
+        ss << (au.tx_priority.empty() ? " [seed])\n" : ")\n");
+    }
     ss << "adapters (" << cfg.adapters.size() << "):\n";
     for (const AdapterCfg& a : cfg.adapters) {
         ss << "  " << a.name << " role=" << (a.role == Role::kTx ? "tx" : "rx")
@@ -1573,6 +1799,18 @@ std::string dump_config_summary(const Config& cfg) {
                << (s.classifier == RtpClassifier::kH264   ? "h264"
                    : s.classifier == RtpClassifier::kH265 ? "h265"
                                                           : "size");
+        }
+        // §15.2 streams[].originator. Printed because it is otherwise
+        // invisible: it is a legitimate key so --check --strict says nothing,
+        // and a stale pin makes every OTHER craft unlatchable at boot with no
+        // log line anywhere (bench 2026-08-30 — a ground pinned to a craft
+        // that was not present scouted, claimed and heard a second craft while
+        // reporting "latched": false, and the §11.6 campaign then reverted).
+        // The pin is a boot seed, not a lock: a committed selection repins
+        // every want (RxEngine::select_originator), and a §11.6 revert
+        // restores it — so a craft whose claims always revert never escapes.
+        if (s.originator) {
+            ss << " pin=" << *s.originator;
         }
         ss << "\n";
     }

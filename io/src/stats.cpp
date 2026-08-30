@@ -98,6 +98,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_i32(out, a.evm);
         out += ",\"evm_valid\":";
         append_bool(out, a.evm_valid);
+        out += ",\"tx\":";
+        append_bool(out, a.tx);
         out += ",\"tx_submitted\":";
         append_u64(out, a.tx_submitted);
         out += ",\"tx_failed\":";
@@ -302,6 +304,10 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.dropped_deadline);
         out += ",\"nacks_sent\":";
         append_u64(out, s.nacks_sent);
+        out += ",\"best_effort\":";
+        append_bool(out, s.best_effort);
+        out += ",\"table_mismatch\":";
+        append_u64(out, s.table_mismatch);
         out += ",\"nack_rtt_hist\":";
         append_hist(out, s.nack_rtt_hist);
         out += ",\"nack_rtt_max_ms\":";

@@ -50,6 +50,19 @@ bool has_uplink(const Config& c) {
         case AirCfg::Kind::kRadio:
             break;
     }
+    // §15.2 (Pass 195): under the auto form `adapters` is EMPTY at load — the
+    // array is not filled in until the backend has elected roles, and --strict
+    // classifies the pre-election config. Scanning it would call every
+    // policy.return key inert on every auto node, which is a FALSE INERT of
+    // the exact kind this file's header forbids: deploy/ground-192.168.2.199
+    // records an operator having already deleted the block on this verdict
+    // once. So mirror the archetype the election itself reads
+    // (node/include/wblink/node/air_backend.h, allow_rx_only) — a non-spectator
+    // auto node with streams ALWAYS elects a tx adapter.
+    if (c.adapter_auto.enabled) {
+        return !((c.cache.store.enabled && c.streams.empty()) ||
+                 c.node.spectator);
+    }
     for (const AdapterCfg& a : c.adapters) {
         if (a.role == Role::kTx) return true;
     }
@@ -129,6 +142,24 @@ bool backend_is_absolute(const Config& c) { return !backend_is_relative(c); }
 // error above, so it stays unpredicated until a pass that re-runs the
 // enumeration and can afford to be wrong about it.
 
+// io/src/config.cpp — policy.csa.home_chan had NO reader at all before Pass
+// 195: the array form takes its power-on channel from adapters[].channel,
+// which is required per stanza, and nothing ever consulted home_chan. It is
+// now the default the auto form's synthesized stanzas take their channel
+// from, which makes it live exactly there and nowhere else. Predicated rather
+// than left unmarked because "declared but never read" is the precise thing
+// --strict exists to surface (§11.5 CLARIFIED Pass 195).
+//
+// The gate is NOT `adapter_auto.enabled`: the fallback at config.cpp only
+// fires when `adapters.auto.channel` was omitted, so a config that sets BOTH
+// leaves home_chan exactly as unread as the array form does. `channel_source`
+// records which one the loaded channel came from, because by the time a
+// predicate runs the fallback has already collapsed the two into one field.
+bool home_chan_is_read(const Config& c) {
+    return c.adapter_auto.enabled &&
+           c.adapter_auto.channel_from_home_chan;
+}
+
 const char* kWhyNoUplink =
     "this node has no role:\"tx\" adapter on an RF backend, so \u00a715.2 gives "
     "it no uplink and return/ARQ never run";
@@ -148,6 +179,21 @@ const char* kWhyAbsolutePresets =
 const char* kWhyOffsetPresets =
     "air.kind is not radio, so this node's TX actuation is absolute and its "
     "\u00a711.7 0x0A tier reads adapters[].power_presets_qdb instead";
+const char* kWhyHomeChanUnread =
+    "no code path reads policy.csa.home_chan here \u2014 the power-on channel "
+    "is adapters[].channel on the array form, and adapters.auto.channel when "
+    "the auto form sets it explicitly. It is read ONLY when the auto form "
+    "omits a channel and falls back to it (\u00a711.5)";
+// §15.2 (Pass 195): the auto form is refused on every non-radio backend, and
+// radio is relative — so unlike its array twin this key is inert in 100% of
+// configs that can load, not merely on some backends. It is registered rather
+// than dropped because the shared power parser reads it (a --strict "unknown
+// key" would be wrong), and its remedy names the AUTO path: the array form's
+// "adapters[].power_offset_presets_qdb" does not exist in an auto config.
+const char* kWhyAutoAbsolutePresets =
+    "the \u00a715.2 auto form is radio-only and radio is a RELATIVE backend "
+    "(\u00a710.5), so this absolute list can never bind \u2014 the \u00a711.7 "
+    "0x0A tier reads adapters.auto.power_offset_presets_qdb instead";
 const char* kWhyCalibIdGone =
     "\u00a710.6 identity tiers 2-4 went with kernel-monitor (Pass 164); the "
     "radio backend keys the calibration artifact on the EFUSE MAC and has no "
@@ -155,7 +201,18 @@ const char* kWhyCalibIdGone =
 
 
 const KeyEntry kKeys[] = {
-    {"adapters",                                  KeyType::kArray},
+    {"adapters",                                  KeyType::kArrayOrObject},
+    {"adapters.auto",                             KeyType::kObject},
+    {"adapters.auto.bw",                          KeyType::kNumber},
+    {"adapters.auto.channel",                     KeyType::kNumber},
+    {"adapters.auto.max_adapters",                KeyType::kNumber},
+    {"adapters.auto.max_power_qdb",               KeyType::kNumber},
+    {"adapters.auto.power_map",                   KeyType::kString},
+    {"adapters.auto.power_offset_max_qdb",        KeyType::kNumber},
+    {"adapters.auto.power_offset_presets_qdb",    KeyType::kArray, backend_is_relative, kWhyOffsetPresets},
+    {"adapters.auto.power_offset_qdb",            KeyType::kNumber},
+    {"adapters.auto.power_presets_qdb",           KeyType::kArray, never_live, kWhyAutoAbsolutePresets},
+    {"adapters.auto.tx_priority",                 KeyType::kArray},
     {"adapters[].bus",                            KeyType::kString},
     {"adapters[].bw",                             KeyType::kNumber},
     {"adapters[].calib_id",                       KeyType::kString, never_live, kWhyCalibIdGone},
@@ -294,7 +351,7 @@ const KeyEntry kKeys[] = {
     {"policy.csa.adjacent_guard_mhz",             KeyType::kNumber},
     {"policy.csa.bind_release_s",                 KeyType::kNumber},
     {"policy.csa.channel_allowlist",              KeyType::kArray},
-    {"policy.csa.home_chan",                      KeyType::kNumber},
+    {"policy.csa.home_chan",                      KeyType::kNumber, home_chan_is_read, kWhyHomeChanUnread},
     {"policy.csa.min_interval_s",                 KeyType::kNumber},
     {"policy.csa.persist_channel",                KeyType::kBool},
     {"policy.csa.psk",                            KeyType::kString},
@@ -304,6 +361,7 @@ const KeyEntry kKeys[] = {
     {"policy.fec",                                KeyType::kObject},
     {"policy.fec.overhead_frac",                  KeyType::kNumber},
     {"policy.fec.scheme",                         KeyType::kString},
+    {"policy.mtu_default",                        KeyType::kString},
     {"policy.report_hz",                          KeyType::kNumber},
     {"policy.report_timeout_ms",                  KeyType::kNumber},
     {"policy.return",                             KeyType::kObject, has_uplink, kWhyNoUplink},
@@ -434,6 +492,7 @@ const char* type_name(KeyType t) {
         case KeyType::kNumber:         return "number";
         case KeyType::kBool:           return "bool";
         case KeyType::kStringOrNumber: return "string|number";
+        case KeyType::kArrayOrObject: return "array|object";
     }
     return "?";
 }

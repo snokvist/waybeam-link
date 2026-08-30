@@ -1,5 +1,5 @@
 {
-  "_comment": "CV610 craft (.181): RTL8733BU on devourer at 5745/HT20, originator 18 / net_id 1 — distinct from the .232 craft (17/0) for dual-craft testing. §10.5 TX power is BENCH-LOW: power_offset_qdb -96 is this unit's measured floor, 24 dB below the EFUSE table, chosen for 50 cm bench geometry — RAISE IT before any range or flight test (see deploy/README.md). venc §9.6 bitrate actuation ON (live-verified 2026-08-15): max_bitrate_kbps 12288 (operator, 2026-08-16 — the 8000 first pinned here was too strict). The 8000 figure came from the 720p100 profile bring-up (venc video0.size 1280x720; ~1030 pps, air loss 0.3%, CPU ~60% of one core vs ~99% at 1080p/12000), which measured a CPU wall, not a link wall. 12288 sits just above the 12000 that measured zero drops at 1080p in-process and below the 13000 that dropped 0.3-2.3 fps — re-measure if frames start slipping. Ceiling context: 8733BU rung-5 drain is ~14.4 Mbps standalone; IN-PROCESS (waybeam-hub mod_wblink tx) hub residency costs ~1 Mbps of TX-pump margin (13000 clean standalone dropped 0.3-2.3 fps in-process; 12000 measured zero at 1080p) — the table-8733b derived target (19.6 Mbps) overshoots because its airtime/FEC constants are 8812-calibrated seeds (§17 re-derive pending). §7.5 uplink streams mirror the .232 craft.",
+  "_comment": "CV610 craft (.181): RTL8733BU on devourer at 5745/HT20, originator 18 / net_id 1 \u2014 distinct from the .232 craft (17/0) for dual-craft testing. \u00a710.5 TX power is BENCH-LOW: power_offset_qdb -96 is this unit's measured floor, 24 dB below the EFUSE table, chosen for 50 cm bench geometry \u2014 RAISE IT before any range or flight test (see deploy/README.md). venc \u00a79.6 bitrate actuation ON (live-verified 2026-08-15): max_bitrate_kbps 12288 (operator, 2026-08-16 \u2014 the 8000 first pinned here was too strict). The 8000 figure came from the 720p100 profile bring-up (venc video0.size 1280x720; ~1030 pps, air loss 0.3%, CPU ~60% of one core vs ~99% at 1080p/12000), which measured a CPU wall, not a link wall. 12288 sits just above the 12000 that measured zero drops at 1080p in-process and below the 13000 that dropped 0.3-2.3 fps \u2014 re-measure if frames start slipping. Ceiling context: 8733BU rung-5 drain is ~14.4 Mbps standalone; IN-PROCESS (waybeam-hub mod_wblink tx) hub residency costs ~1 Mbps of TX-pump margin (13000 clean standalone dropped 0.3-2.3 fps in-process; 12000 measured zero at 1080p) \u2014 the table-8733b derived target (19.6 Mbps) overshoots because its airtime/FEC constants are 8812-calibrated seeds (\u00a717 re-derive pending). \u00a77.5 uplink streams mirror the .232 craft.",
   "node": {
     "originator": 18,
     "role": "tx",
@@ -9,7 +9,7 @@
   "profile_table": "/etc/waybeam-link/table-8733b.json",
   "adapters": [
     {
-      "_comment": "§10.5 offset space. The 8733BU gained its TX-power actuator in devourer #399 (vendored at 5bf059a) — before that GetTxPowerCaps().supported was false and every write landed on IRtlDevice's do-nothing default, so this adapter deliberately carried no power keys. Floor MEASURED at the ground 2026-08-16, not assumed: 0/-16/-32/-48/-64/-80/-96 qdb read -32/-38/-40/-42/-46/-54/-56 dBm — 96 qdb commanded, 24 dB delivered, dead-on the 0.25 dB/qdB nominal, video held ~100 fps at every step and the craft's own RX of the uplink never moved. -112 and -128 add nothing and past -128 the actuator reports saturated_low true (the int8 delta field's rail). power_offset_max_qdb 16 is the measured edge of USABLE overdrive on this part: +16 qdb buys +2.8 dB while EVM already goes -62 -> -50, and +32 collapses it to -18 with SNR never noticing.",
+      "_comment": "\u00a710.5 offset space. The 8733BU gained its TX-power actuator in devourer #399 (vendored at 5bf059a) \u2014 before that GetTxPowerCaps().supported was false and every write landed on IRtlDevice's do-nothing default, so this adapter deliberately carried no power keys. Floor MEASURED at the ground 2026-08-16, not assumed: 0/-16/-32/-48/-64/-80/-96 qdb read -32/-38/-40/-42/-46/-54/-56 dBm \u2014 96 qdb commanded, 24 dB delivered, dead-on the 0.25 dB/qdB nominal, video held ~100 fps at every step and the craft's own RX of the uplink never moved. -112 and -128 add nothing and past -128 the actuator reports saturated_low true (the int8 delta field's rail). power_offset_max_qdb 16 is the measured edge of USABLE overdrive on this part: +16 qdb buys +2.8 dB while EVM already goes -62 -> -50, and +32 collapses it to -18 with SNR never noticing.",
       "name": "bu-craft",
       "role": "tx",
       "channel": 5745,
@@ -53,7 +53,7 @@
       }
     },
     {
-      "_comment": "§7.5 uplink RC delivery — into mod_telemetry's UDP bind",
+      "_comment": "\u00a77.5 uplink RC delivery \u2014 into mod_telemetry's UDP bind",
       "stream_id": 2,
       "stream_type": "CONTROL",
       "dir": "out",
@@ -63,7 +63,7 @@
       }
     },
     {
-      "_comment": "downlink telemetry ingest — hub telemetry.udp_target points here",
+      "_comment": "downlink telemetry ingest \u2014 hub telemetry.udp_target points here",
       "stream_id": 3,
       "stream_type": "TELEMETRY",
       "dir": "in",
@@ -75,8 +75,10 @@
   ],
   "air": {
     "kind": "radio",
-    "_comment_usb_tx_agg": "USB TX aggregation: frames per bulk-OUT URB. Host CPU only — same frames, same airtime, and it defers nothing, because it batches only frames the framer already emitted back to back. Measured on THIS craft 2026-08-17 at ~1100 pps: 337->260 and 316->223 us/frame, 8.6-10.5 points of one core, pps unchanged (1104->1101, 1107->1100). Mechanism confirmed at the kernel on the same 8733BU part: 10974 -> 4347 bulk-OUT URBs for identical frames, frames/URB 1.00 -> 2.52 — not 3.00, because partial runs flush at fan-out boundaries and control frames stay unbatched.",
-    "usb_tx_agg": 3
+    "_comment_usb_tx_agg": "USB TX aggregation: frames per bulk-OUT URB. Host CPU only \u2014 same frames, same airtime, and it defers nothing, because it batches only frames the framer already emitted back to back. Measured on THIS craft 2026-08-17 at ~1100 pps: 337->260 and 316->223 us/frame, 8.6-10.5 points of one core, pps unchanged (1104->1101, 1107->1100). Mechanism confirmed at the kernel on the same 8733BU part: 10974 -> 4347 bulk-OUT URBs for identical frames, frames/URB 1.00 -> 2.52 \u2014 not 3.00, because partial runs flush at fan-out boundaries and control frames stay unbatched.",
+    "usb_tx_agg": 3,
+    "mcs_probe": true,
+    "_mcs_probe_comment": "\u00a79.4 ARMED (operator ruling 2026-08-30, Pass 196: fleet-wide, per-DIE). RTL8733B is stage-0-proven. TX-side half only: the schedule is table content hashed into table_version, so this does nothing at a RECEIVER whose profile_table differs. This craft runs table-8733b.json (tv 164) while the x86 ground runs table.example.json (tv 242) \u2014 measured 2026-08-30 \u2014 so probes are SCHEDULED here and UNOBSERVED there until the pairing shares a table. \u00a79.4 guard (4) makes that visible: probe_observed stays 0 and the RX reports 0xFFFF rather than a phantom veto."
   },
   "policy": {
     "report_timeout_ms": 750,
@@ -128,7 +130,7 @@
     "enabled": true,
     "recovery_enabled": true,
     "max_bitrate_kbps": 12288,
-    "_modes_comment": "§15.5/§16 operating-mode store. mode_apply_cmd being non-empty is what flips apply_configured true and makes §11.7 0x07 MODE answerable. The nine imx662-*.json from profiles/modes/ install into modes_dir; apply-mode.conf next to them sets VENC_RESTART=api, WITHOUT WHICH an apply would run S95waybeam restart and unload the CV610 MPP stack. Catalog fingerprint 9-54cfcc7e — the ground pins the same nine under originator 18.",
+    "_modes_comment": "\u00a715.5/\u00a716 operating-mode store. mode_apply_cmd being non-empty is what flips apply_configured true and makes \u00a711.7 0x07 MODE answerable. The nine imx662-*.json from profiles/modes/ install into modes_dir; apply-mode.conf next to them sets VENC_RESTART=api, WITHOUT WHICH an apply would run S95waybeam restart and unload the CV610 MPP stack. Catalog fingerprint 9-54cfcc7e \u2014 the ground pins the same nine under originator 18.",
     "modes_dir": "/etc/waybeam-link/modes",
     "mode_apply_cmd": "/etc/waybeam-link/modes/apply-mode.sh"
   },

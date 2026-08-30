@@ -6,6 +6,7 @@
 // pre-position commit-on-armed + rendezvous beacons, ack-timeout abort,
 // revert-on-no-video at the T_switch-anchored deadline), and the §11.3
 // selector freeze pause.
+#include <cstdio>
 #include "wblink/csa.h"
 
 #include <string_view>
@@ -743,7 +744,100 @@ int main() {
         // Pass 92: the seed the ENGINE ships. Pass 89 ruled 500 ms; the value
         // that actually runs comes from §15.2 (config_test pins that it is
         // derived from this constant, not restated).
-        CHECK_EQ_U(kCsaVerifyTimeoutMsDefault, 500u);
+        // §11.2 (Pass 197) the dt budget IS the retune class, and quick-connect
+    // was issuing the class §11.2 rejected. Pinned both ways: class 0 = 300 ms
+    // (Pass 91 raised it from 150 for exactly this reason), class 1 = 500 ms.
+    {
+        CsaParams cls_pol = policy_with_psk();
+        CsaIssuer c0(cls_pol);
+        CHECK(c0.start({9, 0, 1234}, 5745, 0, /*retune_class=*/0, 5805, 0, 4, 0));
+        const auto a0 = c0.tick(0);
+        CHECK_EQ_U(a0.kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSendCopy));
+        CHECK_EQ_U(a0.pkt.dt_to_switch_ms, 300);
+        CHECK_EQ_U(a0.pkt.retune_class, 0);
+
+        CsaIssuer c1(cls_pol);
+        CHECK(c1.start({9, 0, 1234}, 5745, 0, /*retune_class=*/1, 5805, 0, 4, 0));
+        const auto a1 = c1.tick(0);
+        CHECK_EQ_U(a1.pkt.dt_to_switch_ms, 500);
+        CHECK_EQ_U(a1.pkt.retune_class, 1);
+    }
+
+    // §11.6 (Pass 197) WHY class 1 loses campaigns that class 0 wins, in the
+    // one quantity the issuer alone can express: how long it sits ALONE on the
+    // target. It commits the instant the craft ACKs (Pass 69 pre-position),
+    // but the craft does not leave the old channel until T_switch — so the
+    // issuer hears nothing for (T_switch - commit). Class 1 doubles that
+    // silence, and it is silence the §11.6 rx_liveness_ms guard counts while
+    // verify_timeout_ms does not. Bench 2026-08-30, .242 vs .181, SAME-channel
+    // campaigns so retune distance was not a confound: class 0 confirmed
+    // 20/20, class 1 8/20 REVERTED.
+    {
+        CsaParams sil_pol = policy_with_psk();
+        uint64_t commit_us[2] = {0, 0};
+        const uint16_t dt_ms[2] = {300, 500};
+        for (int klass = 0; klass < 2; ++klass) {
+            CsaIssuer is(sil_pol);
+            CHECK(is.start({9, 0, 1234}, 5745, 0, static_cast<uint8_t>(klass),
+                           5805, 0, 4, 0));
+            for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+            is.note_craft_armed(100'000);
+            const auto commit = is.tick(101'000);
+            CHECK_EQ_U(commit.kind,
+                       static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+            commit_us[klass] = 101'000;
+            // Evidence (Pass 197): the ACK landed, nothing else has yet.
+            const CsaIssuer::Evidence ev = is.evidence();
+            CHECK(ev.armed_seen);
+            CHECK(!ev.landing_seen);
+            CHECK(!ev.video_seen);
+            // T_switch - commit: the pre-position silence.
+            CHECK_EQ_U(static_cast<uint64_t>(dt_ms[klass]) * 1000 - commit_us[klass],
+                       klass == 0 ? 199'000u : 399'000u);
+        }
+    }
+
+    // §11.2 (Pass 197) A CAMPAIGN MUST ALWAYS TERMINATE. kAnnounce's only exit
+    // used to be emitting all kCopies, and the only campaign timeout lives in
+    // kAwaitAck — so an issuer that ran out of copy window with copies still
+    // owed sat in kAnnounce forever: never committing, never aborting, and
+    // refusing every later claim with "claim busy (campaign active)". Latent
+    // since Pass 90 and REACHED by this Pass: class 0's 300 ms dt leaves a
+    // 250 ms copy window, and an in-process hub sharing a thread with decode
+    // and OSD render does not tick 5 times inside it. Device-observed on the
+    // .242 ground before the fix; pinned here at tick periods either side of
+    // the boundary, for BOTH classes, because a class-1 regression would be
+    // just as stuck.
+    {
+        CsaParams term_pol = policy_with_psk();
+        const uint64_t ticks[] = {1'000, 20'000, 60'000, 80'000, 100'000,
+                                  250'000};
+        for (uint8_t klass = 0; klass < 2; ++klass) {
+            for (uint64_t tk : ticks) {
+                CsaIssuer is(term_pol);
+                CHECK(is.start({9, 0, 1234}, 5745, 0, klass, 5805, 0, 4, 0));
+                bool ended = false;
+                // No craft ever ACKs, so the only correct end is kAbort.
+                for (uint64_t t = 0; t <= 5'000'000 && !ended; t += tk) {
+                    if (is.tick(t).kind ==
+                        CsaIssuer::IssuerAction::Kind::kAbort) {
+                        ended = true;
+                    }
+                }
+                if (!ended) {
+                    std::fprintf(stderr,
+                                 "  campaign WEDGED: class %u, tick %llu us\n",
+                                 unsigned(klass),
+                                 static_cast<unsigned long long>(tk));
+                }
+                CHECK(ended);
+                CHECK(!is.active());
+            }
+        }
+    }
+
+    CHECK_EQ_U(kCsaVerifyTimeoutMsDefault, 500u);
         CHECK_EQ_U(CsaParams{}.verify_timeout_ms, 500u);
     }
     {

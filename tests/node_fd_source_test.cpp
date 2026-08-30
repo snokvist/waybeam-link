@@ -60,7 +60,10 @@ Config fd_config(int fd_a, int fd_b) {
 // contract, not just of the case under test — and the enumerate check must
 // come first, because an EACCES on an unprivileged host makes an enumerating
 // case look like a clean refusal. That accident is exactly what hid this once.
-bool create_fails_containing(const Config& cfg, const char* needle) {
+// Takes cfg BY VALUE: AirBackend::create writes the resolved adapter array
+// back into it (§15.2 Pass 195), and a helper that quietly mutated the
+// caller's fixture would make the case order matter.
+bool create_fails_containing(Config cfg, const char* needle) {
     auto r = node::AirBackend::create(cfg);
     CHECK(!r);  // a pass here means a USB device was opened and brought up
     if (r) return false;

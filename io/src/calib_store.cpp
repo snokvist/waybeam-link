@@ -2,6 +2,10 @@
 // §10.6 (Pass 120) calibration artifact persistence — see calib_store.h.
 #include "wblink/calib_store.h"
 
+#include <sys/stat.h>
+
+#include <cerrno>
+
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -31,7 +35,19 @@ bool write_atomic(const std::string& path, const std::string& body) {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) return false;
         f << body;
-        if (!f.good()) return false;
+        // close() BEFORE the check, and remove the partial file: a buffered
+        // stream reports ENOSPC/EIO only when the buffer is actually flushed,
+        // so testing good() at scope exit — where the destructor swallows the
+        // error — promotes a truncated temp file over a valid artifact. The
+        // §10.7 twin (io/src/uplink_calib_store.cpp) was fixed for exactly
+        // this; §10.6 was left behind, and Pass 195's legacy fallback makes it
+        // matter more: a zero-length per-identity file falls through to a
+        // superseded artifact.
+        f.close();
+        if (!f.good()) {
+            std::remove(tmp.c_str());
+            return false;
+        }
     }
     return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
@@ -70,6 +86,18 @@ uint8_t fingerprint_of(const std::string& body) {
 
 }  // namespace
 
+std::string calib_identity_slug(const std::string& identity) {
+    std::string out;
+    out.reserve(identity.size());
+    for (char c : identity) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                        c == '.' || c == '_' || c == '-';
+        out += ok ? c : '_';
+    }
+    return out;
+}
+
 std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
                            const std::string& efuse_mac) {
     (void)adapter;  // tiers 2-4 retired with kernel-monitor (Pass 164)
@@ -96,7 +124,8 @@ std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
 uint8_t calib_store_write(const std::string& dir, const std::string& identity,
                           const CalibArtifact& a) {
     const std::string body = artifact_json(identity, a);
-    if (!write_atomic(dir + "/artifact.json", body)) {
+    const std::string slug = calib_identity_slug(identity);
+    if (!write_atomic(dir + "/artifact-" + slug + ".json", body)) {
         return 0;
     }
     // Operator-readable §10.2 curve twin (advisory; artifact.json is the
@@ -116,12 +145,41 @@ uint8_t calib_store_write(const std::string& dir, const std::string& identity,
         curve += row;
     }
     curve += "0xffff\n";
-    (void)write_atomic(dir + "/curve.txt", curve);
+    (void)write_atomic(dir + "/curve-" + slug + ".txt", curve);
     return fingerprint_of(body);
 }
 
-Result<CalibStored> calib_store_load(const std::string& dir) {
-    const std::string body = read_file(dir + "/artifact.json");
+Result<CalibStored> calib_store_load(const std::string& dir,
+                                    const std::string& identity) {
+    const std::string own =
+        dir + "/artifact-" + calib_identity_slug(identity) + ".json";
+    std::string body = read_file(own);
+    if (body.empty()) {
+        // ABSENT, not merely unreadable. read_file() cannot tell "no file"
+        // from "zero bytes", and a zero-byte file is what a failed write
+        // leaves — so keying the fallback on emptiness alone would let a
+        // truncated write resurrect a SUPERSEDED legacy artifact and install
+        // it as a fresh boot auto-load. Pre-195 the same truncation gave "no
+        // artifact" and the node stayed on the §10.5 safe boot offset, which
+        // is the behaviour to preserve.
+        // ENOENT specifically. `ifstream::good()` is false for EVERY open
+        // failure — EACCES on a root-owned artifact under a dropped-privilege
+        // daemon, EMFILE during a multi-adapter boot — and reading those as
+        // "absent" would resurrect the superseded legacy artifact through a
+        // different errno than the one this guard was added to close.
+        struct stat st;
+        if (::stat(own.c_str(), &st) == 0 || errno != ENOENT) {
+            return Result<CalibStored>::fail(
+                "artifact-<identity>.json is present but unreadable or empty "
+                "(a failed write?) — refusing to fall back to the pre-195 "
+                "artifact.json");
+        }
+        // Pre-Pass-195 layout. Read it, but do not privilege it: the stored
+        // identity is parsed below exactly as for a per-identity file and the
+        // caller's own match check decides, so a legacy artifact belonging to
+        // a different unit is refused the same way it always was.
+        body = read_file(dir + "/artifact.json");
+    }
     if (body.empty()) {
         return Result<CalibStored>::fail("no artifact");
     }

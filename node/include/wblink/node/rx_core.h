@@ -18,6 +18,7 @@
 // `node/` may use `core/` and `io/`; neither may use `node/`.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -370,6 +371,8 @@ struct RxCore {
             st.dropped_superseded = info.counters.dropped_superseded;
             st.dropped_deadline = info.counters.dropped_deadline;
             st.nacks_sent = info.counters.nacks_sent;
+            st.best_effort = info.best_effort;
+            st.table_mismatch = info.counters.table_mismatch;
             st.nack_rtt_hist = info.counters.nack_rtt_hist;
             st.nack_rtt_max_ms = info.counters.nack_rtt_max_ms;
             st.nack_rtt_samples = info.counters.nack_rtt_samples;
@@ -609,6 +612,49 @@ struct RxCore {
         }
     }
 
+    // §3.4: announce the best-effort fallback ONCE per stream. The downgrade
+    // is correct and deliberate, but until now it was completely silent — the
+    // stream keeps delivering by diversity and FEC while ARQ eligibility,
+    // §6.2-2 supersession and deadline drops are all switched off, and the
+    // counters that would betray it (nacks_sent, dropped_superseded,
+    // dropped_deadline) just read 0, which is what a healthy link with
+    // nothing to recover also reads. Measured 2026-08-30: a craft and a
+    // ground on two legitimately different §9.3 tables ran for hours with
+    // unrecoverable frames accumulating and no operator-visible cause.
+    // Latched per local_stream_id, not per tuple: a re-latch under the same
+    // mismatch is the same standing condition, not news.
+    void log_best_effort_edges() {
+        for (const RxStreamInfo& info : engine_.streams()) {
+            if (!info.best_effort) continue;
+            const uint8_t id = info.local_stream_id;
+            if (std::find(best_effort_warned_.begin(),
+                          best_effort_warned_.end(),
+                          id) != best_effort_warned_.end()) {
+                continue;
+            }
+            best_effort_warned_.push_back(id);
+            wb_logf("rx: stream %u §3.4 BEST-EFFORT — peer table_version %u "
+                    "!= local %u; ARQ, supersession and deadline drops are "
+                    "DISABLED for this stream. Sticky: aligning the tables "
+                    "does not recover it, the stream must re-latch.\n",
+                    unsigned(id), unsigned(info.peer_table_version),
+                    unsigned(local_table_version_.value_or(0)));
+        }
+    }
+
+    // §3.4: is the VIDEO stream currently running degraded? /features
+    // publishes ARQ as an operator latch, which cannot see this — the two
+    // senses have to be distinguishable or "arq_enabled: true" keeps being
+    // read as "ARQ is working".
+    bool video_best_effort() const {
+        for (const RxStreamInfo& info : engine_.streams()) {
+            if (info.stream_type == stream_type::kRtp && info.best_effort) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // §3.9 Pass 106 early exit: an IRAP-flagged frame reaching a frame-SHM
     // egress ring is the link's own observable proxy for "the consumer now has
     // something to start from". RTP egress has no equivalent — there the
@@ -654,6 +700,8 @@ struct RxCore {
     bool recovery_on_latch_ = false;
     LatchRecovery latch_recovery_;
     std::vector<LatchStream> latch_scratch_;  // reused; see emit_latch_recovery
+    // §3.4 one-shot-per-stream warn latch; see log_best_effort_edges.
+    std::vector<uint8_t> best_effort_warned_;
     std::optional<SelectorState> remote_selector_state_;
     uint64_t remote_selector_state_ms_ = 0;
     // §3.15 (Pass 153) acceptance latch: the (originator, session) tuple of

@@ -12,6 +12,176 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — the CSA retune class, measured: class 1 loses 40% of campaigns class 0 wins
+
+The `.242` x86 ground (2 ears: 8812CU rx + 8812AU tx, auto-elected) against the
+`.181` CV610 craft (8733BU) on 5700 MHz. **Same-channel** campaigns —
+`POST /api/v1/csa {"mhz":5700,"class":K}` while already resting on 5700 — so the
+retune distance is zero on both ends and `retune_class` is the only variable.
+20 campaigns per arm, 6.5 s apart (`min_interval_s` is 5).
+
+| retune_class | dt budget | confirmed | reverted |
+|---|---|---|---|
+| 0 | 300 ms | **20** | 0 |
+| 1 | 500 ms | 12 | **8** |
+
+Verdict latency was 0.90 s for every class-0 confirm, and 1.01 s (confirm) /
+1.12 s (revert) at class 1 — the extra 200 ms is the dt difference, so the
+campaigns are running the arithmetic §11.2 describes.
+
+**This under-states it.** The operator's actual failure was `quickconnect`,
+which is a CROSS-channel move (ground on 5805 or 5540, craft on 5700) and was
+observed reverting **7/7** before the class was changed. Same-channel was chosen
+here to isolate the class; the real path adds retune time on top.
+
+**What class 1 costs that class 0 does not.** `T_switch - commit`: the issuer
+commits the instant the craft ACKs (Pass 69 pre-position) but the craft does not
+leave the old channel until T_switch, so the issuer sits alone on the target for
+~400 ms at class 1 against ~200 ms at class 0. That silence is outside
+`verify_timeout_ms` and inside the §11.6 `rx_liveness_ms` guard (seed 750). A
+backend re-init mid-campaign was observed directly: `GET /api/v1/stats` adapter
+`rx` froze and every stream counter reset to 0 about 6 s after a quick-connect.
+
+**Second run, degraded uplink (same day, after the ground's 8812AU TX ear
+partially wedged — 32 pkt/s against the 8812CU's 1378 on the same channel).**
+The asymmetry got *sharper*, not noisier: **class 0 confirmed 6/6, class 1
+reverted 4/4.** Running total 26/26 vs 12/24. The §11.6 revert reason added in
+this Pass named it on every class-1 attempt: `armed=1 landed=1 video=0` — the
+craft ACKed and the issuer saw it land, but no `CSA_ARMED`-**clear** frame
+arrived before the deadline, which is Pass 89's commit proof failing because
+the craft needs the (impaired) uplink to reach COMMITTED. Three seconds to read
+what previously took a source dive.
+
+**Not isolated:** whether the re-init is the mechanism for every one of the 8
+class-1 reverts, or only for the long tail. The A/B settles which class to ship;
+it does not settle why each individual campaign failed. The §11.6 revert-reason
+log added in the same Pass is what would answer that on the next occurrence.
+
+## 2026-08-30 — a §9.3 table mismatch costs ARQ, not just the §9.4 probe
+
+Craft `.181` ran `table-8733b.json` (tv **164**), the `.242` ground
+`table.example.json` (tv **242**). The divergence is *deliberate* and recorded
+above (2026-08-21: rung-4 `airtime_budget_frac` 510 vs 600, the CV610 craft's
+clean point never measured) — the finding here is what it silently costs.
+
+§3.4 drops a mismatched stream to best-effort, which suspends **NACK generation,
+§6.2-2 supersession and deadline drops**. Measured on the ground while latched:
+`nacks_sent 0`, `recovered_arq 0`, and `frames_unrecoverable` climbing to 11.
+Temporarily aligning the two tables and re-latching: **0 unrecoverable in 45 s**
+at 50.6 fps, everything else unchanged. Raw radio loss did not move
+(`loss_prediversity_milli` 15-16 either way) — the fallback was costing recovery,
+not reception.
+
+**Nothing said so.** `RxStreamInfo::best_effort` existed and was populated but
+had no consumer; `counters.table_mismatch` never left `core/`;
+`dropped_unrecoverable` is not in `StreamStats` at all; RX-side
+`StreamStats::table_version` is always 0; and `/api/v1/features` reported
+`arq_enabled: true` throughout, because that field is the §11.7 operator latch
+and cannot see the engine. Pass 197 adds §15.3 `best_effort` / `table_mismatch`,
+the §15.5 `arq_effective` sibling, and a one-shot log naming both versions.
+
+**What stays open.** (a) `best_effort` is sticky — nothing clears it but stream
+teardown — so aligning tables mid-flight does not heal a latched stream. That is
+deliberate (a flapping peer must not flap the profile logic) but it means the
+recovery needs an explicit re-latch, and no REST call forces one today. (b) A
+mixed-die fleet on one ground cannot give every craft a matching table: a ground
+loads exactly one. Either per-craft tuning or ARQ, not both, until §3.4 gains a
+per-peer table.
+
+## 2026-08-30 — a RadioAir created and destroyed WITHOUT a poll hangs in teardown
+
+Found while device-verifying §15.2 auto on the x86 bench (.242, 8812CU at
+1-1). `waybeam-link adapters -c <cfg>` brought the adapter up, printed the
+election correctly, and then never exited — killed at 45 s, 60 s and 90 s.
+
+**It is not the auto path, and it is not new.** Isolated in four steps:
+
+| binary | shape | result |
+|---|---|---|
+| this branch, `adapters`, auto form | create, no poll, destroy | HANGS |
+| this branch, `adapters`, array form (role rx AND role tx) | create, no poll, destroy | HANGS |
+| this branch, `hwtrial_bringup --bus 1-1 --seconds 2` | create, POLL 2 s, destroy | exits, 9 s |
+| **main**, `hwtrial_bringup --bus 1-1 --seconds 0` | create, no poll, destroy | **HANGS** |
+
+The last row is the one that matters: a binary built from `origin/main`, with
+none of this branch's changes, hangs identically. The condition is
+create-then-destroy with no `poll_once()` in between; auto, the adapter role
+and the stanza form are all irrelevant.
+
+**Where it is stuck.** `/proc/<pid>/task/*/stack` on the hung process: main
+thread in `futex_wait` (a `std::thread::join`), plus a `libusb_event` thread in
+`poll`, one worker in `poll` and one in `nanosleep`. So `~Impl`'s
+StopRxLoop-then-join is not bringing the RX loop down.
+
+**Likely mechanism, NOT yet proven.** `~Impl` already documents the shape of
+it: *"A join can block while a bring-up is still in flight (bring-up does not
+poll the stop flag)."* With a poll in between, the RX thread is well inside
+devourer's loop when `StopRxLoop` arrives and sees the flag; with no poll,
+create() spawns the thread and teardown starts before it gets there, so the
+stop is set and cleared — or simply never observed — and the loop runs
+forever. That is a start/stop race in the backend's threading contract, and
+the fix is not in this tree: `third_party/` is never edited, so it is either an
+upstream devourer change or an `~Impl`-side handshake (an atomic the RX thread
+raises before entering the loop, which teardown waits on — and even that is not
+airtight against devourer's internal state).
+
+**What was done instead.** `waybeam-link adapters` drains for ~1 s before
+tearing down, which is what every real consumer does anyway and lets the mode
+report per-adapter `rx_frames`. 5/5 clean exits at 9–10 s. This is a
+work-around at the one new call site, not a fix: **any future caller that
+constructs a RadioAir and drops it without polling will hang**, and there is
+nothing in the type that says so.
+
+**Open.** (a) Prove the race rather than infer it — instrument the RX thread's
+entry into `StartRxLoop` against the `StopRxLoop` timestamp. (b) Decide whether
+the handshake belongs in `~Impl` or upstream. (c) Until then, consider whether
+`RadioAir::create` should simply refuse to hand back a backend nobody can
+safely destroy, or whether the poll requirement belongs on the contract in
+air_radio.h.
+
+## 2026-08-30 — the §15.2 auto TX-priority order is a seed, and it is not a ranking of "best radio"
+
+Pass 195 gives `adapters.auto.tx_priority` a default of
+`["8812EU", "8812AU", "8812CU", "8733BU"]`. That list is **tier-2 config, not
+spec law**, and this entry is why: nothing in the tree has ever measured these
+four parts against each other as *transmitters* under one controlled setup.
+The seed is an operator preference plus the scattered evidence below, and it is
+expected to move.
+
+**What is actually known, per part, from this repo's own runs:**
+
+- **8812EU (RTL8822E, Jaguar3)** — the craft TX on `.232` through every §9.4 and
+  §14 device session. USB TX aggregation verified at `usb_tx_agg` 3. It is also
+  the only part with a stage-0 proof for the §9.4 rate probe, and that proof is
+  recorded per-unit (MAC `98:03:cf:cf:a4:28`), not per-part.
+- **8812AU (RTL8812A, Jaguar1)** — the standing ground TX/RX combo. But
+  aggregation is **broken on air** on this family: at `usb_tx_agg` 2 and 3 craft
+  CPU falls ~35 points while the link goes to 966‰ loss and 0 fps (Pass 194).
+  Root-caused 2026-08-30: monitor-injected multi-block frames air 0 even with a
+  byte-correct vendor config, because injection cannot enter the
+  associated-station OQT path. So AU ranks second on general reliability while
+  being the one part that must never be paired with aggregation.
+- **8812CU (RTL8822C, Jaguar3)** — the only part whose TX-power step and
+  per-rate diffs devourer marks *measured* (`RtlJaguar3Device.cpp:1359,1371`),
+  which is a real argument for ranking it higher than third. Against it:
+  adjacent-channel bleed is reproducible on this part and peaks at a mid power
+  (2026-08-14), which an auto-elected TX cannot reason about.
+- **8733BU (RTL8733B)** — 802.11n only, 20/40 MHz, no 80. Gained a TX-power
+  actuator only in devourer #399. Aggregation verified at 3. Legitimately last
+  for a video uplink, on bandwidth alone.
+
+**What stays open.** (a) No head-to-head TX comparison at equal power, equal
+antenna, equal channel exists — the parts live on different hosts
+(`.242` AU, `.232` EU, `.181` BU), and two adapters of the same part number are
+not a replicate anyway, so a fair test needs several units per part. (b) The
+ordering conflates two different questions — which part transmits best, and
+which part the *rest of the feature set* works on (probe proofs, aggregation,
+power actuation) — and those may not have the same answer. (c) 8812CU's
+measured power step arguably outranks AU for any node that will be calibrated.
+Until (a) is run, treat the default as a starting position, not a result; a
+node that knows better sets `tx_priority`, and a node that knows exactly which
+unit it wants uses the array form.
+
 ## 2026-08-21 — walk test: on a real degrading link the §9.4 probe veto has NO operating regime, because §9.2 disarms the probe first
 
 First real range data for the §9.4 probe (#226 Leg A). Craft on battery, both
@@ -541,6 +711,10 @@ receiving at rssi −28 / snr 30.
 craft's table and its clean point was not measured here; that craft is
 CPU-limited and pins `venc.max_bitrate_kbps=12288`, which caps rungs 3–5
 anyway. The two tables now legitimately differ at rung 4 (600 vs 510).
+**What that costs was not known when this was written** — see the 2026-08-30
+entry at the top: the differing hash puts every `.181`↔`.242` stream into §3.4
+best-effort, which suspends ARQ, supersession and deadline drops. The
+divergence stands; the price is now measured and, since Pass 197, visible.
 
 ## 2026-08-20 — low-bitrate arm: per-slice overhead is ~26 BYTES, and 17 is free at 2.8 Mbps too
 
@@ -2296,10 +2470,14 @@ au 3593/3593 + cu 3600/3600 (both ears independently agree). CCX
 cross-check on every TX: `tx_reports == tx_submitted` exactly (3737,
 3741), `tx_report_fails = 0` across ~11k broadcast frames — the Jaguar
 retry rate-walk is dormant on the no-ACK path, confirmed on air.
-Kernel-monitor leg: MOOT (ruling #120). **Open:** per-unit coverage is one
+Kernel-monitor leg: MOOT (ruling #120). ~~**Open:** per-unit coverage is one
 unit per die — Pass 139's lesson wants a second unit of at least the CU/EU
 parts on the rig before probing is enabled fleet-wide (fail-closed default
-stands).
+stands).~~ **CLOSED by operator ruling 2026-08-30 (Pass 196):** the property
+measured here is a property of the die and its HAL path, not of a dongle, and
+it passed on every die present. The second-unit requirement was Pass 139
+caution carried onto a per-die measurement; it is withdrawn and probing is
+licensed fleet-wide on these dies. See §9.4 AMENDED (Pass 196).
 
 **#97 LDPC/STBC — proof-of-flight PASS both codings (AU TX → CU ear).**
 `air.ldpc`: rx_ldpc 1878/1878 received frames; control (T1, ldpc off)

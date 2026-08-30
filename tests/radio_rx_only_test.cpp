@@ -81,5 +81,92 @@ int main() {
         CHECK(fails_containing(cfg, "air.mcs_probe"));
     }
 
+    // --- §15.2 (Pass 195) the auto form's PRE-USB refusals -----------------
+    // Auto assigns roles only after bring-up, so the role-count checks above
+    // cannot run at entry. What still can, and must, is the rx-only leg: with
+    // allow_rx_only the election will produce no tx adapter however the
+    // ranking comes out, so every TX-die knob is refused here — before a
+    // single device is opened, which is what keeps this file hermetic.
+    {
+        RadioAirCfg base;
+        base.auto_cfg.enabled = true;
+        base.auto_cfg.channel_mhz = 5805;
+        base.allow_rx_only = true;
+
+        RadioAirCfg cfg = base;
+        cfg.ack_responder = true;
+        CHECK(fails_containing(cfg, "air.ack_responder"));
+        CHECK(fails_containing(cfg, "uplink-free archetype"));
+
+        cfg = base;
+        cfg.unicast_returns = true;
+        CHECK(fails_containing(cfg, "policy.return.unicast"));
+
+        cfg = base;
+        cfg.ldpc = true;
+        CHECK(fails_containing(cfg, "air.ldpc"));
+
+        cfg = base;
+        cfg.stbc = true;
+        CHECK(fails_containing(cfg, "air.stbc"));
+
+        cfg = base;
+        cfg.mcs_probe = true;
+        CHECK(fails_containing(cfg, "air.mcs_probe"));
+
+        // A bad channel is caught before any libusb work too — the auto form
+        // has no per-stanza channel for the bring-up loop to validate later.
+        cfg = base;
+        cfg.auto_cfg.channel_mhz = 1234;
+        CHECK(fails_containing(cfg, "bad channel"));
+
+        // The two §15.2 forms are exclusive: a caller that filled in both has
+        // a bug, and silently preferring one of them would hide it.
+        cfg = base;
+        cfg.adapters = {adapter("ear0", Role::kRx)};
+        CHECK(fails_containing(cfg, "forms are exclusive"));
+    }
+
+    // An EMPTY adapters array is still its own error — auto is what licenses
+    // an empty one, and nothing else does.
+    {
+        RadioAirCfg cfg;
+        cfg.allow_rx_only = true;
+        CHECK(fails_containing(cfg, "no adapters"));
+    }
+
+    // §15.2 (Pass 195): auto with an fd device set. The fd list IS the device
+    // set under auto, so EVERY entry must be a real descriptor. The -1
+    // "enumerate this stanza" sentinel is an array-form concept and must be
+    // REFUSED here rather than honoured: honouring it manufactures an
+    // enumerating stanza, which on unrooted Android — the only reason the fd
+    // source exists — finds nothing and silently shrinks the device set, and
+    // on a rooted host can claim the same physical dongle another entry
+    // supplied by fd (a wrapped unit never enters used_paths, and the dev_key
+    // guard is disabled at bus 0, which is what the wrap path reports).
+    //
+    // Hermetic: all of these are refused before any libusb call.
+    {
+        RadioAirCfg base;
+        base.auto_cfg.enabled = true;
+        base.auto_cfg.channel_mhz = 5805;
+        base.allow_rx_only = true;
+
+        RadioAirCfg cfg = base;
+        cfg.adapter_fds = {-1};
+        CHECK(fails_containing(cfg, "the fd list is the device set"));
+        // NOT the array form's parallelism message — under auto there is no
+        // stanza array for the fds to be parallel to.
+        CHECK(!fails_containing(cfg, "adapter_fds must be empty"));
+
+        cfg = base;
+        cfg.adapter_fds = {3, -1};  // one good, one sentinel
+        CHECK(fails_containing(cfg, "adapter_fds[1]"));
+
+        cfg = base;
+        cfg.adapter_fds = {-2};
+        CHECK(fails_containing(cfg, "the fd list is the device set"));
+    }
+
     return wbtest_finish("radio_rx_only_test");
 }

@@ -80,7 +80,19 @@ while [ $i -lt 80 ]; do
 done
 echo
 check "§10.6 terminal state" "done" "${state:-timeout}"
-craft "cat /etc/waybeam-link/calibration/artifact.json" > "$OUT/artifact.json" 2>/dev/null
+# §10.6 (Pass 195): one artifact per adapter identity. Resolve the file from
+# the craft rather than naming it — a hardcoded `artifact.json` still EXISTS on
+# an upgraded craft (nothing removes it) while no longer being written, so this
+# gate would compare the pre-upgrade file and pass regardless of what the run
+# under test produced. Newest wins, so a re-run of the same unit is picked up.
+CALIB_FILE=$(craft "ls -t /etc/waybeam-link/calibration/artifact-*.json 2>/dev/null | head -1")
+if [ -z "$CALIB_FILE" ]; then
+    log "  FAIL: no artifact-<identity>.json on the craft after a completed run"
+    HW_FAIL=$((HW_FAIL+1))
+    CALIB_FILE=/nonexistent
+fi
+log "  artifact: $CALIB_FILE"
+craft "cat $CALIB_FILE" > "$OUT/artifact.json" 2>/dev/null
 capi "http://127.0.0.1:8091/api/v1/calibration" > "$OUT/calibration-response.json" 2>/dev/null
 
 python3 "$(dirname "$0")/compare_calib.py" \

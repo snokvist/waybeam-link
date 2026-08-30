@@ -101,12 +101,12 @@
 namespace wblink {
 namespace node {
 
-int run_rx(const Loaded& l, const std::atomic<int>& stop,
+int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out) {
     return run_rx(l, stop, frame_out, nullptr);
 }
 
-int run_rx(const Loaded& l, const std::atomic<int>& stop,
+int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out, RxRuntimeControl* runtime_control) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
@@ -373,7 +373,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     if (auto stored = uplink_identity.empty()
                           ? Result<UplinkArtifact>::fail("no identity (D3)")
                           : uplink_calib_store_load(
-                                l.cfg.policy.calibration.artifact_dir);
+                                l.cfg.policy.calibration.artifact_dir,
+                                uplink_identity);
         stored) {
         uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
         if (stored.value->local_adapter_identity != uplink_identity) {
@@ -1507,11 +1508,23 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
             claim_rollback();
             return "failed to retune onto craft channel";
         }
-        // retune_class 1 (500 ms dt budget) gives the craft slack for the iw
-        // shell-out retune before its §11.5 verify timeout. bw code 0 = 20 MHz
-        // (v1 single-width, matching the /csa trigger).
+        // §11.2 (Pass 91) retune_class 0 — the 300 ms dt budget, NOT 500.
+        // This read `1` until Pass 197, justified by slack for "the iw
+        // shell-out retune", which stopped existing when the kernel-monitor
+        // backend was deleted in Pass 164; devourer retunes in-process.
+        // Class 1 is not a safer class 0, it is the class §11.2 already
+        // REJECTED: its 500 ms dt makes the issuer pre-position ~490 ms early
+        // and leaves the craft only verify_timeout after T_switch to retune,
+        // hear us, commit and emit a CSA_ARMED-clear frame — so the craft
+        // reaches COMMITTED on the target while the issuer reverts. Measured
+        // again 2026-08-30 on the .242 ground vs the .181 craft, same-channel
+        // campaigns so retune distance was not a confound: class 0 confirmed
+        // 20/20, class 1 did not. bw code 0 = 20 MHz (v1 single-width,
+        // matching the /csa trigger, which was already passing class 0 —
+        // which is why the OSD menu's channel jumps worked and quick-connect
+        // did not).
         const CommonPrefix pre{l.cfg.node.originator, 0, session};
-        if (!issuer.start(pre, target, 0, 1, cand->chan, 0, 4, now_us_it)) {
+        if (!issuer.start(pre, target, 0, 0, cand->chan, 0, 4, now_us_it)) {
             claim_rollback();
             // Named precisely: this is also what a target outside
             // policy.csa.channel_allowlist returns, and an empty allowlist
@@ -1673,7 +1686,9 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
                                    air.value ? &*air.value : nullptr);
         };
         h.features_json = [&] {
-            return build_features_json(l, arq_rx_enabled, false);
+            return build_features_json(l, arq_rx_enabled, false,
+                                       arq_rx_enabled &&
+                                           !rx.video_best_effort());
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {
@@ -2881,6 +2896,10 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         }
         // §3.9 Pass 106: bootstrap a decoder behind a freshly latched stream.
         rx.emit_latch_recovery(now, inject_nack);
+        // §3.4: one line, once per stream, when the peer's §9.3 table does not
+        // match ours. Cheap enough to sit on the tick — it walks the latched
+        // streams and returns after the first pass unless something changed.
+        rx.log_best_effort_edges();
         // §15.5 Pass 108: a §2 latch binds. Until this ruling `active_selection`
         // was written only by CSA campaign outcomes, so a ground that boots,
         // hears its craft and latches sat at originator 0 for its whole uptime —
@@ -3129,8 +3148,18 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 pending_selection.reset();
                 previous_selection.reset();
-                wb_logf("csa: selection reverted -> %u MHz\n",
-                        operating_chan);
+                // Name WHICH half of §11.6 failed. "no craft video" covers
+                // three distinct outcomes and the operator-visible symptom is
+                // identical for all of them; without this the only way to tell
+                // them apart was to read core/src/csa.cpp. Braced because a
+                // declaration bare in a case label crosses the next one.
+                {
+                    const CsaIssuer::Evidence ev = issuer.evidence();
+                    wb_logf("csa: selection reverted -> %u MHz "
+                            "(armed=%d landed=%d video=%d)\n",
+                            operating_chan, int(ev.armed_seen),
+                            int(ev.landing_seen), int(ev.video_seen));
+                }
                 break;
             case CsaIssuer::IssuerAction::Kind::kAbort:
                 // §15.5a (Pass 65): a failed claim (no CSA_ARMED) rolls every ear

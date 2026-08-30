@@ -217,6 +217,7 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
 
     s->last_activity_ms = now_ms;
     s->active_profile = v.hdr.active_profile;
+    s->peer_table_version = v.hdr.table_version;
 
     // §3.4: table_version mismatch drops the stream to the best-effort
     // default profile — deliver by diversity, never NACK, no supersession or
@@ -759,6 +760,7 @@ std::vector<RxStreamInfo> RxEngine::streams() const {
         info.stream_type = s.stream_type;
         info.best_effort = s.best_effort;
         info.active_profile = s.active_profile;
+        info.peer_table_version = s.peer_table_version;
         info.counters = s.counters;
         info.counters.nack_rtt_samples = static_cast<uint16_t>(
             std::min<size_t>(s.nack_rtt_ms.size(), UINT16_MAX));

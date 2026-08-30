@@ -24,6 +24,184 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 197 — §11.2 quick-connect was issuing the rejected retune class; §3.4 gets a voice (2026-08-30)
+
+**Verdict.** Two silent failures, one operator-visible symptom. (1) §11.2 Pass 91
+recorded that class-1 campaigns lose the §11.6 race and raised class 0 to 300 ms
+*instead of* using class 1 — but that ruling reached no code:
+`/api/v1/scout/quickconnect` hardcoded `retune_class = 1`, justified by slack for
+an `iw` shell-out that stopped existing when Pass 164 deleted kernel-monitor. The
+one path whose job is to connect to a craft was the one running the rejected
+class, which is why the OSD channel jumps worked and quick-connect did not.
+Re-measured on same-channel campaigns, class the only variable: **class 0
+confirmed 20/20, class 1 reverted 8/20.** (2) §3.4's best-effort fallback was
+unobservable: a table mismatch suspends ARQ eligibility, supersession and
+deadline drops, and the counters that would show it read 0 — like a healthy link.
+
+**Changed:** §11.2 (every issuer campaign uses class 0 unless the move crosses
+bands; the pre-position silence is the exposure, and `rx_liveness_ms` counts it
+while `verify_timeout_ms` does not), §11.6 (a revert MUST name which half failed
+— `armed_seen`/`landing_seen`/`video_seen`), §3.4 (the fallback MUST be
+observable, and is sticky until re-latch), §15.2 (`streams[].originator` is a
+boot pin a reverting claim can never escape; the config summary prints it),
+§15.3 (per-stream `best_effort`, `table_mismatch`), §15.5 (`arq_effective`
+beside `arq_enabled`; `csa.channel_allowlist` + `home_chan` published). No wire
+change, no packet field added, no timing default moved —
+`kCsaVerifyTimeoutMsDefault` stays 500 and `< rx_liveness_ms` is untouched.
+
+**Why the class was the bug and the window was not.** The obvious reading was
+that 500 ms is too short for an 8733B craft and a one-eared ground, and the
+obvious fix was re-deriving the seed — which drags the `< rx_liveness_ms`
+invariant with it. The measurement refused that: at a *fixed* window, changing
+only the class took the failure rate from 40% to 0. Class 1 adds
+`T_switch - commit` — ~400 ms of pre-position silence against ~200 — which sits
+outside the verify window but inside the liveness guard.
+
+**Why it took hours to find.** A revert lands on `prev_chan`; when that is a
+`home_chan` no craft occupies, the silence trips the liveness guard into a
+backend re-init — a few frames, then nothing. Every layer reported success: the
+claim returned `ok`, the craft sat in COMMITTED, `/features` said ARQ enabled.
+
+**Evidence.** Branch `impl/auto-adapters` (PR #256); `docs/findings.md`
+2026-08-30 entry for the A/B table and the §3.4 measurement.
+
+## Pass 196 — §9.4 probing is per-DIE, and the fleet dies are licensed (2026-08-30)
+
+**Verdict.** The `air.mcs_probe` enablement stops being per-unit. Operator
+ruling 2026-08-30: enable it fleet-wide and withdraw the reservations against
+it. §15.2's Pass-195 refusal of `air.mcs_probe` + `adapters.auto` goes with
+them — the two now compose.
+
+**Changed:** §9.4 (enablement clause AMENDED; two "per-unit" phrasings in the
+observability and guard-4 prose corrected to per-node), §15.2 (the refusal
+paragraph replaced), `docs/findings.md` 2026-08-08 (its "Open: per-unit
+coverage" clause struck and closed), `deploy/vehicle-192.168.2.232.json`
+(the "do not copy without its own proof" note withdrawn). No wire change, no
+default changed: probing is still off unless a config asks for it, still
+radio-only, still TX-node-only.
+
+**Why the reservation did not survive contact with the evidence.** The gated
+property is whether the silicon honours the per-packet commanded rate in the
+TX descriptor. That is a property of the die and its HAL path — there is no
+per-dongle state it could depend on — and findings.md 2026-08-08 measured it
+that way and passed on every die present: AU→CU 3600/3600 with an EMPTY
+mismatch matrix, CU→AU 3590/3590, EU→dual ears 3593/3593 + 3600/3600, and
+`tx_reports == tx_submitted` exactly across ~11k broadcast frames.
+
+The per-unit framing came from Pass 139's scar — one defective dongle once
+carried an entire architectural posture — and was applied to a measurement it
+did not fit. Pass 139's lesson is real and stays: two adapters of one part are
+not a replicate. It earns its keep where the quantity is per-unit (a power
+curve, an EFUSE table, a compressing PA). A logic path either exists in the
+HAL or it does not.
+
+**What the caution actually cost.** Three things, all found while implementing
+§15.2 auto:
+
+1. **Nobody enforced it.** `node/src/tx_node.cpp` arms the probe on
+   `l.cfg.air.mcs_probe` alone. Nothing compares the bound unit's EFUSE
+   identity against any proof, and the §10.6 D2 fallback — mac pin absent, a
+   DIFFERENT unit bound — does not disarm it. The comment above that line said
+   "on this stage-0-proven unit"; nothing checked which unit that was. The rule
+   lived only in a config comment.
+2. **It blocked auto** on every craft that had the key set, which is the one
+   craft with a probe-carrying table.
+3. It invited a fix in the wrong direction — binding the proof to a MAC —
+   which would have made an unenforceable rule enforceable rather than asking
+   whether the rule was right.
+
+**What still fails closed.** A die family with no stage-0 evidence must still
+not probe; adding one is a stage-0 run, not a config edit. Off by default,
+radio-only, TX-node-only, and the four §9.4 receiver window guards are
+untouched — guard (4) in particular, which is what stops a non-probing TX
+manufacturing a phantom veto, and which does not depend on this ruling.
+
+## Pass 195 — §15.2 `adapters` gains an auto form; §10.6 artifacts key by identity (2026-08-30)
+
+**Verdict.** `adapters` may be an OBJECT carrying an `auto` block instead of a
+hand-authored array. The node enumerates its own radios, elects one TX by part
+priority, and synthesizes the stanzas. Separately, the §10.6/§10.7 calibration
+artifacts move from one fixed filename per node to one per adapter identity.
+
+**Changed:** §15.2 (auto form, election law, enumeration filter, two
+fail-closed refusals), §10.6 (artifact filename carries the identity; legacy
+fallback), §11.5 (clarifies that `home_chan` was never read, and becomes live
+under auto). No wire change, no field removed, no existing config altered in
+meaning — an array-form config parses and behaves byte for byte as before.
+
+**Why election must follow bring-up.** RTL8812EU and RTL8812AU share USB PID
+`0x8812` (`third_party/devourer/src/WiFiDriver.cpp:45`), so the two highest
+priorities are indistinguishable from the descriptor; family comes from
+SYS_CFG2, read inside `CreateRtlDevice`, and the EFUSE MAC only during
+`InitWrite`. A pre-claim ranking cannot express the required order, and a
+separate probe pass is a second full bring-up. Auto therefore reuses the Pass
+154 sequence unchanged — claim provisionally, bring up, read identity, bind —
+and adds one branch at the point where mac pins already re-bind
+(`io/src/air_radio.cpp`).
+
+**Why RX-only needs no key.** §3.11 (Pass 162) already defines the uplink-free
+archetypes and `AirBackend::create` already derives `allow_rx_only` from
+`node.spectator || (cache.store && no streams)`. Auto elects a TX unless that
+holds, so a spectator ground stays TX-less and an ordinary ground never can be.
+Inventing an `rx_only` key would have created a second, drifting answer to a
+question the spec had settled.
+
+**The enumeration filter is a pre-existing bug.** The claim scan tested
+`idVendor != kRealtekVid` and nothing else (`io/src/air_radio.cpp`), so a
+first-free claim could open a Realtek Bluetooth, card-reader or ZeroCD device.
+Under auto — which claims up to `max_adapters` — that becomes routine rather
+than unlucky. The descriptor filter (vendor-specific interface with bulk
+IN+OUT) applies to both forms, and is preferred to a PID allowlist because a
+PID list goes stale and this does not.
+
+**Why the artifact store changed with it.** Identity was already correct: a
+swapped unit reads STALE and is refused (Pass 154 D2/D3). But the store held
+one `artifact.json` per node, so swapping A→B destroyed A's measurement and
+swapping back left the operator re-running a calibration that had already been
+performed. Under auto, where the TX is elected rather than pinned, that turns
+from an inconvenience into the normal case. Per-identity filenames make
+swap-and-return lossless; a missing per-identity file falls back to the legacy
+name and is accepted only on an identity match, so a deployed node upgrades in
+place with no migration.
+
+**Two refusals, both fail-closed.** `air.mcs_probe` + auto is a config error:
+§9.4 gates probing on a per-unit stage-0 proof, and `deploy/vehicle-192.168.2.232.json`
+records that proof for one named 8812EU MAC — an election that may land on a
+different die cannot inherit it. `air.usb_tx_agg` is applied to every claimed
+unit under auto, because the elected unit does not exist when the devices are
+constructed; this is the same concession the Pass 154 re-bind already makes for
+`tx.report`, it costs an ear one MAC-init write, and the default 0 keeps every
+deployment byte-identical.
+
+**Declared, not inferred.** The standing rejection of auto-detected spectator
+mode (archive Pass, "silently drops ARQ") is not in tension with this: auto is
+an explicitly requested mode whose full outcome is logged, printed through the
+config summary, served by `GET /api/v1/info`, and reproducible as a pasteable
+array via `waybeam-link adapters --emit`.
+
+**A busy dongle must not be fatal — found on hardware, not in review.** The
+first device run of this feature (x86 bench, 8812CU + 8812AU) failed outright:
+a running `waybeam_hub` ground held the AU via usbfs, and auto refused the
+whole node over a radio it never asked for by name. Under auto there is no
+per-device intent, so an unclaimable candidate is now logged and skipped and
+only an empty survivor set fails. The array form keeps its hard failure, where
+the operator did name the device. §15.2 records the measurement.
+
+**Also found on hardware, and NOT fixed here.** A `RadioAir` created and
+destroyed with no `poll_once()` in between hangs in `~Impl`'s join. It is
+pre-existing — `hwtrial_bringup --seconds 0` built from `origin/main` hangs
+identically — and `~Impl` already names the mechanism in its own comment
+("a join can block while a bring-up is still in flight"). The new `adapters`
+mode is simply the first shipping caller to reach it; it drains for ~1 s
+before teardown, which is what every real consumer does. The backend's
+start/stop race is its own change with its own device pass:
+`docs/findings.md` 2026-08-30 carries the isolation table and what stays open.
+
+**Not done, deliberately.** No sticky TX election across replugs (operator
+ruling 2026-08-30) — the MAC tiebreak is deterministic and the array form is
+the pin. No mac-keyed per-unit power table — the auto block's power keys cover
+the elected TX, which is the whole of the single-adapter craft case.
+
 ## Pass 194 — §15.2 aggregation becomes observable: tx_bulk / tx_bulk_failed (2026-08-29)
 
 **Verdict.** `air.usb_tx_agg` has been shippable since Pass 184 and could not

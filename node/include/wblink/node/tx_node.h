@@ -85,14 +85,24 @@ class TxRuntimeInfo;
 
 // Blocks until `stop` is set or the loop gives up. Owns no process: it does
 // not exit, fork, or install a signal handler. See the header note above.
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+//
+// §15.2 (Pass 195): the `Loaded&` is NON-CONST, and both overloads MUTATE it —
+// under the auto adapter form the stanza array does not exist until the
+// backend has elected roles, and this is where that result is written back
+// into the config every later stage reads. Three consequences for an embedder:
+// the Loaded must outlive the call and stay writable, one Loaded must not be
+// shared between two nodes, and any reference taken into `l.cfg.adapters`
+// before the call is invalidated by it. The C++ MANGLED NAME changed with the
+// signature, so a prebuilt out-of-tree C++ embedder needs a rebuild; the C ABI
+// in {rx,tx}_node_c.h is untouched.
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply = {});
 
 // Runtime-info overload (Pass 174): the loop publishes immutable status and
 // adapters/caps snapshots into the mailbox for in-process consumers. The
 // overload above remains a real symbol for existing embedders and forwards
 // here with nullptr.
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info);
 
 #endif  // WBLINK_NODE_TX

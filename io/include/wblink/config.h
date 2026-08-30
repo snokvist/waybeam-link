@@ -122,6 +122,39 @@ struct AdapterCfg {
     std::vector<int32_t> power_offset_presets_qdb;
 };
 
+// §15.2 (Pass 195) the `adapters` OBJECT form: the node discovers its own
+// radios and synthesizes the stanza array instead of the operator writing it.
+// Radio backend only; mutually exclusive with a non-empty `adapters` array.
+//
+// The election itself is pure and lives in adapter_elect.h, so it is testable
+// without hardware; this struct is only its policy input.
+struct AdapterAutoCfg {
+    bool enabled = false;
+    // Center MHz for every synthesized stanza. Defaults to
+    // policy.csa.home_chan at load; with neither set the config is refused —
+    // there is no safe default channel.
+    uint16_t channel_mhz = 0;
+    // True when channel_mhz came from policy.csa.home_chan rather than from
+    // adapters.auto.channel. Recorded because the fallback collapses the two
+    // into one field, and the §15.2 key registry has to be able to say
+    // afterwards whether home_chan was actually read (§11.5 Pass 195).
+    bool channel_from_home_chan = false;
+    uint8_t bw = 20;
+    // Cap on the claimed set, applied AFTER ranking (best N, not first N).
+    // A host's bus order has no relation to which radio should fly. 0 = no cap.
+    uint8_t max_adapters = 4;
+    // TX election order, best first. Entries match the die name or any of its
+    // marketing aliases (see adapter_elect.h). Empty at load is filled with
+    // kDefaultTxPriority — a TIER-2 SEED, not a measured ranking; see
+    // docs/findings.md 2026-08-30 for what is and is not known about it.
+    std::vector<std::string> tx_priority;
+    // Per-unit power keys for the ELECTED TX stanza. Parsed through the same
+    // helper as a role:"tx" stanza's, so the validation and clamping cannot
+    // drift between the two forms. ONLY the power fields are read — name,
+    // bus, mac, role, channel and bw on this template are never used.
+    AdapterCfg tx_template;
+};
+
 struct StreamCfg {
     uint8_t stream_id = 0;
     uint8_t stream_type = 0;  // §3.4 registry value
@@ -572,7 +605,11 @@ struct CacheCfg {
 struct Config {
     NodeCfg node;
     std::string profile_table_path;
+    // §15.2: authored stanzas, OR — under adapter_auto.enabled — empty at load
+    // and filled in by AirBackend::create from the backend's election, so that
+    // everything downstream reads an ordinary array either way (Pass 195).
     std::vector<AdapterCfg> adapters;
+    AdapterAutoCfg adapter_auto;
     std::vector<StreamCfg> streams;
     Policy policy;
     StatsCfg stats;

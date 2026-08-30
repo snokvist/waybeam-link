@@ -25,9 +25,21 @@ std::string temp_dir() {
     return d != nullptr ? std::string(d) : std::string();
 }
 
+// §10.7 (Pass 195): the store is keyed by identity, so every load names
+// the one make_artifact() writes under.
+constexpr const char* kIdentity = "bus/1-1.2";
+// The artifact file this identity writes to. Derived, never spelled out:
+// a literal here would keep passing while the store wrote somewhere else,
+// which is exactly how the tamper and truncation cases below could go
+// green against a file nobody reads.
+std::string artifact_file(const std::string& dir) {
+    return dir + "/uplink-artifact-" + calib_identity_slug(kIdentity) +
+           ".json";
+}
+
 UplinkArtifact make_artifact() {
     UplinkArtifact a;
-    a.local_adapter_identity = "bus/1-1.2";
+    a.local_adapter_identity = kIdentity;
     a.craft_originator = 17;
     a.craft_adapter_fingerprint = 0x5A;
     a.channel_mhz = 5805;
@@ -62,7 +74,7 @@ void test_round_trip() {
     const uint8_t fp = uplink_calib_store_write(dir, a);
     CHECK(fp != 0);  // 0 is the "no artifact" sentinel, never a real value
 
-    auto loaded = uplink_calib_store_load(dir);
+    auto loaded = uplink_calib_store_load(dir, kIdentity);
     CHECK(static_cast<bool>(loaded));
     if (!loaded) return;
     const UplinkArtifact& b = *loaded.value;
@@ -92,8 +104,8 @@ void test_round_trip() {
     CHECK(uplink_calib_placement_for(b, 0, true) == nullptr);
 
     // Atomic write leaves no .tmp behind.
-    CHECK(slurp(dir + "/uplink-artifact.json.tmp").empty());
-    std::remove((dir + "/uplink-artifact.json").c_str());
+    CHECK(slurp(artifact_file(dir) + ".tmp").empty());
+    std::remove(artifact_file(dir).c_str());
     std::remove(dir.c_str());
 }
 
@@ -114,7 +126,7 @@ void test_absent_bracket_round_trips() {
 
     const uint8_t fp = uplink_calib_store_write(dir, a);
     CHECK(fp != 0);
-    auto loaded = uplink_calib_store_load(dir);
+    auto loaded = uplink_calib_store_load(dir, kIdentity);
     CHECK(static_cast<bool>(loaded));  // must not be "fingerprint mismatch"
     if (loaded) {
         CHECK(!loaded.value->placements[0].has_first_bad);
@@ -126,7 +138,7 @@ void test_absent_bracket_round_trips() {
     z.placements[0].first_bad_qdb = 0;
     CHECK(uplink_calib_fingerprint(z) == fp);
 
-    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(artifact_file(dir).c_str());
     std::remove(dir.c_str());
 }
 
@@ -136,7 +148,7 @@ void test_fingerprint_is_binary_not_text() {
     const std::string dir = temp_dir();
     CHECK(!dir.empty());
     if (dir.empty()) return;
-    const std::string path = dir + "/uplink-artifact.json";
+    const std::string path = artifact_file(dir);
 
     CHECK(uplink_calib_store_write(dir, make_artifact()) != 0);
     const std::string pretty = slurp(path);
@@ -153,7 +165,7 @@ void test_fingerprint_is_binary_not_text() {
         std::ofstream f(path, std::ios::trunc);
         f << flat;
     }
-    CHECK(static_cast<bool>(uplink_calib_store_load(dir)));
+    CHECK(static_cast<bool>(uplink_calib_store_load(dir, kIdentity)));
 
     std::remove(path.c_str());
     std::remove(dir.c_str());
@@ -165,7 +177,7 @@ void test_tamper_rejected() {
     const std::string dir = temp_dir();
     CHECK(!dir.empty());
     if (dir.empty()) return;
-    const std::string path = dir + "/uplink-artifact.json";
+    const std::string path = artifact_file(dir);
 
     CHECK(uplink_calib_store_write(dir, make_artifact()) != 0);
     std::string body = slurp(path);
@@ -176,7 +188,7 @@ void test_tamper_rejected() {
         std::ofstream f(path, std::ios::trunc);
         f << body;
     }
-    auto loaded = uplink_calib_store_load(dir);
+    auto loaded = uplink_calib_store_load(dir, kIdentity);
     CHECK(!loaded);  // fingerprint disagrees
 
     // A truncated file is not applied either.
@@ -184,10 +196,10 @@ void test_tamper_rejected() {
         std::ofstream f(path, std::ios::trunc);
         f << "{\"schema\":1,";
     }
-    CHECK(!uplink_calib_store_load(dir));
+    CHECK(!uplink_calib_store_load(dir, kIdentity));
     // ...and neither is an absent one.
     std::remove(path.c_str());
-    CHECK(!uplink_calib_store_load(dir));
+    CHECK(!uplink_calib_store_load(dir, kIdentity));
     std::remove(dir.c_str());
 }
 
@@ -238,7 +250,7 @@ void test_multi_rung_forward_compat() {
     }
 
     CHECK(uplink_calib_store_write(dir, a) != 0);
-    auto loaded = uplink_calib_store_load(dir);
+    auto loaded = uplink_calib_store_load(dir, kIdentity);
     CHECK(static_cast<bool>(loaded));
     if (loaded) {
         CHECK(loaded.value->placements.size() == 8);
@@ -278,7 +290,7 @@ void test_multi_rung_forward_compat() {
         CHECK(uplink_calib_fingerprint(edited) !=
               uplink_calib_fingerprint(*loaded.value));
     }
-    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(artifact_file(dir).c_str());
     std::remove(dir.c_str());
 }
 
@@ -294,6 +306,69 @@ void test_craft_response_declares_downlink() {
 }
 
 }  // namespace
+
+// §10.7 (Pass 195) legacy fallback: a pre-195 ground has one fixed
+// uplink-artifact.json and must keep it across the upgrade — while the
+// identity gate stays the thing that decides whether it may be APPLIED.
+void test_legacy_fallback() {
+    const std::string dir = temp_dir();
+    CHECK(!dir.empty());
+    if (dir.empty()) return;
+
+    CHECK(uplink_calib_store_write(dir, make_artifact()) != 0);
+    const std::string body = slurp(artifact_file(dir));
+    CHECK(!body.empty());
+    std::remove(artifact_file(dir).c_str());
+    {
+        std::ofstream f(dir + "/uplink-artifact.json", std::ios::trunc);
+        f << body;
+    }
+
+    // Found through the fallback, and it parses + integrity-checks.
+    auto loaded = uplink_calib_store_load(dir, kIdentity);
+    CHECK(static_cast<bool>(loaded));
+    if (loaded) {
+        CHECK(loaded.value->local_adapter_identity == kIdentity);
+        // The gate that matters: the SAME unit matches...
+        CHECK(uplink_calib_matches(*loaded.value, kIdentity, 17, 0x5a, 5805, 20));
+        // ...and a different local adapter does not, so a legacy file from
+        // another dongle can be read but never applied.
+        CHECK(!uplink_calib_matches(*loaded.value, "mac/00:11:22:33:44:55", 17,
+                                    0x5a, 5805, 20));
+    }
+    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(dir.c_str());
+}
+
+// §10.7 (Pass 195): a ZERO-LENGTH per-identity artifact — what a failed write
+// leaves — must NOT fall through to the legacy file. Without this guard a
+// truncated write resurrects a SUPERSEDED placement whose identity matches, so
+// uplink_calib_matches() accepts it and the ground flies an old §10.7 point.
+// The §10.6 twin got this guard first; this is the same hole in this store.
+void test_empty_does_not_resurrect_legacy() {
+    const std::string dir = temp_dir();
+    CHECK(!dir.empty());
+    if (dir.empty()) return;
+
+    CHECK(uplink_calib_store_write(dir, make_artifact()) != 0);
+    const std::string body = slurp(artifact_file(dir));
+    {
+        std::ofstream f(dir + "/uplink-artifact.json", std::ios::trunc);
+        f << body;                       // a legacy artifact for this identity
+    }
+    {
+        std::ofstream f(artifact_file(dir), std::ios::trunc);  // truncated
+    }
+    CHECK(slurp(artifact_file(dir)).empty());
+    CHECK(!uplink_calib_store_load(dir, kIdentity));  // refused, not resurrected
+
+    // Remove the empty file and the legacy one is reachable again — the
+    // refusal is about an unusable file being PRESENT, not a permanent veto.
+    std::remove(artifact_file(dir).c_str());
+    CHECK(static_cast<bool>(uplink_calib_store_load(dir, kIdentity)));
+    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(dir.c_str());
+}
 
 int main() {
     test_craft_response_declares_downlink();
@@ -313,7 +388,7 @@ int main() {
         UplinkArtifact a = make_artifact();
         a.placements[0].placement_qdb = 5000;
         CHECK(uplink_calib_store_write(dir, a) != 0);
-        auto r = uplink_calib_store_load(dir);
+        auto r = uplink_calib_store_load(dir, kIdentity);
         CHECK(!r);
         if (!r) CHECK(r.error.find("out of range") != std::string::npos);
     }
@@ -359,5 +434,7 @@ int main() {
         CHECK(calib_identity(a, AirCfg::Kind::kRadio, {}).empty());
     }
 
+    test_legacy_fallback();
+    test_empty_does_not_resurrect_legacy();
     return wbtest_finish("uplink_calib_store_test");
 }

@@ -128,9 +128,12 @@ class UdpAir : public AirIface {
     uint16_t mtu_supported() const override { return kDefaultMaxPayload; }
     bool is_rf() const override { return false; }
     // §15.5 (Pass 172): no silicon — every capability stated false, and the
-    // chip name says which backend answered.
+    // chip name says which backend answered. §15.2 (Pass 195): `part` and
+    // `aliases` stay EMPTY rather than repeating "udp" — there is no die here,
+    // and a consumer must be able to tell "no die" from a die it does not
+    // recognise.
     AdapterCapsView adapter_caps(size_t /*adapter*/) const override {
-        return AdapterCapsView{"udp", false, false, false};
+        return AdapterCapsView{"udp", "", "", false, false, false};
     }
     // No hardware, no per-unit identity (§10.6 Pass 154).
     std::string adapter_mac(size_t) const override { return {}; }

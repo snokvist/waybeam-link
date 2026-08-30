@@ -37,6 +37,19 @@ struct AdapterStats {
     int32_t noise = 0;
     int32_t evm = 0;
     bool evm_valid = false;
+    // §15.3 (Pass 195): is THIS adapter the designated uplink? Under the
+    // §15.2 auto form the tx/rx split is ELECTED at bring-up, so a stats
+    // consumer can no longer read it out of the config — and the distinction
+    // is operationally live: the elected uplink is not necessarily the best
+    // ear, so the diversity-best RSSI a consumer computes for VIDEO overstates
+    // the margin on the RETURN path. Measured on the x86 ground 2026-08-30:
+    // best ear -47 dBm, elected uplink -54 dBm, 7 dB apart on one node.
+    //
+    // Mirrors the `role` field §15.5 /api/v1/info already publishes; it is
+    // here so a consumer of the stats plane alone does not have to infer the
+    // uplink from tx_submitted, which reads false for every adapter until the
+    // node has actually transmitted.
+    bool tx = false;
     uint64_t tx_submitted = 0;
     uint64_t tx_failed = 0;
     // §15.2: USB bulk-OUT transfers the submitted frames went out in, and
@@ -169,6 +182,18 @@ struct StreamStats {
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
     uint64_t nacks_sent = 0;
+    // §3.4 best-effort fallback. Emitted because the downgrade was otherwise
+    // INVISIBLE: a peer whose table_version differs silently loses ARQ
+    // eligibility, §6.2-2 supersession and deadline drops on this stream, and
+    // the three counters that would hint at it (nacks_sent, dropped_*) simply
+    // read 0 — indistinguishable from a healthy link with nothing to recover.
+    // best_effort is STICKY: nothing clears it but stream teardown, so
+    // re-aligning the two tables does not heal a stream that already latched
+    // under the mismatch — it must re-latch. table_mismatch counts PACKETS,
+    // not transitions, so it doubles as the rate at which the peer is still
+    // disagreeing.
+    bool best_effort = false;
+    uint64_t table_mismatch = 0;
     // §17 gate-3 estimator: cumulative NACK→RETRANSMIT latency histograms,
     // ms upper bounds 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK
     // anchor (pure round-trip); arq_rec = first-NACK anchor (recovery vs

@@ -251,8 +251,17 @@ class AirIface {
     // false taints the stats field, not the link. `fastretune` says the
     // lean retune override exists on this die.
     // No devourer types cross this boundary (the rx_sense rule).
+    // §15.2 (Pass 195): `part` and `aliases` are ADDED beside `chip`, never
+    // folded into it. `chip` is the GENERATION ("jaguar3") and consumers
+    // already publish it; but a generation cannot tell an RTL8812EU from an
+    // RTL8812CU — both are jaguar3 — which is precisely the distinction the
+    // auto TX election turns on and the one an operator needs to see. `part`
+    // is the die ("RTL8822E") and `aliases` the '/'-separated marketing names
+    // ("RTL8812EU/RTL8822EU"), i.e. what is printed on the dongle.
     struct AdapterCapsView {
         std::string chip = "unknown";
+        std::string part;     // "" = the backend has no die name to give
+        std::string aliases;  // "" = no alias list
         bool power_actuator = false;
         bool ldpc_rx_flag = false;
         bool fastretune = false;

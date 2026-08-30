@@ -126,6 +126,8 @@ StatsSnapshot sample_snapshot() {
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
+    st.best_effort = false;  // true case asserted separately below
+    st.table_mismatch = 4111;
     st.nack_rtt_hist = {0, 2, 7, 6, 2, 1, 0, 0};
     st.nack_rtt_max_ms = 34;
     st.nack_rtt_samples = 24;
@@ -245,7 +247,7 @@ const char* kGolden =
     "{\"t_ms\":172834,\"node\":17,\"session\":2748291,"
     "\"adapters\":[{\"name\":\"wlan0\",\"rx\":10234,\"dup\":812,"
     "\"rssi_best\":-58,\"rssi_mean\":-63,\"snr\":22,\"noise\":-85,"
-    "\"evm\":-24,\"evm_valid\":true,"
+    "\"evm\":-24,\"evm_valid\":true,\"tx\":false,"
     "\"tx_submitted\":540,\"tx_failed\":2,"
     "\"tx_bulk\":180,\"tx_bulk_failed\":1,\"tx_timeout\":0,"
     "\"drop\":3,\"filtered\":0,\"kernel_drop\":0,\"bpf_filtered\":0,\"tsf_fallback\":1,"
@@ -300,6 +302,7 @@ const char* kGolden =
     "\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
+    "\"best_effort\":false,\"table_mismatch\":4111,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"nack_rtt_samples\":24,\"nack_rtt_p95_us\":2000,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
@@ -423,6 +426,46 @@ int main() {
         CHECK_EQ_U(static_cast<unsigned long long>(n), golden_len);
         CHECK(n >= 0 && static_cast<size_t>(n) == golden_len &&
               std::memcmp(buf, kGolden, golden_len) == 0);
+    }
+
+    // §15.3 (Pass 197) the §3.4 fallback flag renders BOTH values. Same
+    // reasoning as the Pass 195 case below: the golden pins
+    // "best_effort":false, which a build that never wired the field through
+    // would also satisfy — and this is the field whose whole purpose is to
+    // be true exactly when something is wrong.
+    {
+        StatsSnapshot s = sample_snapshot();
+        CHECK(!s.streams.empty());
+        StatsEmitter em(/*to_stdout=*/false, nullptr);
+        s.streams[0].best_effort = false;
+        em.emit(s);
+        CHECK(em.last_line().find("\"best_effort\":false,\"table_mismatch\"") !=
+              std::string::npos);
+        CHECK(em.last_line().find("\"best_effort\":true") == std::string::npos);
+        s.streams[0].best_effort = true;
+        em.emit(s);
+        CHECK(em.last_line().find("\"best_effort\":true,\"table_mismatch\"") !=
+              std::string::npos);
+    }
+
+    // §15.3 (Pass 195) the elected-uplink flag renders BOTH values. The
+    // golden above pins "tx":false, which a build that never wired the field
+    // through would also satisfy — so the true case is asserted separately,
+    // and against the same emitter the golden uses.
+    {
+        StatsSnapshot s = sample_snapshot();
+        CHECK(!s.adapters.empty());
+        StatsEmitter em(/*to_stdout=*/false, nullptr);
+        s.adapters[0].tx = false;
+        em.emit(s);
+        CHECK(em.last_line().find("\"tx\":false,\"tx_submitted\"") !=
+              std::string::npos);
+        CHECK(em.last_line().find("\"tx\":true") == std::string::npos);
+        s.adapters[0].tx = true;
+        em.emit(s);
+        CHECK(em.last_line().find("\"tx\":true,\"tx_submitted\"") !=
+              std::string::npos);
+        CHECK(em.last_line().find("\"tx\":false") == std::string::npos);
     }
 
     // §15.3 cache blocks: absent by default, exact shape when enabled,

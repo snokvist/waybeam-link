@@ -502,19 +502,61 @@ int run_loopback(const Loaded& l) {
     return 0;
 }
 
+// §15.2 (Pass 195): a JSON string for `adapters --emit`. The tree escapes
+// this field everywhere else it is serialized (stats_fill.h's json_escape);
+// an adapter named `wing"1` would otherwise emit a block that does not parse,
+// and this mode accepts the array form, where the name is operator-supplied.
+std::string json_quote(const std::string& in) {
+    std::string out = "\"";
+    for (const char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) >= 0x20) {
+                    out += c;
+                } else {
+                    // \uXXXX, never DROPPED. Silently deleting control bytes
+                    // mutates the name: two adapters called "ear\x01" and
+                    // "ear\x02" would both emit as "ear" and the frozen block
+                    // would then be refused for a duplicate name, blaming the
+                    // config rather than the emitter.
+                    char esc[7];
+                    std::snprintf(esc, sizeof esc, "\\u%04x",
+                                  static_cast<unsigned>(
+                                      static_cast<unsigned char>(c)));
+                    out += esc;
+                }
+                break;
+        }
+    }
+    return out + "\"";
+}
+
 int usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s <tx|rx|loopback> -c <config.json> "
                  "[--check [--strict] [--json]]\n"
                  "       %s config-schema [--json]\n"
+                 "       %s adapters -c <config.json> [--emit]\n"
                  "  --check         validate config + bindings and exit\n"
                  "  --strict        also report unknown and inert keys\n"
                  "                  (warnings; exit stays 0)\n"
                  "  --json          machine-readable --strict report on stdout\n"
                  "  config-schema   print the declared §15.2 key surface to\n"
                  "                  stdout (JSON is the only format; --json is\n"
-                 "                  accepted for symmetry with #106)\n",
-                 argv0, argv0);
+                 "                  accepted for symmetry with #106)\n"
+                 "  adapters        bring up the radios this config resolves\n"
+                 "                  to, print the election, and exit. --check\n"
+                 "                  cannot answer this: under §15.2 auto the\n"
+                 "                  adapter set is hardware, not config.\n"
+                 "  --emit          with `adapters`, print the result as a\n"
+                 "                  paste-ready array-form \"adapters\" block —\n"
+                 "                  discover once, then freeze the assignment\n",
+                 argv0, argv0, argv0);
     return 2;
 }
 
@@ -553,13 +595,15 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
-    if (mode != "tx" && mode != "rx" && mode != "loopback") {
+    if (mode != "tx" && mode != "rx" && mode != "loopback" &&
+        mode != "adapters") {
         return usage(argv[0]);
     }
     std::string config_path;
     bool check_only = false;
     bool strict = false;
     bool as_json = false;
+    bool emit = false;
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             config_path = argv[++i];
@@ -569,9 +613,24 @@ int main(int argc, char** argv) {
             strict = true;
         } else if (std::strcmp(argv[i], "--json") == 0) {
             as_json = true;
+        } else if (std::strcmp(argv[i], "--emit") == 0) {
+            emit = true;
         } else {
             return usage(argv[0]);
         }
+    }
+    // --emit shapes the `adapters` report; on a flight invocation it would be
+    // silently ignored, which is the class of bug --strict/--json already
+    // refuse above.
+    if (emit && mode != "adapters") {
+        std::fprintf(stderr, "--emit applies to the `adapters` mode only\n");
+        return usage(argv[0]);
+    }
+    if (mode == "adapters" && (check_only || strict || as_json)) {
+        std::fprintf(stderr,
+                     "`adapters` brings up hardware; it is not a --check "
+                     "mode\n");
+        return usage(argv[0]);
     }
     if (config_path.empty()) {
         return usage(argv[0]);
@@ -593,6 +652,167 @@ int main(int argc, char** argv) {
     Loaded l;
     if (const int rc = load_all(config_path, l); rc != 0) {
         return rc;
+    }
+    // §15.2 (Pass 195): the election preview. `--check` structurally cannot
+    // answer "which adapter will transmit" under the auto form — the answer is
+    // the hardware, not the config — so this brings the radios up, prints the
+    // candidate table the backend logs at bring-up, and exits. The array form
+    // is accepted too: it reports the same table, which is how an operator
+    // confirms a bus or mac pin landed on the unit they meant.
+    if (mode == "adapters") {
+        auto air = AirBackend::create(l.cfg);
+        if (!air) {
+            std::fprintf(stderr, "air error: %s\n", air.error.c_str());
+            return 1;
+        }
+        // Drain briefly before tearing down. TWO reasons, and the second is
+        // not optional:
+        //
+        // 1. It makes the report answer something create() cannot — whether
+        //    each ear is actually hearing frames on the configured channel.
+        // 2. A RadioAir created and destroyed with NO poll in between hangs in
+        //    ~Impl's join. That is a pre-existing condition, not one this mode
+        //    introduced: `hwtrial_bringup --bus <p> --seconds 0` on main hangs
+        //    identically, and ~Impl says why in its own comment — "a join can
+        //    block while a bring-up is still in flight (bring-up does not poll
+        //    the stop flag)". So StopRxLoop can be missed by an RX thread that
+        //    has not yet reached devourer's loop. Fixing that race belongs to
+        //    the backend's threading contract and its own device pass; this
+        //    mode simply does what every real consumer does. See
+        //    docs/findings.md 2026-08-30.
+        // A WALL-CLOCK deadline, not a poll count: poll_once only waits when
+        // its queue is EMPTY, so on an ear that is actually receiving, twenty
+        // 50 ms calls return in well under a millisecond — and the frame
+        // counts below are advanced by the RX threads over elapsed time, not
+        // by the poll. A fixed count would therefore give the shortest window
+        // exactly where traffic is heaviest, which is backwards.
+        const auto drain_until =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+        while (std::chrono::steady_clock::now() < drain_until) {
+            air.value->iface()->poll_once(50, [](const AirRxMeta&,
+                                                 const uint8_t*, size_t) {});
+        }
+        std::vector<uint64_t> heard(l.cfg.adapters.size(), 0);
+        for (size_t i = 0; i < heard.size(); ++i) {
+            heard[i] = air.value->iface()->rx_frames(i);
+        }
+
+        // After create(), l.cfg.adapters is the RESOLVED array either way, so
+        // one loop describes both forms.
+        for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+            const AdapterCfg& a = l.cfg.adapters[i];
+            const AirIface::AdapterCapsView caps = air.value->adapter_caps(i);
+            // The LIVE EFUSE identity, not the stanza's. Under auto they are
+            // the same; under the array form `resolved_adapters()` returns the
+            // AUTHORED stanzas untouched, so `a.mac` is whatever the operator
+            // wrote — normally nothing. Printing that would make this mode
+            // useless for the very thing it advertises on the array form:
+            // confirming which physical unit a pin landed on.
+            const std::string live_mac = air.value->adapter_mac(i);
+            std::fprintf(stderr,
+                         "adapter %zu: %-20s role=%-2s chan=%u bw=%u "
+                         "part=%s (%s) chip=%s mac=%s power_actuator=%s "
+                         "rx_frames=%llu\n",
+                         i, a.name.c_str(), a.role == Role::kTx ? "tx" : "rx",
+                         a.channel_mhz, unsigned(a.bw),
+                         caps.part.empty() ? "unknown" : caps.part.c_str(),
+                         caps.aliases.empty() ? "-" : caps.aliases.c_str(),
+                         caps.chip.c_str(),
+                         live_mac.empty() ? "none" : live_mac.c_str(),
+                         caps.power_actuator ? "yes" : "no",
+                         static_cast<unsigned long long>(heard[i]));
+        }
+        if (emit) {
+            // stdout, while the table above went to stderr: this is the half a
+            // caller redirects into a config, and mixing the two would make
+            // `> adapters.json` produce something that does not parse.
+            // A COMPLETE stanza, or the "freeze" silently changes the node.
+            // The emitted block replaces the adapters section outright — the
+            // two §15.2 forms are exclusive, so pasting it means deleting the
+            // auto block — and every key that only lived there has to come
+            // with it. Omitting the power keys would drop the operator's
+            // §10.5 boot offset back to the -24 seed and remove the §10.3
+            // ceiling, which is a power change disguised as a refactor.
+            const auto qdb_list = [](const char* key,
+                                     const std::vector<int32_t>& v) {
+                if (v.empty()) return std::string{};
+                std::string s2 = std::string(", \"") + key + "\": [";
+                for (size_t k = 0; k < v.size(); ++k) {
+                    if (k) s2 += ", ";
+                    s2 += std::to_string(v[k]);
+                }
+                return s2 + "]";
+            };
+            std::string out = "  \"adapters\": [\n";
+            for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+                const AdapterCfg& a = l.cfg.adapters[i];
+                // Escaped like every other serializer in the tree: under auto
+                // the names are synthesized and safe, but this mode also
+                // accepts the array form, where the name is operator-supplied
+                // and validated only for non-emptiness and uniqueness.
+                out += "    { \"name\": " + json_quote(a.name);
+                // The identity is the point of emitting: it is what makes the
+                // frozen array bind to the same physical units after a re-plug
+                // (§15.2 precedence mac > bus > first-free). Taken LIVE from
+                // the backend, because on the array form the stanza usually
+                // carries no mac at all and the emitted block would then bind
+                // first-free — moving role:"tx" to another dongle, which is
+                // precisely what the mac is here to prevent.
+                const std::string live_mac = air.value->adapter_mac(i);
+                if (!live_mac.empty()) {
+                    out += ", \"mac\": " + json_quote(live_mac);
+                } else {
+                    // §10.6 D3: this unit reports no EFUSE identity, and auto
+                    // never sets `bus` — so the stanza carries NO pin at all
+                    // and the frozen array binds first-free by enumeration
+                    // order. One re-plug and role:"tx" lands on a diversity
+                    // ear, which is the exact hazard emitting the mac exists
+                    // to prevent. Say so IN the emitted block: a warning only
+                    // on stderr would be lost the moment this is redirected
+                    // into a config, which is the whole point of the mode.
+                    out += ", \"_unpinned\": \"this unit reports no EFUSE "
+                           "identity, so this stanza has no mac and no bus "
+                           "pin and will bind FIRST-FREE\"";
+                    std::fprintf(stderr,
+                                 "adapters --emit: %s has no EFUSE identity — "
+                                 "the emitted stanza is UNPINNED and will bind "
+                                 "first-free (\u00a710.6 D3)\n",
+                                 a.name.c_str());
+                }
+                // A bus pin the operator authored survives the round trip; it
+                // is the §15.2 port pin and dropping it would silently widen
+                // the binding.
+                if (!a.bus.empty()) out += ", \"bus\": " + json_quote(a.bus);
+                out += ", \"role\": \"";
+                out += a.role == Role::kTx ? "tx" : "rx";
+                out += "\", \"channel\": " + std::to_string(a.channel_mhz);
+                out += ", \"bw\": " + std::to_string(unsigned(a.bw));
+                if (!a.power_map.empty()) {
+                    out += ", \"power_map\": " + json_quote(a.power_map);
+                }
+                if (a.max_power_qdb) {
+                    out += ", \"max_power_qdb\": " +
+                           std::to_string(*a.max_power_qdb);
+                }
+                out += ", \"power_offset_qdb\": " +
+                       std::to_string(a.power_offset_qdb);
+                out += ", \"power_offset_max_qdb\": " +
+                       std::to_string(a.power_offset_max_qdb);
+                out += qdb_list("power_presets_qdb", a.power_presets_qdb);
+                out += qdb_list("power_offset_presets_qdb",
+                                a.power_offset_presets_qdb);
+                out += " }";
+                if (i + 1 < l.cfg.adapters.size()) out += ',';
+                out += '\n';
+            }
+            out += "  ]\n";
+            if (std::fwrite(out.data(), 1, out.size(), stdout) != out.size() ||
+                std::fflush(stdout) != 0) {
+                std::perror("adapters --emit: write");
+                return 1;
+            }
+        }
+        return 0;
     }
     if (check_only) {
         auto bindings = BindingSet::create(l.cfg);

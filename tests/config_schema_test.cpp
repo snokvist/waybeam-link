@@ -27,7 +27,12 @@ int main() {
     CHECK(live.rfind("{\n  \"version\": 1,\n  \"keys\": [\n", 0) == 0);
     CHECK(live.size() > 6);
     CHECK(live.compare(live.size() - 6, 6, "  ]\n}\n") == 0);
-    CHECK(live.find("\"path\": \"adapters\", \"type\": \"array\"") !=
+    // §15.2 (Pass 195): `adapters` takes both shapes, and the published
+    // surface has to say so — declaring it "array" would tell a config
+    // generator the auto form is invalid.
+    CHECK(live.find("\"path\": \"adapters\", \"type\": \"array|object\"") !=
+          std::string::npos);
+    CHECK(live.find("\"path\": \"adapters.auto\", \"type\": \"object\"") !=
           std::string::npos);
     CHECK(live.find('\t') == std::string::npos);
 
@@ -100,13 +105,21 @@ int main() {
             parent.size() > 2 && parent.compare(parent.size() - 2, 2, "[]") == 0;
         if (parent_is_array) parent.erase(parent.size() - 2);
         const KeyType want = parent_is_array ? KeyType::kArray : KeyType::kObject;
+        // A key declared kArrayOrObject satisfies EITHER, and must: `adapters`
+        // is the parent of both "adapters[].bus" (array) and "adapters.auto"
+        // (object). Widened here rather than by exempting the path, so a
+        // future kArrayOrObject key gets the same check and an ordinary
+        // array/object key still gets the strict one.
+        const auto holds = [](KeyType actual, KeyType wanted) {
+            return actual == wanted || actual == KeyType::kArrayOrObject;
+        };
 
         bool found = false;
         for (std::size_t k = 0; k < n; ++k) {
             if (paths[k] != parent) continue;
             found = true;
-            CHECK(keys[k].type == want);
-            if (keys[k].type != want) {
+            CHECK(holds(keys[k].type, want));
+            if (!holds(keys[k].type, want)) {
                 std::fprintf(stderr,
                              "  %s holds %s, so it must be declared %s\n",
                              parent.c_str(), p.c_str(),

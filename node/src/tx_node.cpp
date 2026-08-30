@@ -107,12 +107,12 @@
 namespace wblink {
 namespace node {
 
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply) {
     return run_tx(l, stop, mode_apply, nullptr);
 }
 
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
@@ -249,7 +249,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     if (auto stored = calib_ident.empty()
                           ? Result<CalibStored>::fail("no identity (D3)")
                           : calib_store_load(
-                                l.cfg.policy.calibration.artifact_dir);
+                                l.cfg.policy.calibration.artifact_dir,
+                                calib_ident);
         stored) {
         const std::string& ident = calib_ident;
         // §10.6 (Pass 151): the backend-scoped identity proves which BACKEND
@@ -518,8 +519,11 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
                                    air.value ? &*air.value : nullptr);
         };
         h.features_json = [&] {
+            // §3.4 is a RECEIVE-engine state; a TX node has none, so the
+            // operator latch is also the effective answer here.
             return build_features_json(l, tx.cmd_arq_enabled(),
-                                       tx.cmd_fps_ladder());
+                                       tx.cmd_fps_ladder(),
+                                       tx.cmd_arq_enabled());
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.link_mtu_json = [&] {
