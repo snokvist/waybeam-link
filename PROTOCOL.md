@@ -270,8 +270,8 @@ their RX paths at L2 — it is **not** access control (§13 applies).
 **Hardware-ACKed unicast return (Pass 12; the §7.2 hybrid's wire shape —
 bench knob, both halves default off).** When the ground enables
 `return.unicast` and the craft arms `air.ack_responder`, ground→craft
-returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
-§11) are injected as **QoS-Data** instead of the pinned broadcast frame:
+returns (scope below) are injected as **QoS-Data** instead of the pinned
+broadcast frame:
 
 | field | value |
 |---|---|
@@ -281,9 +281,36 @@ returns (**NACK / LINK_REPORT only** — CSA campaign copies stay broadcast,
 | QoS Control | `0x00 0x00` for normal reports; TID 6 for urgent NACKs; Normal ACK policy |
 | radiotap | the same rate-less prefix with `TX_FLAGS = 0` (the frame *expects* an ACK) |
 
+**Scope: every single-target return class (Pass 198).** Pass 12 wrote this
+as "NACK / LINK_REPORT only" because those were the only classes on the
+return path when it landed; §7.5 (Pass 183) then routed the uplink data
+plane through the same injector without widening this sentence. Pass 198
+rules the widening explicit rather than leaving the spec narrower than the
+code it governs. The unicast shape carries **NACK, LINK_REPORT, §7.5 uplink
+DATA (TELEMETRY + CONTROL), §10.7 calibration probes and tallies, §3.4 link
+verdicts, and §11.7 VEHICLE_CMD campaign copies**. The test each passes is
+the same one: the frame names exactly one target and is inert at every other
+node — §11.7 qualifies because a command from a non-bound issuer is a silent
+drop and *a ground never acts on a command* at all, consuming only the
+craft's downlink echo, which is unaffected.
+
+**What stays broadcast, structurally.** §11 CSA campaign copies: a
+channel-switch announcement is addressed to the fleet, and a receiver that
+misses it is precisely the failure the campaign exists to prevent. And the
+whole §3.2 DATA downlink (§1 invariant; Pass 8 rejected hardware ARQ for the
+video path, and §14 FEC plus §3.9 recovery carry it instead). Neither is a
+scope a knob may reopen.
+
+One consequence named rather than hidden: a co-located second ground stops
+overhearing another ground's VEHICLE_CMD copies, so those frames no longer
+feed its §11.5 follower liveness. The effect is negligible by construction —
+that signal is dominated by the craft's continuous downlink at 60–100 fps
+against a 3-copy campaign every few seconds — but it is a real narrowing of
+what a passive node sees.
+
 The injecting chip hardware-retransmits an unACKed unicast frame up to
-`air.tx_retry_limit` times (§15.2, Pass 156 — default **8**, operator-ruled
-2026-08-07) — SIFS-timed hardware ARQ on the return path for zero extra
+`air.tx_retry_limit` times (§15.2, Pass 156; default re-ruled to **3** by
+Pass 198) — SIFS-timed hardware ARQ on the return path for zero extra
 return-path bytes. An earlier revision here claimed a fixed devourer
 descriptor limit of 12; upstream #354 made it configurable with default
 **0** (the WFB posture: FEC provides reliability), which turned the armed
@@ -320,6 +347,29 @@ flew at the commanded rung. Pinned consequences:
   `report_epoch`).
 - No latched SA for the target yet → that return falls back to broadcast
   (counted, §15.3 `unicast_fallback`).
+- **A latched SA goes STALE and the fallback fires again (Pass 198).** The
+  latch records when the target was last heard, and a target silent for
+  `policy.return.unicast_stale_ms` (§15.2, seed **1000 ms**) is treated as
+  unlatched: that return goes broadcast, counted separately as §15.3
+  `unicast_stale`. Without this the hybrid has no out-of-range posture at
+  all — the Pass 12 latch was write-only, so a craft heard once was
+  unicast-addressed for the rest of the session, and a fly-away turned every
+  return into `tx_retry_limit + 1` copies plus a full ACK window per retry,
+  forever. The hardware bounds the cost **per frame** (that is what the
+  retry limit is) and bounds nothing about how long we keep paying it; this
+  clause is the missing half. It is a *broadcast* fallback, never a mute:
+  the return still airs, once, exactly as a pre-Pass-12 node would air it,
+  which is what makes re-acquisition possible — a craft that comes back is
+  re-latched by its first accepted frame and unicast resumes with no
+  campaign, no handshake and no operator action.
+
+  The window must outlast every fade the hybrid exists to punch through and
+  still be short against a real link loss. The seed sits an order of
+  magnitude above the §1 correlated-fade band (~5–30 ms) and 10× the §7.3
+  LINK_REPORT interval, so a fade deep enough to trip it has already cost
+  ten reports; it is an order of magnitude below the §2 `idle_teardown_ms`,
+  so the latch always ages out well before the stream itself is torn down.
+  A §17 seed like the rest of §7.2 — re-derive at gate 4.
 - Arming the responder turns a passive monitor into an ACK transmitter —
   acceptable on the *craft* (it transmits anyway); ground diversity
   adapters never arm.
@@ -1688,9 +1738,13 @@ loop (§9) holds a stable operating point rather than oscillating at the floor, 
 path — §7.1 opportunistic or §7.2 paced alike — can be switched to
 hardware-ACKed unicast: the craft arms its chip's ACK responder
 (`air.ack_responder`), the ground sends returns as unicast QoS-Data
-(`return.unicast`) and gets SIFS-timed hardware retries on them. Wire shape
-and consequences are pinned in §3.0. Both knobs default off; the A/B
-against plain broadcast returns is a §17 bench slot.
+(`return.unicast`) and gets SIFS-timed hardware retries on them. Wire shape,
+the class scope (Pass 198: every single-target return, not just NACK and
+LINK_REPORT) and the stale-latch broadcast fallback that gives it an
+out-of-range posture are pinned in §3.0. Both knobs default off; the A/B
+against plain broadcast returns is a §17 bench slot, and since Pass 198 the
+responder half can be toggled live (§15.5 `POST /api/v1/air/ack_responder`)
+while the soliciting half still needs a restart.
 
 ### 7.3 Cadence
 - **NACK:** event-driven on loss declaration, coalesced to one bitmap per return
@@ -5254,14 +5308,47 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   counts *attempts*, so devourer folds the +1 and the effective ceiling
   there is 62 — an authored 63 runs 62 with a device-log note) is the
   per-frame hardware retry limit for unicast ACK-policy TX. Inert for broadcast (no ACK policy ⇒ the MAC never
-  retries), so the default costs nothing on a broadcast-only node. The
-  default is the operator-ruled devourer-sweep point for an airtime-precious
-  link with a FEC floor (limit 8 → 99.97 % delivered; 16 buys the last
-  0.03 % at +5.4 % retry airtime — §14 already runs the floor). **Coupling
+  retries), so the default costs nothing on a broadcast-only node.
+  **The default is 3 (Pass 198), re-ruled down from Pass 156's 8.** Pass 156
+  chose 8 from the devourer sweep's delivery column while ARQ still mattered
+  for video; with §14 FEC, GDR and §3.9 slice recovery carrying the video
+  path, the return path's job is telemetry and control, and the quantity to
+  minimise is what a *doomed* frame costs. 3 is the lowest rung the sweep
+  actually measured (99.72 % delivered, 0.26 % residual — against 8's
+  99.97 %/0.03 %), so the default stays on a measured point rather than an
+  interpolation: 4 and 5 are inside the operator's ruled 3–5 band and are
+  authorable, but nothing has measured them. The cost it buys down is
+  worst-case airtime per undeliverable frame — 4 copies instead of 9, each
+  retry additionally waiting a full `air.ack_timeout_us` — which is the
+  out-of-range regime `policy.return.unicast_stale_ms` bounds in time and
+  this bounds in depth. **Coupling
   law (§3.0):** on the radio backend, `return.unicast` or `air.ack_responder`
   with `tx_retry_limit: 0` is a config error, and a `return.unicast` node
   whose resolved TX die reports `caps.tx_retry_limit_ok = false` refuses
   bring-up (§3.0, capability leg).
+- `air.ack_timeout_us` (radio backend, Pass 198; default **128**, range
+  1–255 — the REG_ACKTO field width) is the hardware ACK response window:
+  the MAC writes a frame off, and retries it, when no ACK is counted within
+  it. This is the hardware-ARQ **range** lever — round-trip propagation eats
+  ~6.7 µs/km, so 128 µs is roughly a 15 km round trip once the ~50 µs of ACK
+  flight and detection margin is taken out. The default matches devourer's
+  own unified value, so authoring it changes nothing until an operator moves
+  it; it becomes a key because the number is a deployment property (range
+  envelope) that was previously inherited silently. **Longer is not free in
+  either direction:** past the envelope the loop simply stops closing (below
+  the ACK's flight time, measured, retries pin at the limit with 0 % ok
+  against a live responder), while a longer window makes every retry of a
+  *lost* frame occupy the channel longer. Operator ruling 2026-08-30: 128 is
+  the fleet value, and a link that outruns it depends on §3.4 fallback video
+  rather than a widened window.
+- `policy.return.unicast_stale_ms` (Pass 198; default **1000**, 0 = never
+  expire) ages the per-originator SA latch that §3.0 unicast returns address.
+  A target unheard for this long is treated as unlatched and its returns go
+  broadcast (§15.3 `unicast_stale`) until it is heard again. **0 restores the
+  Pass 12 behaviour and is a footgun kept only for A/B** — it is the
+  never-expiring latch whose absence of an out-of-range posture Pass 198
+  exists to fix. §17 seed; re-derive at gate 4 alongside the other §7.2
+  numbers.
 - `air.ldpc`, `air.stbc` (radio backend only, Pass 157; both default
   **off**): per-frame TX coding — LDPC FEC, and one-stream STBC, in the
   radiotap MCS field (§3.0). Two knobs, not one: LDPC is coding gain on one
@@ -5580,7 +5667,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
   "return": { "reports_expected": 10, "reports_received": 9,
     "reports_rejected": 0, "feedback_rejected": 0, "report_latch_holder": 9,
     "return_window_hits": 7, "return_window_misses": 2,
-    "unicast_sent": 0, "unicast_fallback": 0 },
+    "unicast_sent": 0, "unicast_fallback": 0, "unicast_stale": 0 },
   "link": { "target_originator": 9, "target_session": 183726,
     "profile": 4, "mcs": 4, "tx_power_qdb": 1800, "tx_power_override": false,
     "report_epoch": 1822, "report_age_ms": 40,
@@ -6158,6 +6245,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/calibration` | role-specific calibration surface. Craft/tx: §10.6 response plus `direction:"downlink"`. Ground/rx: §10.7 `{direction:"uplink",state,rung,power_qdb,fingerprint,stale,quality:{valid,age_ms,last_report_epoch,reports_received,rssi_mean,rx_mcs},artifact:{...,placements:[...]}|null,fail_reason}` |
 | `GET /api/v1/modes` | `{active, apply_configured, catalog_fingerprint, modes:[{name, fps, resolution, mcs_min, mcs_max, fps_mode}]}` — the operating-mode **catalog** enumerated from `venc.modes_dir`; the link is the single source of truth for which modes exist. A ground with an IP path reads it here; one without must hardcode a copy, and pins `catalog_fingerprint` (Pass 108) to detect index drift (§16 of `docs/venc-mode-matrix.md`; Pass 104, TX/craft node) |
 | `GET /api/v1/tx/power` | `{override_active, qdb, actuator, applied_qdb, saturated_low, saturated_high, backend}` — the §10.5 override-latch state; `qdb` is the latched request value (present only while `override_active`; the §10.3 ceiling clamps at the actuator), `backend` ∈ `radio`\|`udp` (any node with a `role:"tx"` adapter; the `kernel-monitor` value is retired, Pass 164). **`applied_qdb` is what the ACTUATOR took, which is not `qdb` once the TXAGC index rails** (Pass 169, §10.5) — with `saturated_low`/`saturated_high` naming the rail. The three are omitted until a write has happened and on a backend with no actuator, so an absent `applied_qdb` never reads as 0. **`actuator` ∈ `offset`\|`none`** (Pass 171, §10.5) says whether this adapter's chip has a power lever at all — `none` omits the three and makes a POST of `qdb` a 400, because devourer answers an unsupported knob with `0`, which is indistinguishable from a successful zero-offset apply |
+| `GET /api/v1/air/ack_responder` | §3.0 hardware-ACK responder state: `{armed, supported, configured, mac}` (Pass 198; any node with a `role:"tx"` adapter on the radio backend). `configured` is the boot `air.ack_responder`; `armed` is live and diverges from it after a POST. **`supported` is the die's answer, learned at the first arm attempt, not a static cap** — devourer exposes no capability flag for the responder, only a `false` return from `SetAckResponder`, so this reads `true` until an arm has actually been refused. `mac` is the §3.0 SA the responder is armed to, `null` while disarmed |
 
 `GET /api/v1/discovery` is read-only and node-local. `nodes[]` contains
 `{originator,session,last_seen_ms}` for HEARTBEAT, ANNOUNCE, or DATA senders;
@@ -6191,6 +6279,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/video/recover` | `{ "stream_id": 0 }` (optional with one latch) | RX emits one §3.9 recovery request for a latched RTP stream |
 | `GET /api/v1/bench/rx-drop` | — | RX-node local synthetic-loss state: `{permille,backend}` where `backend` is `udp` or `radio`. The value is process-volatile and applies before normal receive counters/processing. |
 | `POST /api/v1/bench/rx-drop` | `{ "permille": 0 }` | RX-node local debug control: retune independent synthetic loss per listener/adapter (0–1000) on UDP-air or RF. `0` clears immediately. This is local management HTTP only; it defines no RF control message. |
+| `POST /api/v1/air/ack_responder` | `{ "armed": true\|false }` | §3.0 arm/disarm the hardware ACK responder live, without a re-init (Pass 198). Local management HTTP only — it defines no RF control message and touches no peer. `armed:true` programs the node's own §3.0 SA as the responder MACID; `false` returns net_type to No Link. Volatile: a restart returns to `air.ack_responder`. **409 off the radio backend or on a node with no `role:"tx"` adapter**; **409 when `armed:true` is refused by the die** (the §3.0 loud-degrade path, now with a caller to tell). **This is the responder half ONLY, and the asymmetry is the point:** the soliciting side's `air.tx_retry_limit` and `air.ack_timeout_us` are consumed at devourer bring-up from an immutable `DeviceConfig`, so they have no live form and a full-hybrid A/B still costs a restart on the ground. A knob that toggled one half while silently pinning the other would read like an A/B and not be one, so the endpoint names which half it is |
 | `POST /api/v1/scout/start` | `{ "channels":[…]?, "dwell_ms":??, "mode":"list"\|"quickconnect", "target":{"originator":N}? }` | begin a channel sweep (§15.5a; ground/rx node) |
 | `POST /api/v1/scout/stop` | `{}` | end the sweep and hold the current channel |
 | `POST /api/v1/scout/quickconnect` | `{ "originator":N, "target_chan":?? }` | claim a discovered craft onto `target_chan` (or the emptiest allowlisted channel) |

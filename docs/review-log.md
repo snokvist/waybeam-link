@@ -24,6 +24,48 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 198 — the hardware-ACK hybrid, retargeted at telemetry and given an out-of-range posture (2026-08-30)
+
+**Verdict.** Four operator rulings, one decision: the hybrid stops being a
+video-reliability experiment and becomes the return path's ARQ, sized so a
+fly-away cannot storm the link.
+1. **Scope (§3.0).** Pass 12 wrote "NACK / LINK_REPORT only"; §7.5 (Pass 183)
+   then routed the uplink data plane through the same injector without widening
+   it, so the spec has been narrower than the code for 15 passes. Ruled: every
+   **single-target** return goes unicast — NACK, LINK_REPORT, §7.5 uplink DATA,
+   §10.7 calib probes/tallies, §3.4 verdicts, §11.7 VEHICLE_CMD. §11.7 qualifies
+   on evidence: a non-bound issuer's command is a silent drop and `rx_node.cpp`
+   returns early with *"a ground never acts on a command"*. §11 CSA copies and
+   the §3.2 downlink stay broadcast structurally (fleet-addressed; §1).
+2. **Out-of-range — the defect this pass exists for.** The Pass 12 SA latch was
+   **write-only**: `SaEntry{orig, sa}` carried no timestamp and `lookup_sa` never
+   aged out, so a craft heard once stayed unicast-addressed for the session. The
+   hardware bounds retries *per frame*; nothing bounded how long we pay. Ruled:
+   staleness (`policy.return.unicast_stale_ms`, seed 1000 ms) → broadcast
+   fallback, counted `unicast_stale`. Fallback, never mute — the first accepted
+   frame re-latches with no handshake.
+3. **Depth (§15.2).** `air.tx_retry_limit` 8 → **3**. Pass 156 chose 8 from the
+   sweep's delivery column when ARQ still mattered for video; with §14 FEC + GDR
+   + §3.9 slice recovery carrying it, the quantity to minimise is what a doomed
+   frame costs. 3 is the lowest rung the sweep **measured** (99.72 %, 0.26 %
+   residual); 4–5 are in the ruled band and unmeasured.
+4. **Range (§15.2).** New `air.ack_timeout_us`, default **128** = devourer's own
+   unified value, so authoring it changes nothing. A key because the number is a
+   deployment property (~6.7 µs/km ⇒ ~15 km round trip) previously inherited
+   silently. Operator: a link that outruns it depends on §3.4 fallback video.
+
+§15.5 `GET`/`POST /api/v1/air/ack_responder` toggles the **responder half only**:
+devourer's `_cfg` is `const`, so the soliciting side has no live form, and the
+endpoint says so rather than reading like a full-hybrid A/B.
+
+**Changed:** §3.0, §7.2, §15.2, §15.3 (`unicast_stale`), §15.5. **Evidence:**
+`step11-bench.md` §4.4 (86.9→99.9 % at 3000 pps); devourer `scheduled-mac.md`
+retry sweep + dead-RA write-offs; `air_radio.cpp` `SaEntry`/`lookup_sa`;
+`rx_node.cpp:2814`.
+**Open (Tier 2):** the 1000 ms seed and the 3 rung are gate-4 re-derives; retry
+distribution still degenerate at bench SNR (#96); **8733BU cannot be a responder
+at all** — unported on the `.181` craft's die (snokvist/devourer#2).
+
 ## Pass 197 — §11.2 quick-connect was issuing the rejected retune class; §3.4 gets a voice (2026-08-30)
 
 **Verdict.** Two silent failures, one operator-visible symptom. (1) §11.2 Pass 91
