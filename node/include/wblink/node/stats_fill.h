@@ -504,6 +504,13 @@ inline std::string build_adapters_array(const Loaded& l,
             air != nullptr ? air->adapter_caps(i)
                            : AirIface::AdapterCapsView{};
         s += ",\"chip\":\"" + caps.chip + "\"";
+        // §15.2 (Pass 195): the DIE and its marketing aliases, beside the
+        // generation rather than instead of it. `chip` reads "jaguar3" for
+        // both an 8812EU and an 8812CU, so a consumer could not name the part
+        // an operator actually plugged in — and under auto the part is what
+        // decided which adapter transmits. Empty on a backend with no die.
+        s += ",\"part\":\"" + json_escape(caps.part) + "\"";
+        s += ",\"aliases\":\"" + json_escape(caps.aliases) + "\"";
         s += ",\"power_actuator\":";
         s += caps.power_actuator ? "true" : "false";
         s += ",\"ldpc_rx_flag\":";

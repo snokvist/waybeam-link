@@ -101,12 +101,12 @@
 namespace wblink {
 namespace node {
 
-int run_rx(const Loaded& l, const std::atomic<int>& stop,
+int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out) {
     return run_rx(l, stop, frame_out, nullptr);
 }
 
-int run_rx(const Loaded& l, const std::atomic<int>& stop,
+int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out, RxRuntimeControl* runtime_control) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
@@ -373,7 +373,8 @@ int run_rx(const Loaded& l, const std::atomic<int>& stop,
     if (auto stored = uplink_identity.empty()
                           ? Result<UplinkArtifact>::fail("no identity (D3)")
                           : uplink_calib_store_load(
-                                l.cfg.policy.calibration.artifact_dir);
+                                l.cfg.policy.calibration.artifact_dir,
+                                uplink_identity);
         stored) {
         uplink_artifact_fp = uplink_calib_fingerprint(*stored.value);
         if (stored.value->local_adapter_identity != uplink_identity) {

@@ -70,6 +70,18 @@ uint8_t fingerprint_of(const std::string& body) {
 
 }  // namespace
 
+std::string calib_identity_slug(const std::string& identity) {
+    std::string out;
+    out.reserve(identity.size());
+    for (char c : identity) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                        c == '.' || c == '_' || c == '-';
+        out += ok ? c : '_';
+    }
+    return out;
+}
+
 std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
                            const std::string& efuse_mac) {
     (void)adapter;  // tiers 2-4 retired with kernel-monitor (Pass 164)
@@ -96,7 +108,8 @@ std::string calib_identity(const AdapterCfg& adapter, AirCfg::Kind backend,
 uint8_t calib_store_write(const std::string& dir, const std::string& identity,
                           const CalibArtifact& a) {
     const std::string body = artifact_json(identity, a);
-    if (!write_atomic(dir + "/artifact.json", body)) {
+    const std::string slug = calib_identity_slug(identity);
+    if (!write_atomic(dir + "/artifact-" + slug + ".json", body)) {
         return 0;
     }
     // Operator-readable §10.2 curve twin (advisory; artifact.json is the
@@ -116,12 +129,21 @@ uint8_t calib_store_write(const std::string& dir, const std::string& identity,
         curve += row;
     }
     curve += "0xffff\n";
-    (void)write_atomic(dir + "/curve.txt", curve);
+    (void)write_atomic(dir + "/curve-" + slug + ".txt", curve);
     return fingerprint_of(body);
 }
 
-Result<CalibStored> calib_store_load(const std::string& dir) {
-    const std::string body = read_file(dir + "/artifact.json");
+Result<CalibStored> calib_store_load(const std::string& dir,
+                                    const std::string& identity) {
+    std::string body =
+        read_file(dir + "/artifact-" + calib_identity_slug(identity) + ".json");
+    if (body.empty()) {
+        // Pre-Pass-195 layout. Read it, but do not privilege it: the stored
+        // identity is parsed below exactly as for a per-identity file and the
+        // caller's own match check decides, so a legacy artifact belonging to
+        // a different unit is refused the same way it always was.
+        body = read_file(dir + "/artifact.json");
+    }
     if (body.empty()) {
         return Result<CalibStored>::fail("no artifact");
     }

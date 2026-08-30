@@ -81,5 +81,59 @@ int main() {
         CHECK(fails_containing(cfg, "air.mcs_probe"));
     }
 
+    // --- §15.2 (Pass 195) the auto form's PRE-USB refusals -----------------
+    // Auto assigns roles only after bring-up, so the role-count checks above
+    // cannot run at entry. What still can, and must, is the rx-only leg: with
+    // allow_rx_only the election will produce no tx adapter however the
+    // ranking comes out, so every TX-die knob is refused here — before a
+    // single device is opened, which is what keeps this file hermetic.
+    {
+        RadioAirCfg base;
+        base.auto_cfg.enabled = true;
+        base.auto_cfg.channel_mhz = 5805;
+        base.allow_rx_only = true;
+
+        RadioAirCfg cfg = base;
+        cfg.ack_responder = true;
+        CHECK(fails_containing(cfg, "air.ack_responder"));
+        CHECK(fails_containing(cfg, "uplink-free archetype"));
+
+        cfg = base;
+        cfg.unicast_returns = true;
+        CHECK(fails_containing(cfg, "policy.return.unicast"));
+
+        cfg = base;
+        cfg.ldpc = true;
+        CHECK(fails_containing(cfg, "air.ldpc"));
+
+        cfg = base;
+        cfg.stbc = true;
+        CHECK(fails_containing(cfg, "air.stbc"));
+
+        cfg = base;
+        cfg.mcs_probe = true;
+        CHECK(fails_containing(cfg, "air.mcs_probe"));
+
+        // A bad channel is caught before any libusb work too — the auto form
+        // has no per-stanza channel for the bring-up loop to validate later.
+        cfg = base;
+        cfg.auto_cfg.channel_mhz = 1234;
+        CHECK(fails_containing(cfg, "bad channel"));
+
+        // The two §15.2 forms are exclusive: a caller that filled in both has
+        // a bug, and silently preferring one of them would hide it.
+        cfg = base;
+        cfg.adapters = {adapter("ear0", Role::kRx)};
+        CHECK(fails_containing(cfg, "forms are exclusive"));
+    }
+
+    // An EMPTY adapters array is still its own error — auto is what licenses
+    // an empty one, and nothing else does.
+    {
+        RadioAirCfg cfg;
+        cfg.allow_rx_only = true;
+        CHECK(fails_containing(cfg, "no adapters"));
+    }
+
     return wbtest_finish("radio_rx_only_test");
 }

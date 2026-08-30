@@ -298,6 +298,7 @@ target_compile_options(wblink_core PRIVATE ${WBLINK_WARNINGS})
 # --- wblink_io: config/bindings/stats (§15). POSIX sockets + the vendored
 # nlohmann/json (io layer only — core must stay dependency-free).
 add_library(wblink_io STATIC
+    io/src/adapter_elect.cpp
     io/src/config.cpp
     io/src/config_registry.cpp
     io/src/log.cpp

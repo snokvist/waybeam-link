@@ -107,12 +107,12 @@
 namespace wblink {
 namespace node {
 
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply) {
     return run_tx(l, stop, mode_apply, nullptr);
 }
 
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info) {
     auto air = AirBackend::create(l.cfg);
     if (!air) {
@@ -249,7 +249,8 @@ int run_tx(const Loaded& l, const std::atomic<int>& stop,
     if (auto stored = calib_ident.empty()
                           ? Result<CalibStored>::fail("no identity (D3)")
                           : calib_store_load(
-                                l.cfg.policy.calibration.artifact_dir);
+                                l.cfg.policy.calibration.artifact_dir,
+                                calib_ident);
         stored) {
         const std::string& ident = calib_ident;
         // §10.6 (Pass 151): the backend-scoped identity proves which BACKEND

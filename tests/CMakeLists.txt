@@ -50,6 +50,12 @@ add_wb_test(calib_dwell_test)
 add_wb_test(recovery_test)
 add_wb_test(loopback_test)
 
+# §15.2 (Pass 195) auto election. Deliberately OUTSIDE the WBLINK_RADIO gate:
+# the ranking is pure and driven from synthetic candidates, so the policy stays
+# covered in builds with no radio backend compiled in at all.
+add_wb_test(adapter_elect_test wblink_io)
+
+add_wb_test(calib_store_test wblink_io)
 add_wb_test(txwedge_test wblink_io)
 add_wb_test(dot11_test wblink_io)
 add_wb_test(radio_decode_test wblink_io)

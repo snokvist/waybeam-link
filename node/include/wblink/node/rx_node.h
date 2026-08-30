@@ -89,14 +89,14 @@ static_assert(std::atomic<int>::is_always_lock_free,
 // the frame-shm-bound out-streams instead, which is what lets a node run on a
 // build with WBLINK_FRAME_SHM=OFF. Configuring a frame-shm stream on such a
 // build with NO sink is refused at startup rather than silently dropped.
-int run_rx(const Loaded& l, const std::atomic<int>& stop,
+int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out = {});
 
 // Runtime-control overload for in-process consumers. The mailbox owns no
 // thread; `run_rx` drains it on this same loop and publishes immutable
 // snapshots back to callers. The overload above remains as a real symbol for
 // existing C++ embedding consumers and forwards here with nullptr.
-int run_rx(const Loaded& l, const std::atomic<int>& stop,
+int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out, RxRuntimeControl* runtime_control);
 
 }  // namespace node

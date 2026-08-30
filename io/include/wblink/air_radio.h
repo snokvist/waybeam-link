@@ -31,7 +31,20 @@ namespace wblink {
 
 struct RadioAirCfg {
     std::vector<AdapterCfg> adapters;  // at most one Role::kTx among them;
-                                       // zero only with allow_rx_only
+                                       // zero only with allow_rx_only.
+                                       // EMPTY under auto_cfg.enabled — the
+                                       // backend fills it in (see below).
+    // §15.2 (Pass 195) auto form. With `enabled`, `adapters` arrives empty and
+    // create() discovers the device set itself: the caller-supplied
+    // `adapter_fds` when non-empty, otherwise every enumerated radio. Roles
+    // are then elected AFTER bring-up, because the die (and so the priority
+    // order) is not knowable from the USB descriptor — RTL8812EU and RTL8812AU
+    // share PID 0x8812.
+    //
+    // create() publishes the outcome through resolved_adapters(); the caller
+    // writes that back into its Config so everything downstream reads an
+    // ordinary stanza array whichever form was authored.
+    AdapterAutoCfg auto_cfg;
     uint8_t stamp_net_id = 0;          // §3.0 SA net_id (TX always stamps)
     std::optional<uint8_t> filter_net_id;  // RX enforces only when configured
     uint16_t originator = 0;           // stamped in SA; own frames dropped
@@ -117,7 +130,18 @@ struct RadioAirCfg {
 
 class RadioAir : public AirIface {
   public:
-    static Result<RadioAir> create(const RadioAirCfg& cfg);
+    // BY VALUE: under auto_cfg the synthesized stanza array is built into the
+    // local copy, so every downstream read in create() stays exactly the
+    // expression it was for the array form. The copy happens once, at node
+    // start, and buys the auto path a ~20-site rename it would otherwise need.
+    static Result<RadioAir> create(RadioAirCfg cfg);
+
+    // §15.2 (Pass 195): the stanzas this backend is actually running — the
+    // authored array unchanged, or, under auto, the synthesized one with the
+    // elected roles and the per-unit MACs filled in. Stable for the object's
+    // lifetime (roles never change post-create) and parallel to every
+    // `size_t adapter` index on this interface.
+    const std::vector<AdapterCfg>& resolved_adapters() const;
 
     RadioAir(RadioAir&&) noexcept;
     RadioAir& operator=(RadioAir&&) noexcept;

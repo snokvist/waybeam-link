@@ -245,7 +245,24 @@ struct AirBackend {
 
     uint16_t mtu_supported() const { return iface()->mtu_supported(); }
 
-    static Result<AirBackend> create(const Config& cfg) {
+    // Seeded AFTER the backend exists, not before: under §15.2 auto the stanza
+    // array does not exist until the election has run, and seeding from an
+    // empty one left every /info channel reading 0.
+    void seed_chan_by_adapter(const Config& cfg) {
+        chan_by_adapter.clear();
+        chan_by_adapter.reserve(cfg.adapters.size());
+        for (const AdapterCfg& a : cfg.adapters) {
+            chan_by_adapter.push_back(a.channel_mhz);
+        }
+    }
+
+    // NON-CONST cfg (§15.2 Pass 195): under the auto form the backend is what
+    // discovers the adapters, and its election is written back into
+    // cfg.adapters here. Everything downstream — §10 power apply, §10.6/§10.7
+    // calibration identity, §15.3 stats, §15.5 /info, the scout's uplink index
+    // — then reads an ordinary stanza array whichever form was authored, with
+    // no second code path and no "if auto" anywhere past this function.
+    static Result<AirBackend> create(Config& cfg) {
         // Fail closed on a device source the chosen backend cannot use, the
         // same posture as air_radio.cpp's TX-knob refusals (Pass 156/157).
         // Only the radio opens USB; a UDP backend would ignore these
@@ -257,10 +274,6 @@ struct AirBackend {
                 "only the radio backend opens USB devices");
         }
         AirBackend b;
-        b.chan_by_adapter.reserve(cfg.adapters.size());
-        for (const AdapterCfg& a : cfg.adapters) {
-            b.chan_by_adapter.push_back(a.channel_mhz);
-        }
         if (cfg.air.kind == AirCfg::Kind::kUdp ||
             cfg.air.kind == AirCfg::Kind::kUdpBroadcast) {
             AirUdpCfg uc = cfg.air.udp;
@@ -274,12 +287,18 @@ struct AirBackend {
             auto owned = std::make_unique<UdpAir>(std::move(*a.value));
             b.udp = owned.get();
             b.air = std::move(owned);
+            b.seed_chan_by_adapter(cfg);
             return Result<AirBackend>::ok(std::move(b));
         }
         if (cfg.air.kind == AirCfg::Kind::kRadio) {
 #if WBLINK_RADIO
             RadioAirCfg rc;
             rc.adapters = cfg.adapters;
+            // §15.2 (Pass 195): with auto on, `adapters` is empty and this is
+            // what tells the backend to find its own. config load has already
+            // refused the auto form on every non-radio backend, so there is no
+            // branch for it above.
+            rc.auto_cfg = cfg.adapter_auto;
             rc.stamp_net_id = cfg.node.net_id.value_or(0);
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;
@@ -330,6 +349,12 @@ struct AirBackend {
             auto owned = std::make_unique<RadioAir>(std::move(*a.value));
             b.radio = owned.get();
             b.air = std::move(owned);
+            // THE WRITE-BACK. Under auto this is where the synthesized stanzas
+            // — elected roles, per-unit MACs, one channel — enter the Config
+            // the rest of the node reads. Under the array form it assigns the
+            // same values back and is a no-op by construction.
+            cfg.adapters = b.radio->resolved_adapters();
+            b.seed_chan_by_adapter(cfg);
             return Result<AirBackend>::ok(std::move(b));
 #else
             return Result<AirBackend>::fail(

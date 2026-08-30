@@ -85,14 +85,14 @@ class TxRuntimeInfo;
 
 // Blocks until `stop` is set or the loop gives up. Owns no process: it does
 // not exit, fork, or install a signal handler. See the header note above.
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply = {});
 
 // Runtime-info overload (Pass 174): the loop publishes immutable status and
 // adapters/caps snapshots into the mailbox for in-process consumers. The
 // overload above remains a real symbol for existing embedders and forwards
 // here with nullptr.
-int run_tx(const Loaded& l, const std::atomic<int>& stop,
+int run_tx(Loaded& l, const std::atomic<int>& stop,
            const ModeApplyFn& mode_apply, TxRuntimeInfo* runtime_info);
 
 #endif  // WBLINK_NODE_TX

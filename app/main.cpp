@@ -507,14 +507,22 @@ int usage(const char* argv0) {
                  "usage: %s <tx|rx|loopback> -c <config.json> "
                  "[--check [--strict] [--json]]\n"
                  "       %s config-schema [--json]\n"
+                 "       %s adapters -c <config.json> [--emit]\n"
                  "  --check         validate config + bindings and exit\n"
                  "  --strict        also report unknown and inert keys\n"
                  "                  (warnings; exit stays 0)\n"
                  "  --json          machine-readable --strict report on stdout\n"
                  "  config-schema   print the declared §15.2 key surface to\n"
                  "                  stdout (JSON is the only format; --json is\n"
-                 "                  accepted for symmetry with #106)\n",
-                 argv0, argv0);
+                 "                  accepted for symmetry with #106)\n"
+                 "  adapters        bring up the radios this config resolves\n"
+                 "                  to, print the election, and exit. --check\n"
+                 "                  cannot answer this: under §15.2 auto the\n"
+                 "                  adapter set is hardware, not config.\n"
+                 "  --emit          with `adapters`, print the result as a\n"
+                 "                  paste-ready array-form \"adapters\" block —\n"
+                 "                  discover once, then freeze the assignment\n",
+                 argv0, argv0, argv0);
     return 2;
 }
 
@@ -553,13 +561,15 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
-    if (mode != "tx" && mode != "rx" && mode != "loopback") {
+    if (mode != "tx" && mode != "rx" && mode != "loopback" &&
+        mode != "adapters") {
         return usage(argv[0]);
     }
     std::string config_path;
     bool check_only = false;
     bool strict = false;
     bool as_json = false;
+    bool emit = false;
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             config_path = argv[++i];
@@ -569,9 +579,24 @@ int main(int argc, char** argv) {
             strict = true;
         } else if (std::strcmp(argv[i], "--json") == 0) {
             as_json = true;
+        } else if (std::strcmp(argv[i], "--emit") == 0) {
+            emit = true;
         } else {
             return usage(argv[0]);
         }
+    }
+    // --emit shapes the `adapters` report; on a flight invocation it would be
+    // silently ignored, which is the class of bug --strict/--json already
+    // refuse above.
+    if (emit && mode != "adapters") {
+        std::fprintf(stderr, "--emit applies to the `adapters` mode only\n");
+        return usage(argv[0]);
+    }
+    if (mode == "adapters" && (check_only || strict || as_json)) {
+        std::fprintf(stderr,
+                     "`adapters` brings up hardware; it is not a --check "
+                     "mode\n");
+        return usage(argv[0]);
     }
     if (config_path.empty()) {
         return usage(argv[0]);
@@ -593,6 +618,63 @@ int main(int argc, char** argv) {
     Loaded l;
     if (const int rc = load_all(config_path, l); rc != 0) {
         return rc;
+    }
+    // §15.2 (Pass 195): the election preview. `--check` structurally cannot
+    // answer "which adapter will transmit" under the auto form — the answer is
+    // the hardware, not the config — so this brings the radios up, prints the
+    // candidate table the backend logs at bring-up, and exits. The array form
+    // is accepted too: it reports the same table, which is how an operator
+    // confirms a bus or mac pin landed on the unit they meant.
+    if (mode == "adapters") {
+        auto air = AirBackend::create(l.cfg);
+        if (!air) {
+            std::fprintf(stderr, "air error: %s\n", air.error.c_str());
+            return 1;
+        }
+        // After create(), l.cfg.adapters is the RESOLVED array either way, so
+        // one loop describes both forms.
+        for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+            const AdapterCfg& a = l.cfg.adapters[i];
+            const AirIface::AdapterCapsView caps = air.value->adapter_caps(i);
+            std::fprintf(stderr,
+                         "adapter %zu: %-20s role=%-2s chan=%u bw=%u "
+                         "part=%s (%s) chip=%s mac=%s power_actuator=%s\n",
+                         i, a.name.c_str(), a.role == Role::kTx ? "tx" : "rx",
+                         a.channel_mhz, unsigned(a.bw),
+                         caps.part.empty() ? "unknown" : caps.part.c_str(),
+                         caps.aliases.empty() ? "-" : caps.aliases.c_str(),
+                         caps.chip.c_str(),
+                         a.mac.empty() ? "none" : a.mac.c_str(),
+                         caps.power_actuator ? "yes" : "no");
+        }
+        if (emit) {
+            // stdout, while the table above went to stderr: this is the half a
+            // caller redirects into a config, and mixing the two would make
+            // `> adapters.json` produce something that does not parse.
+            std::string out = "  \"adapters\": [\n";
+            for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
+                const AdapterCfg& a = l.cfg.adapters[i];
+                out += "    { \"name\": \"" + a.name + "\"";
+                // The mac is the point of emitting: it is what makes the
+                // frozen array bind to the same physical units after a
+                // re-plug (§15.2 precedence mac > bus > first-free).
+                if (!a.mac.empty()) out += ", \"mac\": \"" + a.mac + "\"";
+                out += ", \"role\": \"";
+                out += a.role == Role::kTx ? "tx" : "rx";
+                out += "\", \"channel\": " + std::to_string(a.channel_mhz);
+                out += ", \"bw\": " + std::to_string(unsigned(a.bw));
+                out += " }";
+                if (i + 1 < l.cfg.adapters.size()) out += ',';
+                out += '\n';
+            }
+            out += "  ]\n";
+            if (std::fwrite(out.data(), 1, out.size(), stdout) != out.size() ||
+                std::fflush(stdout) != 0) {
+                std::perror("adapters --emit: write");
+                return 1;
+            }
+        }
+        return 0;
     }
     if (check_only) {
         auto bindings = BindingSet::create(l.cfg);

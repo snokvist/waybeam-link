@@ -37,7 +37,21 @@ namespace wblink {
 // parse_stream_type() (io/src/config.cpp:43) accepts as either the numeric id
 // or its spelled name. Declaring it as either one alone would make a --strict
 // type check reject a shape the loader takes.
-enum class KeyType { kObject, kArray, kString, kNumber, kBool, kStringOrNumber };
+//
+// kArrayOrObject exists for exactly one key on the same reasoning:
+// §15.2 `adapters` is an array of stanzas OR the Pass 195 `{"auto": {...}}`
+// object, and the loader takes both. The published schema must say so —
+// declaring it an array would tell a config generator that the auto form is
+// invalid, which is the one thing a declared surface must never do.
+enum class KeyType {
+    kObject,
+    kArray,
+    kString,
+    kNumber,
+    kBool,
+    kStringOrNumber,
+    kArrayOrObject
+};
 
 struct KeyEntry {
     // Dotted path; see the header comment for "[]" semantics.

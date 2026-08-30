@@ -1441,5 +1441,116 @@ int main() {
                      "power_offset_presets_qdb on a role:\"rx\" adapter");
     }
 
+    // --- §15.2 (Pass 195) the `adapters` AUTO object form ------------------
+    {
+        // A whole auto ground config: node identity, one stream, one channel.
+        // This is the shape the feature exists to make possible, so it is
+        // asserted whole rather than by diffing the array sample.
+        const char* kAuto = R"({
+  "node": { "originator": 9, "role": "rx" },
+  "adapters": { "auto": { "channel": 5805 } },
+  "streams": [ { "stream_id": 0, "stream_type": "RTP", "dir": "out",
+                 "bind": { "kind": "udp", "send": "127.0.0.1:5600" } } ],
+  "air": { "kind": "radio" }
+})";
+        auto r = load_config_json(kAuto);
+        CHECK(bool(r));
+        if (r) {
+            const AdapterAutoCfg& a = r.value->adapter_auto;
+            CHECK(a.enabled);
+            CHECK_EQ_U(a.channel_mhz, 5805u);
+            CHECK_EQ_U(a.bw, 20u);          // seed
+            CHECK_EQ_U(a.max_adapters, 4u); // seed
+            CHECK(a.tx_priority.empty());   // empty = take the default order
+            // The array is EMPTY at load and stays that way until the backend
+            // elects: nothing downstream may assume stanzas exist yet.
+            CHECK(r.value->adapters.empty());
+            // Power keys default to the §10.5 safe posture, so an auto config
+            // that says nothing about power boots backed off, not at the
+            // uncharacterised efuse default.
+            CHECK_EQ_U(a.tx_template.power_offset_qdb + 512, -24 + 512);
+            CHECK_EQ_U(a.tx_template.power_offset_max_qdb + 512, 0 + 512);
+        }
+
+        // Every knob, and the power keys parsed through the SAME helper a
+        // role:"tx" stanza uses — including the clamp to power_offset_max_qdb.
+        const char* kAutoFull = R"({
+  "node": { "originator": 17, "role": "tx" },
+  "adapters": { "auto": { "channel": 5745, "bw": 40, "max_adapters": 2,
+                          "tx_priority": ["8733BU", "8812EU"],
+                          "power_offset_qdb": -96,
+                          "power_offset_max_qdb": 16,
+                          "power_offset_presets_qdb": [-96, -48, 64] } },
+  "air": { "kind": "radio" }
+})";
+        auto full = load_config_json(kAutoFull);
+        CHECK(bool(full));
+        if (full) {
+            const AdapterAutoCfg& a = full.value->adapter_auto;
+            CHECK_EQ_U(a.channel_mhz, 5745u);
+            CHECK_EQ_U(a.bw, 40u);
+            CHECK_EQ_U(a.max_adapters, 2u);
+            CHECK_EQ_U(a.tx_priority.size(), 2u);
+            CHECK(a.tx_priority[0] == "8733BU");
+            CHECK_EQ_U(a.tx_template.power_offset_qdb + 512, -96 + 512);
+            // 64 > power_offset_max_qdb 16, so the shared parser clamps it —
+            // the auto form must not be a way around the §10.3/§10.5 ceiling.
+            CHECK_EQ_U(a.tx_template.power_offset_presets_qdb.size(), 3u);
+            CHECK_EQ_U(a.tx_template.power_offset_presets_qdb[2] + 512,
+                       16 + 512);
+        }
+
+        // policy.csa.home_chan is the channel default (§11.5 Pass 195) — the
+        // key was read by nothing at all before this.
+        const char* kHome = R"({
+  "node": { "originator": 9, "role": "rx" },
+  "adapters": { "auto": {} },
+  "policy": { "csa": { "home_chan": 5825 } },
+  "air": { "kind": "radio" }
+})";
+        auto home = load_config_json(kHome);
+        CHECK(bool(home));
+        if (home) CHECK_EQ_U(home.value->adapter_auto.channel_mhz, 5825u);
+
+        // An explicit channel wins over home_chan rather than being merged.
+        auto both = load_config_json(subst(kHome, "\"auto\": {}",
+                                           "\"auto\": {\"channel\": 5745}"));
+        CHECK(bool(both));
+        if (both) CHECK_EQ_U(both.value->adapter_auto.channel_mhz, 5745u);
+
+        // --- refusals ------------------------------------------------------
+        // No channel anywhere: there is no safe default, so this is an error
+        // and not a silent 5805.
+        expect_error(subst(kHome, "\"home_chan\": 5825", "\"min_interval_s\": 5"),
+                     "no channel");
+        // The object form must carry `auto` — an object with anything else in
+        // it is a typo, not a config.
+        expect_error(subst(kHome, "\"auto\": {}", "\"autoo\": {}"),
+                     "carries an \"auto\" object");
+        // Radio-only: the udp dev backend has no devices to discover.
+        expect_error(subst(kHome, "\"kind\": \"radio\"", "\"kind\": \"udp\""),
+                     "radio-backend feature");
+        // §9.4 stage-0 is a per-UNIT proof and auto elects the unit, so the
+        // combination is refused rather than probing on an unproven die.
+        // On a TX node: an rx node is already refused by the older §15.2
+        // "mcs_probe is a TX-node key" rule, which would mask this one.
+        expect_error(subst(kAutoFull, "\"kind\": \"radio\"",
+                           "\"kind\": \"radio\", \"mcs_probe\": true"),
+                     "per-UNIT enablement");
+        expect_error(subst(kHome, "\"auto\": {}", "\"auto\": {\"bw\": 30}"),
+                     "bw must be 20, 40 or 80");
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"max_adapters\": 40}"),
+                     "max_adapters must be 0..8");
+        // An explicit empty list would read as "no preference" while meaning
+        // the opposite — plan_adapters takes empty as "use the seed".
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"tx_priority\": []}"),
+                     "tx_priority is empty");
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"tx_priority\": [\"\"]}"),
+                     "tx_priority holds an empty name");
+    }
+
     return wbtest_finish("config_test");
 }

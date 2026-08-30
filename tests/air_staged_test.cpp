@@ -110,7 +110,7 @@ class FakeStagingAir : public AirIface {
     bool is_rf() const override { return true; }
     std::string adapter_mac(size_t) const override { return {}; }
     AdapterCapsView adapter_caps(size_t) const override {
-        return AdapterCapsView{"fake", false, false, false};
+        return AdapterCapsView{"fake", "", "", false, false, false};
     }
     std::optional<AirSense> rx_sense(size_t) override { return std::nullopt; }
     uint64_t rx_frames(size_t) const override { return 0; }

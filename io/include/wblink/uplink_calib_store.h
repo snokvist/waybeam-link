@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "wblink/calib_store.h"      // calib_identity_slug (shared rule)
 #include "wblink/config.h"           // Result<>
 #include "wblink/uplink_calibrate.h" // UplinkPlacement
 
@@ -40,14 +41,21 @@ struct UplinkArtifact {
 // every stored fingerprint. Never returns 0 (the "no artifact" sentinel).
 uint8_t uplink_calib_fingerprint(const UplinkArtifact& a);
 
-// Atomic write (tmp + rename) of uplink-artifact.json. Returns the
-// fingerprint, or 0 on failure.
+// Atomic write (tmp + rename) of uplink-artifact-<identity>.json — one per
+// LOCAL adapter identity since Pass 195, so a ground that rotates uplink
+// dongles keeps each unit's placement instead of the last one written. The
+// filename derives from a.local_adapter_identity, which the artifact already
+// carries, so this signature is unchanged.
 uint8_t uplink_calib_store_write(const std::string& dir,
                                  const UplinkArtifact& a);
 
-// Load and integrity-check. Fails when absent, unparsable, or when the
-// stored fingerprint disagrees with the recomputed one.
-Result<UplinkArtifact> uplink_calib_store_load(const std::string& dir);
+// Load and integrity-check this identity's artifact. Fails when absent,
+// unparsable, or when the stored fingerprint disagrees with the recomputed
+// one. Falls back to the pre-Pass-195 fixed `uplink-artifact.json`;
+// uplink_calib_matches() is unchanged and still decides whether what came back
+// may be applied.
+Result<UplinkArtifact> uplink_calib_store_load(const std::string& dir,
+                                              const std::string& identity);
 
 // §10.7 apply gate: same local adapter, same craft, same band/bandwidth.
 // A mismatch is surfaced as stale and never applied — the hardware stays at

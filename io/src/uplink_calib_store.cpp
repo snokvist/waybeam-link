@@ -16,7 +16,15 @@ namespace {
 using json = nlohmann::json;
 
 constexpr int kSchema = 1;
-constexpr const char* kFile = "/uplink-artifact.json";
+// §10.7 (Pass 195): one artifact per LOCAL adapter identity, the same rule
+// and the same directory as §10.6's. kLegacyFile is the pre-195 fixed name,
+// read as a fallback so a deployed ground keeps its measurement across the
+// upgrade; the identity check in uplink_calib_matches() is unchanged and is
+// still what decides whether it applies.
+std::string artifact_path(const std::string& dir, const std::string& identity) {
+    return dir + "/uplink-artifact-" + calib_identity_slug(identity) + ".json";
+}
+constexpr const char* kLegacyFile = "/uplink-artifact.json";
 
 std::string read_file(const std::string& path) {
     std::ifstream f(path);
@@ -133,11 +141,18 @@ uint8_t uplink_calib_store_write(const std::string& dir,
         ps.push_back(std::move(e));
     }
     j["placements"] = std::move(ps);
-    return write_atomic(dir + kFile, j.dump(2)) ? fp : uint8_t{0};
+    // The identity is IN the artifact, so the filename derives from it and
+    // the write signature is unchanged.
+    return write_atomic(artifact_path(dir, a.local_adapter_identity),
+                        j.dump(2))
+               ? fp
+               : uint8_t{0};
 }
 
-Result<UplinkArtifact> uplink_calib_store_load(const std::string& dir) {
-    const std::string body = read_file(dir + kFile);
+Result<UplinkArtifact> uplink_calib_store_load(const std::string& dir,
+                                              const std::string& identity) {
+    std::string body = read_file(artifact_path(dir, identity));
+    if (body.empty()) body = read_file(dir + kLegacyFile);
     if (body.empty()) return Result<UplinkArtifact>::fail("no artifact");
     json j = json::parse(body, nullptr, false);
     if (j.is_discarded() || !j.is_object()) {

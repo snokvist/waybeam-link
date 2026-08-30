@@ -36,7 +36,17 @@ REGIONS = [
     ("load_config_json", ""),
     ("parse_bind", "streams[].bind"),
     ("parse_bind", "stats.bind"),
+    # §15.2 (Pass 195): the power keys are parsed once for both adapter forms,
+    # so like parse_bind this region is walked once per parent.
+    ("parse_adapter_power", "adapters[]"),
+    ("parse_adapter_power", "adapters.auto"),
 ]
+
+# Sub-parsers reached from more than one parent. REGIONS hardcodes the parent
+# path for each caller, so a caller nobody added leaves that whole sub-object
+# unregistered while this test still reports agreement. The counts are pinned
+# rather than trusted; see caller_count().
+SHARED_PARSERS = ["parse_bind", "parse_adapter_power"]
 
 # Functions that hold accessor calls which are NOT node-config keys. Listed so
 # that "every accessor site in the file is accounted for" can be asserted:
@@ -165,20 +175,21 @@ def forbidden_sites(text):
     return sorted(set(out))
 
 
-def bind_caller_count(text):
-    """How many places call parse_bind, so REGIONS cannot fall behind them.
+def caller_count(text, name):
+    """How many places call `name`, so REGIONS cannot fall behind them.
 
-    parse_bind is the only shared sub-parser and REGIONS hardcodes the parent
-    path for each of its callers. A third caller would leave its whole bind
-    sub-object unregistered while this test still reported agreement, so the
-    count is pinned rather than trusted. One occurrence is the definition.
+    A shared sub-parser's parent path is hardcoded in REGIONS per caller. An
+    unlisted caller would leave that whole sub-object unregistered while this
+    test still reported agreement, so the count is pinned rather than trusted.
+    One occurrence is the definition.
 
     Counted over blanked source: a comment that merely mentions parse_bind(
     would otherwise report a caller that does not exist, and the failure's
     prescribed remedy — adding a REGIONS entry — would then break the test a
     different way.
     """
-    return len(re.findall(r'\bparse_bind\(', blank_literals(text))) - 1
+    return len(re.findall(r'\b' + re.escape(name) + r'\(',
+                          blank_literals(text))) - 1
 
 
 def unwalked_sites(text):
@@ -242,16 +253,17 @@ def main():
     registry = registry_paths()
     fail = False
 
-    expected_callers = sum(1 for n, _ in REGIONS if n == "parse_bind")
-    actual_callers = bind_caller_count(text)
-    if actual_callers != expected_callers:
-        fail = True
-        print(f"FAIL: parse_bind has {actual_callers} caller(s) but REGIONS "
-              f"seeds {expected_callers}.")
-        print("      Add the new caller to REGIONS with the dotted path of its "
-              "bind object, or")
-        print("      that whole sub-object goes unregistered while this test "
-              "still reports agreement.")
+    for parser in SHARED_PARSERS:
+        expected_callers = sum(1 for n, _ in REGIONS if n == parser)
+        actual_callers = caller_count(text, parser)
+        if actual_callers != expected_callers:
+            fail = True
+            print(f"FAIL: {parser} has {actual_callers} caller(s) but REGIONS "
+                  f"seeds {expected_callers}.")
+            print("      Add the new caller to REGIONS with the dotted path of "
+                  "the object it parses, or")
+            print("      that whole sub-object goes unregistered while this "
+                  "test still reports agreement.")
 
     if forbidden:
         fail = True

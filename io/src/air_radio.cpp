@@ -28,6 +28,7 @@
 #include "WiFiDriver.h"
 #include "logger.h"
 #include "wblink/airtime.h"
+#include "wblink/adapter_elect.h"   // §15.2 auto election
 #include "wblink/cookie_stream.h"  // bionic has no fopencookie
 #include "wblink/dot11.h"
 #include "wblink/log.h"
@@ -62,6 +63,60 @@ uint64_t steady_ms() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
+}
+
+// §15.2 (Pass 195): is this Realtek device a RADIO?
+//
+// The claim scan used to test the vendor id and nothing else, so a first-free
+// claim could open a Realtek Bluetooth dongle, card reader or the ZeroCD
+// storage identity (0bda:1a2b) — unlucky in the array form, routine under auto,
+// which claims up to max_adapters of whatever it finds.
+//
+// The test is the interface descriptor, read WITHOUT opening the device: a
+// vendor-specific (0xFF) interface carrying at least one bulk IN and one bulk
+// OUT endpoint. Every radio devourer supports presents exactly that (it is the
+// pipe pair UsbTransport goes on to use); Bluetooth is class 0xE0, mass storage
+// 0x08, HID 0x03. Preferred to a USB-PID allowlist because a PID list rots as
+// new dongles ship, while what makes a device a radio to us does not.
+//
+// A device whose descriptor cannot be read is NOT a candidate: unreadable is
+// not "probably fine" when the next step detaches its kernel driver.
+bool is_radio_candidate(libusb_device* dev) {
+    libusb_device_descriptor dd;
+    if (libusb_get_device_descriptor(dev, &dd) != 0 ||
+        dd.idVendor != kRealtekVid) {
+        return false;
+    }
+    libusb_config_descriptor* cfg = nullptr;
+    if (libusb_get_active_config_descriptor(dev, &cfg) != 0 || cfg == nullptr) {
+        return false;
+    }
+    bool radio = false;
+    for (uint8_t i = 0; i < cfg->bNumInterfaces && !radio; ++i) {
+        const libusb_interface& itf = cfg->interface[i];
+        for (int alt = 0; alt < itf.num_altsetting && !radio; ++alt) {
+            const libusb_interface_descriptor& id = itf.altsetting[alt];
+            if (id.bInterfaceClass != LIBUSB_CLASS_VENDOR_SPEC) continue;
+            bool bulk_in = false;
+            bool bulk_out = false;
+            for (uint8_t e = 0; e < id.bNumEndpoints; ++e) {
+                const libusb_endpoint_descriptor& ep = id.endpoint[e];
+                if ((ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
+                    LIBUSB_TRANSFER_TYPE_BULK) {
+                    continue;
+                }
+                if ((ep.bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) ==
+                    LIBUSB_ENDPOINT_IN) {
+                    bulk_in = true;
+                } else {
+                    bulk_out = true;
+                }
+            }
+            radio = bulk_in && bulk_out;
+        }
+    }
+    libusb_free_config_descriptor(cfg);
+    return radio;
 }
 
 std::string usb_path_of(libusb_device* dev) {
@@ -129,6 +184,12 @@ struct RadioAir::Impl {
         // §15.5 (Pass 172): the rest of the per-die answers, cached at the
         // same bring-up read so adapter_caps() never touches USB.
         std::string chip = "unknown";
+        // §15.2 (Pass 195): the DIE and its marketing aliases, cached at the
+        // same read. The generation above cannot separate an 8812EU from an
+        // 8812CU (both jaguar3), which is the distinction the auto election
+        // and every operator-facing readout actually need.
+        std::string part;
+        std::string aliases;
         bool fastretune_ok = false;
         std::thread rx_thread;
         // RX-thread-owned counters (relaxed atomics; read from stats).
@@ -527,37 +588,129 @@ uint16_t RadioAir::rx_drop_permille() const {
     return impl_->rx_drop_permille.load(std::memory_order_relaxed);
 }
 
-Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
-    if (cfg.adapters.empty()) {
-        return Result<RadioAir>::fail("radio: no adapters configured");
-    }
-    size_t n_tx = 0;
-    for (const auto& a : cfg.adapters) {
-        n_tx += (a.role == Role::kTx) ? 1 : 0;
-    }
-    // §3.11 (Pass 162): at most one designated uplink (§6.4); zero only for
-    // the uplink-free archetypes the caller vouches for via allow_rx_only.
-    if (n_tx > 1 || (n_tx == 0 && !cfg.allow_rx_only)) {
-        return Result<RadioAir>::fail(
-            "radio: exactly one adapter must have role \"tx\" (the "
-            "designated uplink / craft radio), got " +
-            std::to_string(n_tx));
-    }
-    if (n_tx == 0) {
-        // Fail closed (Pass 156/157 posture): each of these names a TX-die
-        // property; on a node with no TX die it would run silently inert.
-        const char* knob = cfg.ack_responder     ? "air.ack_responder"
-                           : cfg.unicast_returns ? "policy.return.unicast"
-                           : cfg.ldpc            ? "air.ldpc"
-                           : cfg.stbc            ? "air.stbc"
-                           : cfg.mcs_probe       ? "air.mcs_probe"
-                                                 : nullptr;
-        if (knob != nullptr) {
-            return Result<RadioAir>::fail(
-                std::string("radio: ") + knob +
-                " names a TX-die property, but no adapter has role \"tx\" "
-                "(§3.11 Pass 162 — RX-only bring-up fails closed)");
+Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
+    // §15.2 (Pass 195). Under auto the stanza array does not exist yet: it is
+    // built from the device set below, and roles are elected only after
+    // bring-up, because the die is not knowable from the USB descriptor.
+    // Everything past the enumeration reads `cfg.adapters` exactly as the
+    // array form always did — which is why cfg is taken by value.
+    const bool automode = cfg.auto_cfg.enabled;
+
+    // Each of these names a TX-die property; on a node with no TX die it would
+    // run silently inert (Pass 156/157 posture). Shared by the two forms.
+    const auto tx_die_knob = [&cfg]() -> const char* {
+        return cfg.ack_responder     ? "air.ack_responder"
+               : cfg.unicast_returns ? "policy.return.unicast"
+               : cfg.ldpc            ? "air.ldpc"
+               : cfg.stbc            ? "air.stbc"
+               : cfg.mcs_probe       ? "air.mcs_probe"
+                                     : nullptr;
+    };
+
+    if (!automode) {
+        if (cfg.adapters.empty()) {
+            return Result<RadioAir>::fail("radio: no adapters configured");
         }
+        size_t n_tx = 0;
+        for (const auto& a : cfg.adapters) {
+            n_tx += (a.role == Role::kTx) ? 1 : 0;
+        }
+        // §3.11 (Pass 162): at most one designated uplink (§6.4); zero only for
+        // the uplink-free archetypes the caller vouches for via allow_rx_only.
+        if (n_tx > 1 || (n_tx == 0 && !cfg.allow_rx_only)) {
+            return Result<RadioAir>::fail(
+                "radio: exactly one adapter must have role \"tx\" (the "
+                "designated uplink / craft radio), got " +
+                std::to_string(n_tx));
+        }
+        if (n_tx == 0) {
+            if (const char* knob = tx_die_knob()) {
+                return Result<RadioAir>::fail(
+                    std::string("radio: ") + knob +
+                    " names a TX-die property, but no adapter has role \"tx\" "
+                    "(§3.11 Pass 162 — RX-only bring-up fails closed)");
+            }
+        }
+    } else {
+        if (!cfg.adapters.empty()) {
+            return Result<RadioAir>::fail(
+                "radio: auto_cfg.enabled with a non-empty adapters array — "
+                "the §15.2 forms are exclusive and the caller must pick one");
+        }
+        // The role counts cannot be checked yet — the election has not run.
+        // What CAN be decided pre-USB is the rx-only case: allow_rx_only means
+        // no TX will be elected however the ranking comes out, so a TX-die
+        // knob is refused here, before a single device is opened, exactly as
+        // it is in the array form. The other direction needs no check: with
+        // allow_rx_only false a TX is always elected, or create fails for
+        // want of any candidate at all.
+        if (cfg.allow_rx_only) {
+            if (const char* knob = tx_die_knob()) {
+                return Result<RadioAir>::fail(
+                    std::string("radio: ") + knob +
+                    " names a TX-die property, but this node is a §3.11 "
+                    "uplink-free archetype, so adapters.auto elects no tx "
+                    "adapter (RX-only bring-up fails closed)");
+            }
+        }
+        if (mhz_to_channel(cfg.auto_cfg.channel_mhz) == 0) {
+            return Result<RadioAir>::fail(
+                "radio: adapters.auto: bad channel " +
+                std::to_string(cfg.auto_cfg.channel_mhz) + " MHz");
+        }
+    }
+
+    // §15.2 (Pass 195) auto: build the provisional stanza array from the
+    // DEVICE SET. One rule, both device sources — the caller-supplied fds when
+    // it has them (unrooted Android cannot enumerate usbfs), otherwise every
+    // enumerated radio. Every stanza starts role:"rx" on the auto block's
+    // channel; the election below turns exactly one of them into the uplink.
+    //
+    // No cap is applied here. `max_adapters` keeps the BEST N (§15.2), and
+    // which N those are is not knowable until each die has identified itself,
+    // so a surplus unit is claimed and brought up and then released. That
+    // costs one bring-up per surplus radio and buys the operator a cap that
+    // means what it says.
+    if (automode) {
+        size_t found = 0;
+        if (!cfg.adapter_fds.empty()) {
+            found = cfg.adapter_fds.size();
+        } else {
+            libusb_context* scan = nullptr;
+            if (libusb_init(&scan) != 0) {
+                return Result<RadioAir>::fail(
+                    "radio: adapters.auto: libusb_init failed");
+            }
+            libusb_device** list = nullptr;
+            const ssize_t n = libusb_get_device_list(scan, &list);
+            for (ssize_t k = 0; k < n; ++k) {
+                if (is_radio_candidate(list[k])) ++found;
+            }
+            if (n >= 0) libusb_free_device_list(list, 1);
+            libusb_exit(scan);
+        }
+        if (found == 0) {
+            return Result<RadioAir>::fail(
+                "radio: adapters.auto found no radio — no Realtek device "
+                "exposing a vendor-specific bulk interface is present (a "
+                "Bluetooth or card-reader dongle on the same vendor id is "
+                "deliberately not a candidate)");
+        }
+        for (size_t i = 0; i < found; ++i) {
+            AdapterCfg a;
+            // Provisional: renamed from the election's synthesized stanza
+            // before anything can read it. Distinct here only so a claim
+            // failure names something.
+            a.name = "auto" + std::to_string(i);
+            a.role = Role::kRx;
+            a.channel_mhz = cfg.auto_cfg.channel_mhz;
+            a.bw = cfg.auto_cfg.bw;
+            cfg.adapters.push_back(std::move(a));
+        }
+        wb_logf("radio: adapters.auto: %zu candidate radio(s) from %s\n",
+                found,
+                cfg.adapter_fds.empty() ? "USB enumeration"
+                                        : "the caller's adapter_fds");
     }
 
     // B1 (Phase 1b) device source. Validated here, before any libusb work,
@@ -627,7 +780,13 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
     im.rx_drop_permille.store(cfg.rx_drop_permille,
                               std::memory_order_relaxed);
     im.usb_tx_agg = cfg.usb_tx_agg;
-    im.has_tx = n_tx == 1;  // §3.11 Pass 162; roles never change post-create
+    // §3.11 Pass 162; roles never change post-create. Under auto this is
+    // false here — cfg.adapters is still empty — and is re-set from the
+    // election below, before any RX thread or inject can observe it.
+    im.has_tx = false;
+    for (const AdapterCfg& a : cfg.adapters) {
+        im.has_tx = im.has_tx || (a.role == Role::kTx);
+    }
     im.filter_net_id.store(cfg.filter_net_id
                                ? static_cast<int16_t>(*cfg.filter_net_id)
                                : static_cast<int16_t>(-1),
@@ -756,9 +915,15 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
             const int passes = (!ac.bus.empty() && !ac.mac.empty()) ? 2 : 1;
             for (int pass = 0; pass < passes && found == nullptr; ++pass) {
                 for (ssize_t k = 0; k < n; ++k) {
-                    libusb_device_descriptor dd;
-                    if (libusb_get_device_descriptor(list[k], &dd) != 0 ||
-                        dd.idVendor != kRealtekVid) {
+                    // §15.2 (Pass 195): a RADIO, not merely a Realtek device.
+                    // This scan used to test the vendor id alone, so a
+                    // first-free claim could open a Bluetooth dongle or the
+                    // ZeroCD storage identity and then detach its kernel
+                    // driver. An explicit bus pin is unaffected — it names a
+                    // port, and a non-radio at that port still fails at claim,
+                    // now with a filter that never offered it in the first
+                    // place.
+                    if (!is_radio_candidate(list[k])) {
                         continue;
                     }
                     const std::string path = usb_path_of(list[k]);
@@ -876,7 +1041,7 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // created report-capable — the flag only gates TX-descriptor
         // stamping (RtlJaguar*Device TX path), and a diversity ear never
         // injects, so it stays inert there.
-        dc.tx.report = any_mac_pin ? 1 : ad->tx;
+        dc.tx.report = (any_mac_pin || automode) ? 1 : ad->tx;
         // §3.0 (Pass 156): unicast hardware-retry limit. Consumed
         // per-TX-descriptor (like tx.report), so it is set uniformly — an
         // RX-only ear never injects and broadcast frames carry no ACK
@@ -894,8 +1059,18 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         // that makes tx.report unconditional does not apply: this only has
         // to be right before the first STAGED send, and re-binding finishes
         // before any TX starts.
-        dc.tx.usb_agg_max =
-            ad->tx ? static_cast<unsigned>(cfg.usb_tx_agg) : 0u;
+        //
+        // §15.2 (Pass 195) AUTO IS THE EXCEPTION, and it is a real one. The
+        // election runs after bring-up, so under auto the injecting unit does
+        // not exist yet at construction — and unlike tx.report this flag is
+        // consumed during HAL init, not per descriptor, so it cannot be
+        // applied later. Every claimed unit therefore takes it, which costs a
+        // diversity ear one MAC-init write it does not need. The default is 0,
+        // so a node that has not opted into aggregation is unaffected; §15.2
+        // records the trade rather than hiding it.
+        dc.tx.usb_agg_max = (ad->tx || automode)
+                                ? static_cast<unsigned>(cfg.usb_tx_agg)
+                                : 0u;
         // MAC carrier-sense gate. Applied to every adapter, not just the TX
         // one: an RX-only ear that defers has nothing to defer, but the
         // bring-up posture stays uniform across the node.
@@ -931,6 +1106,11 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
         const devourer::AdapterCaps dcaps = ad.dev->GetAdapterCaps();
         ad.ldpc_flag_ok = dcaps.ldpc_rx_flag;
         ad.chip = devourer::generation_name(dcaps.generation);
+        // §15.2 (Pass 195). Copied, not aliased: AdapterCaps hands out
+        // `const char*` into static storage today, but this struct outlives
+        // the caps object and a future per-unit string would dangle.
+        ad.part = dcaps.chip_name != nullptr ? dcaps.chip_name : "";
+        ad.aliases = dcaps.marketing_names != nullptr ? dcaps.marketing_names : "";
         ad.fastretune_ok = dcaps.fastretune_ok;
         // §10.5 (Pass 171): whether this die has a TX-power lever at all,
         // read at the same moment and for the same reason. ANNOUNCED on a
@@ -952,6 +1132,71 @@ Result<RadioAir> RadioAir::create(const RadioAirCfg& cfg) {
                           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
             ad.mac = buf;
         }
+    }
+
+    // §15.2 (Pass 195) THE ELECTION. Every unit is up and has named its die
+    // and its EFUSE identity, which is the earliest moment the ranking can be
+    // computed at all (RTL8812EU and RTL8812AU share PID 0x8812). No RX thread
+    // has started and nothing has been injected, so roles are still free to
+    // assign — the same window the Pass 154 mac re-bind below uses.
+    if (automode) {
+        std::vector<AdapterCandidate> cands;
+        cands.reserve(im.adapters.size());
+        for (const auto& up : im.adapters) {
+            cands.push_back(
+                AdapterCandidate{up->part, up->aliases, up->mac, up->path});
+        }
+        const AdapterPlan plan =
+            plan_adapters(cands, cfg.auto_cfg, !cfg.allow_rx_only);
+        // Declared, never silent (§15.2): the whole table, rejects included,
+        // before anything acts on it.
+        wb_logf("%s", describe_plan(cands, plan, cfg.auto_cfg).c_str());
+
+        // Release the units the cap dropped. Safe here and nowhere later: no
+        // RX thread exists yet, so ~Adapter is the plain power-down path.
+        std::vector<std::unique_ptr<Impl::Adapter>> kept;
+        kept.reserve(plan.keep.size());
+        for (const size_t k : plan.keep) {
+            kept.push_back(std::move(im.adapters[k]));
+        }
+        for (auto& up : im.adapters) {
+            if (up) {
+                wb_logf("radio: adapters.auto: releasing %s (%s) — beyond "
+                        "max_adapters\n",
+                        up->path.c_str(),
+                        up->part.empty() ? "unknown part" : up->part.c_str());
+            }
+        }
+        im.adapters = std::move(kept);
+
+        cfg.adapters = auto_stanzas(cands, plan, cfg.auto_cfg);
+        if (cfg.adapters.size() != im.adapters.size()) {
+            // Unreachable: auto_stanzas walks the same plan.keep this loop
+            // did. Asserted anyway, because every index on this interface is
+            // a stanza index and a silent skew here would mis-address power,
+            // calibration and stats for the life of the node.
+            return Result<RadioAir>::fail(
+                "radio: adapters.auto: internal skew, " +
+                std::to_string(cfg.adapters.size()) + " stanzas for " +
+                std::to_string(im.adapters.size()) + " units");
+        }
+        im.has_tx = false;
+        for (size_t i = 0; i < im.adapters.size(); ++i) {
+            Impl::Adapter& ad = *im.adapters[i];
+            const AdapterCfg& ac = cfg.adapters[i];
+            ad.name = ac.name;
+            ad.tx = (ac.role == Role::kTx);
+            // Re-seeded because the cap may have shifted this unit's index,
+            // and the bench drop knob wants adapter-distinct streams.
+            ad.drop_rng = 0x9E3779B9u ^ static_cast<uint32_t>(i + 1);
+            if (ad.tx) {
+                im.tx_idx = i;
+                im.has_tx = true;
+            }
+        }
+        // The stored copy is what resolved_adapters() publishes; im.cfg was
+        // taken before the enumeration and still holds the empty array.
+        im.cfg.adapters = cfg.adapters;
     }
 
     // §15.2 (Pass 154) re-bind: mac pins first (they outrank a bus claim),
@@ -1464,13 +1709,20 @@ std::optional<AirIface::TxPowerApplied> RadioAir::tx_power_applied(
                           a.power_saturated_high, true};
 }
 
+const std::vector<AdapterCfg>& RadioAir::resolved_adapters() const {
+    // The array form stores the authored stanzas untouched; the auto form
+    // overwrote them with the election's result before any RX thread started.
+    // Either way this is the list every `size_t adapter` index addresses.
+    return impl_->cfg.adapters;
+}
+
 AirIface::AdapterCapsView RadioAir::adapter_caps(size_t adapter) const {
     if (adapter >= impl_->adapters.size()) return AdapterCapsView{};
     const Impl::Adapter& a = *impl_->adapters[adapter];
-    // All four cached at bring-up (§15.5 Pass 172) — this read is USB-free,
-    // the same property tx_power_applied() latches for.
-    return AdapterCapsView{a.chip, a.power_actuator_ok, a.ldpc_flag_ok,
-                           a.fastretune_ok};
+    // All cached at bring-up (§15.5 Pass 172) — this read is USB-free, the
+    // same property tx_power_applied() latches for.
+    return AdapterCapsView{a.chip,           a.part,          a.aliases,
+                           a.power_actuator_ok, a.ldpc_flag_ok, a.fastretune_ok};
 }
 
 // §10.5 (Pass 150): devourer's native lever already IS the relative one —

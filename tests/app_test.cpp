@@ -970,7 +970,7 @@ class FakeAir : public AirIface {
     bool is_rf() const override { return rf; }
     std::string adapter_mac(size_t) const override { return {}; }
     AdapterCapsView adapter_caps(size_t) const override {
-        return AdapterCapsView{"fake", false, false, false};
+        return AdapterCapsView{"fake", "", "", false, false, false};
     }
     std::optional<AirSense> rx_sense(size_t) override { return sense; }
     std::optional<AirSense> sense;  // §15.5a: injectable for scout tests
