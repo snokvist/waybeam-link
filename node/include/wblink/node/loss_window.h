@@ -43,8 +43,16 @@ class LossWindow {
 
     // Feed the CUMULATIVE counters as of `now`; get loss over the trailing
     // window. Anchored on the oldest sample still inside it, so the span is at
-    // most window_ms however irregularly the caller ticks — the stats cadence
-    // is config (`stats.hz`), not a constant, and a caller may stall.
+    // most window_ms whenever two or more samples are in range — the stats
+    // cadence is config (`stats.hz`), not a constant. The ONE exception is a
+    // caller that stalls for longer than the window: rather than report
+    // nothing, the last sample is kept as an anchor and the next reading spans
+    // however long the stall was. It self-corrects on the following tick.
+    //
+    // `now` is assumed nondecreasing (the node feeds it from a steady_clock).
+    // A backward step would put the ring out of order and make the anchor
+    // search meaningless; the counters are guarded against going backwards,
+    // time is not.
     //
     // An empty denominator HOLDS the previous value instead of reading 0. A
     // link that has gone silent expects nothing and loses nothing, and "0%
