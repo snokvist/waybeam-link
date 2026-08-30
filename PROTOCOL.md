@@ -445,6 +445,23 @@ startup on an uplink stream — the pure loader cannot decide, the shape
 is role-dependent). The uplink acceptor's admission rules are §7.5's,
 not this section's unknown-type rule (which governs RxEngine consumers).
 
+**The fallback MUST be observable, and it is STICKY (Pass 197).** A stream in
+best-effort keeps delivering by diversity and FEC while ARQ eligibility, §6.2-2
+supersession and deadline drops are all suspended — and the three counters that
+would betray that (`nacks_sent`, `dropped_superseded`, `dropped_deadline`) read
+**0**, which is exactly what a healthy link with nothing to recover reads. The
+degradation was therefore indistinguishable from health: measured 2026-08-30, a
+craft and a ground on two legitimately different §9.3 tables ran for hours with
+unrecoverable frames accumulating and no operator-visible cause. A receiver
+MUST therefore publish the state per stream (§15.3 `best_effort`,
+`table_mismatch`), report it distinctly from the §11.7 ARQ latch (§15.5
+`arq_effective`), and log the false→true edge once naming both table versions.
+Nothing clears `best_effort` but stream teardown, so re-aligning the two tables
+does **not** heal a stream that latched under the mismatch — it must re-latch.
+That stickiness is deliberate (a flapping peer must not flap the profile logic)
+but it means "I fixed the table" and "the stream recovered" are two events, and
+only the second one is the link working.
+
 **Best-effort suspends profile logic, never §6.6 clamp state (Pass 87).**
 `max_block` and the delivery cursor are *clamp* state, not profile state, and MUST
 keep ratcheting in best-effort — only the `BlockInfo` deadline/supersession
@@ -3795,6 +3812,23 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   `CSA_ARMED`-clear frame. Bench 2026-07-24: the craft reached COMMITTED on
   the target while the issuer reverted — the inverse of the §11.6 split
   Pass 89 closed.
+
+  **Every issuer-initiated campaign MUST therefore use class 0 unless the move
+  genuinely crosses bands (Pass 197.)** This was a rule with no enforcement:
+  `/api/v1/csa` passed class 0 and worked, while `/api/v1/scout/quickconnect`
+  hardcoded class **1** — justified in-code by slack for "the iw shell-out
+  retune", which stopped existing when the kernel-monitor backend was deleted
+  in Pass 164 and devourer began retuning in-process. So the operator-facing
+  path that exists to *connect to a craft* was the one path running the class
+  this section rejects, and the OSD menu's channel jumps worked while
+  quick-connect did not. Re-measured 2026-08-30 (.242 ground, 2 ears, vs the
+  .181 craft) on **same-channel** campaigns, so retune distance was not a
+  confound and the class was the only variable: class 0 confirmed **20/20**,
+  class 1 **8/20 reverted**. The exposure class 1 adds that class 0 does not
+  is the pre-position silence — `T_switch - commit` is ~400 ms at class 1
+  against ~200 ms at class 0 — and that silence is counted by the §11.6
+  `rx_liveness_ms` guard while `verify_timeout_ms` does not count it, so a
+  long-enough campaign can fire a full backend re-init mid-switch.
 - On entering COMMITTED after any retune, every transmitting adapter calls
   **`ReApplyTxPower()`** (§10.4) — `FastRetune` skips TXAGC re-apply.
 
@@ -4044,6 +4078,15 @@ direction** lets us make the strand class *never happen* rather than recover aft
 - **Issuer revert-on-no-video:** if ground did commit (craft ACKed) but then sees
   no craft video on `target_chan` within its verify deadline, ground reverts to
   `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
+  **The revert MUST name which half failed (Pass 197):** "no craft video"
+  covers three outcomes with one operator-visible symptom — the craft never
+  ACKed, it ACKed and never landed, or it landed and never cleared `CSA_ARMED`
+  in time — so the log line carries the issuer's own `armed_seen` /
+  `landing_seen` / `video_seen` bits. Without them, telling the three apart
+  required reading the issuer's source, and the reverted ground lands on
+  `prev_chan`, which for a `home_chan` no craft occupies is silence that then
+  trips the `rx_liveness_ms` guard below into a full backend re-init: the
+  operator sees a few frames and then nothing, with no stated cause.
   The deadline anchors at **`max(T_switch, landing) + verify_timeout_ms`**
   (Pass 69): pre-positioning must not shrink the window in which the craft can
   legitimately show up — the craft does not move before T_switch. **"Landing"
@@ -5064,6 +5107,17 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   artifact) is withheld — fail closed, still flyable. Duplicate `mac`
   values across stanzas are a config error; the key is rejected on
   non-radio backends.
+- **`streams[].originator` is a BOOT pin, and it is the reason a ground can
+  refuse a craft silently (Pass 197).** An out-stream carrying it seeds that
+  want's sender filter, so at boot the receiver latches **only** that
+  originator; every other craft is admitted by §2, counted in
+  `/api/v1/discovery`, and then dropped with no log line and no §15.3 field.
+  It is not a permanent lock — a committed §15.5a selection repins every want
+  to the craft it landed on, and a §11.6 revert restores the previous pin — but
+  that means a craft whose claims keep reverting can never escape the boot pin,
+  which is exactly how a stale pin survives a fleet renumbering unnoticed. It
+  is a legitimate key, so `--check --strict` says nothing about it; the config
+  summary MUST therefore print it (`pin=N`) so it is visible at startup.
 - **`adapters` may instead be an OBJECT** (Pass 195, radio backend only), the
   **auto** form. The two shapes are mutually exclusive: an object with a
   non-empty array, or an object without an `auto` key, is a config error.
@@ -5507,6 +5561,8 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "shm_bad_slots": 0, "shm_ring_full": 0,
     "dropped_superseded": 110, "dropped_deadline": 8,
     "nacks_sent": 18,
+    "best_effort": false,
+    "table_mismatch": 0,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,
@@ -6090,7 +6146,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/stats` | the current §15.3 snapshot as one JSON object (no trailing newline) |
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
 | `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]` (each `{name, role, channel, mac, chip, part, aliases, power_actuator, ldpc_rx_flag, fastretune}` — `mac` is the §10.6 per-unit EFUSE identity on the radio backend, `null` where the backend reports none, Pass 154; `part` and `aliases` (Pass 195) name the DIE and its marketing aliases (`"RTL8822E"`, `"RTL8812EU/RTL8822EU"`), added because `chip` is the chip GENERATION and reads `jaguar3` for both an 8812EU and an 8812CU — which is exactly the distinction the §15.2 auto election turns on, so a consumer cannot name the dongle from `chip` alone; both are empty strings on a backend with no die, which a consumer must distinguish from a die it does not recognise; the capability fields are static per-die answers read once at bring-up, Pass 172: `chip` is the backend's chip-generation name (`"udp"` on the bench backend), `power_actuator` is §10.5's `actuator` discriminator as a boolean (Pass 171 — `false` = offsets are inert and refused), `ldpc_rx_flag` is per-frame LDPC *reporting* existing on this die (§15.3 Pass 157 — decode capability is separate), `fastretune` says the lean retune override exists), `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
-| `GET /api/v1/features` | sanitized effective feature state loaded by this process: `{air:{backend,ldpc,stbc,mcs_probe_configured,mcs_probe_scheduled},video:{present,stream_id,direction,binding,arq_mode,arq_enabled,fec:{scheme,i_permille,p_permille,e_permille,min_k,min_r},spatial_recovery:{mode,freeze_frame},jscc:{configured,enforce}},venc:{enabled,recovery_enabled,fps_ladder_boot,fps_ladder_enabled}}`. `video` describes the first configured RTP stream (the role's video stream); absent video uses `present:false` and neutral defaults. `arq_enabled` and `fps_ladder_enabled` are live gates; the other fields are the validated configuration/table actually loaded at process start. No config path, bind address, PSK, or other secret-bearing field is returned. |
+| `GET /api/v1/features` | sanitized effective feature state loaded by this process: `{air:{backend,ldpc,stbc,mcs_probe_configured,mcs_probe_scheduled},video:{present,stream_id,direction,binding,arq_mode,arq_enabled,arq_effective,fec:{scheme,i_permille,p_permille,e_permille,min_k,min_r},spatial_recovery:{mode,freeze_frame},jscc:{configured,enforce}},venc:{enabled,recovery_enabled,fps_ladder_boot,fps_ladder_enabled},csa:{home_chan,channel_allowlist:[]}}`. `video` describes the first configured RTP stream (the role's video stream); absent video uses `present:false` and neutral defaults. `arq_enabled` and `fps_ladder_enabled` are live gates; the other fields are the validated configuration/table actually loaded at process start. **`arq_enabled` is the §11.7 operator latch; `arq_effective` (Pass 197) is whether ARQ can actually run** — the §3.4 best-effort fallback switches NACK generation off inside the RX engine, which the latch cannot see, so the two must be read as separate questions. On a TX node they are equal: a sender has no receive engine to be downgraded. `csa.channel_allowlist` (Pass 197) is §11.1 `policy.csa.channel_allowlist` verbatim, empty meaning reject-all, published because it is the only way a client can know which channels a §15.5a claim will accept — the refusal string covers allowlist, active-campaign and rate-limit alike. The PSK stays out: the key VALUE is the secret, the channel policy is not. No config path, bind address, PSK, or other secret-bearing field is returned. |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[], candidate_sightings:[], ranking:{rounds, domain, confidence_permille, rejects:{}, recommendation:{}, bins:[]}}`; `candidates` is resolved/deduplicated, sightings are diagnostic. Each `candidates[]` row carries `rssi_dbm`: the **strongest** RSSI decoded from that originator on its resolved channel, or `null` if no frame reported one — a "which craft is nearest" indicator, not a link-budget figure (§15.5a; ground/rx node) |

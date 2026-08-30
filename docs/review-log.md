@@ -24,6 +24,47 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 197 — §11.2 quick-connect was issuing the rejected retune class; §3.4 gets a voice (2026-08-30)
+
+**Verdict.** Two silent failures, one operator-visible symptom. (1) §11.2 Pass 91
+recorded that class-1 campaigns lose the §11.6 race and raised class 0 to 300 ms
+*instead of* using class 1 — but that ruling reached no code:
+`/api/v1/scout/quickconnect` hardcoded `retune_class = 1`, justified by slack for
+an `iw` shell-out that stopped existing when Pass 164 deleted kernel-monitor. The
+one path whose job is to connect to a craft was the one running the rejected
+class, which is why the OSD channel jumps worked and quick-connect did not.
+Re-measured on same-channel campaigns, class the only variable: **class 0
+confirmed 20/20, class 1 reverted 8/20.** (2) §3.4's best-effort fallback was
+unobservable: a table mismatch suspends ARQ eligibility, supersession and
+deadline drops, and the counters that would show it read 0 — like a healthy link.
+
+**Changed:** §11.2 (every issuer campaign uses class 0 unless the move crosses
+bands; the pre-position silence is the exposure, and `rx_liveness_ms` counts it
+while `verify_timeout_ms` does not), §11.6 (a revert MUST name which half failed
+— `armed_seen`/`landing_seen`/`video_seen`), §3.4 (the fallback MUST be
+observable, and is sticky until re-latch), §15.2 (`streams[].originator` is a
+boot pin a reverting claim can never escape; the config summary prints it),
+§15.3 (per-stream `best_effort`, `table_mismatch`), §15.5 (`arq_effective`
+beside `arq_enabled`; `csa.channel_allowlist` + `home_chan` published). No wire
+change, no packet field added, no timing default moved —
+`kCsaVerifyTimeoutMsDefault` stays 500 and `< rx_liveness_ms` is untouched.
+
+**Why the class was the bug and the window was not.** The obvious reading was
+that 500 ms is too short for an 8733B craft and a one-eared ground, and the
+obvious fix was re-deriving the seed — which drags the `< rx_liveness_ms`
+invariant with it. The measurement refused that: at a *fixed* window, changing
+only the class took the failure rate from 40% to 0. Class 1 adds
+`T_switch - commit` — ~400 ms of pre-position silence against ~200 — which sits
+outside the verify window but inside the liveness guard.
+
+**Why it took hours to find.** A revert lands on `prev_chan`; when that is a
+`home_chan` no craft occupies, the silence trips the liveness guard into a
+backend re-init — a few frames, then nothing. Every layer reported success: the
+claim returned `ok`, the craft sat in COMMITTED, `/features` said ARQ enabled.
+
+**Evidence.** Branch `impl/auto-adapters` (PR #256); `docs/findings.md`
+2026-08-30 entry for the A/B table and the §3.4 measurement.
+
 ## Pass 196 — §9.4 probing is per-DIE, and the fleet dies are licensed (2026-08-30)
 
 **Verdict.** The `air.mcs_probe` enablement stops being per-unit. Operator
