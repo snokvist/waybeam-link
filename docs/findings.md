@@ -42,6 +42,16 @@ leave the old channel until T_switch, so the issuer sits alone on the target for
 backend re-init mid-campaign was observed directly: `GET /api/v1/stats` adapter
 `rx` froze and every stream counter reset to 0 about 6 s after a quick-connect.
 
+**Second run, degraded uplink (same day, after the ground's 8812AU TX ear
+partially wedged — 32 pkt/s against the 8812CU's 1378 on the same channel).**
+The asymmetry got *sharper*, not noisier: **class 0 confirmed 6/6, class 1
+reverted 4/4.** Running total 26/26 vs 12/24. The §11.6 revert reason added in
+this Pass named it on every class-1 attempt: `armed=1 landed=1 video=0` — the
+craft ACKed and the issuer saw it land, but no `CSA_ARMED`-**clear** frame
+arrived before the deadline, which is Pass 89's commit proof failing because
+the craft needs the (impaired) uplink to reach COMMITTED. Three seconds to read
+what previously took a source dive.
+
 **Not isolated:** whether the re-init is the mechanism for every one of the 8
 class-1 reverts, or only for the long tail. The A/B settles which class to ship;
 it does not settle why each individual campaign failed. The §11.6 revert-reason
