@@ -4,7 +4,7 @@
     "originator": 10,
     "spectator": true,
     "role": "rx",
-    "preferred_originator": 17,
+    "preferred_originator": 0,
     "net_id": 0
   },
   "profile_table": "/etc/waybeam-link/table.example.json",
@@ -22,7 +22,6 @@
       "stream_id": 0,
       "stream_type": "RTP",
       "dir": "out",
-      "originator": 17,
       "_conceal_comment": "\u00a76.3b armed 2026-08-21, after Phase C acceptance was measured ON THIS DECODER (findings 2026-08-21): MPP agrees with ffmpeg to 89 dB over two CTU rows on a repaired stream, disagrees at 39.4 dB over the whole frame on a gap AU, and reports errinfo 0 discard 0 on BOTH \u2014 so waybeam-hub's errinfo||discard branch, and the IDR requester it gates, never fire for this fault class. 'off' restores pre-\u00a76.3b behaviour bit-for-bit. freeze_frame on: the hub's default presents errinfo frames, so freezing is cheaper than dropping.",
       "conceal": {
         "mode": "slice-skip",

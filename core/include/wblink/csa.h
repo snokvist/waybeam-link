@@ -170,6 +170,20 @@ class CsaIssuer {
                uint8_t prev_bw, uint8_t power_intent, uint64_t now_us);
 
     // Craft's CSA_ARMED data flag observed (from the latched craft).
+    // §11.6 campaign evidence, for the caller's log. A revert says only
+    // "no craft video" today, which is three very different failures wearing
+    // one message: the craft never ACKed, it ACKed and never landed, or it
+    // landed and never cleared CSA_ARMED in time. Reading the difference off
+    // a bench took a source dive; these three bits answer it from one line.
+    struct Evidence {
+        bool armed_seen = false;
+        bool landing_seen = false;
+        bool video_seen = false;
+    };
+    Evidence evidence() const {
+        return Evidence{armed_seen_, landing_seen_, video_seen_};
+    }
+
     void note_craft_armed(uint64_t now_us);
     // Valid craft video/data seen (only meaningful in VERIFY, after commit;
     // ignored before T_switch — the craft cannot be on the target yet,

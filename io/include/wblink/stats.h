@@ -182,6 +182,18 @@ struct StreamStats {
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
     uint64_t nacks_sent = 0;
+    // §3.4 best-effort fallback. Emitted because the downgrade was otherwise
+    // INVISIBLE: a peer whose table_version differs silently loses ARQ
+    // eligibility, §6.2-2 supersession and deadline drops on this stream, and
+    // the three counters that would hint at it (nacks_sent, dropped_*) simply
+    // read 0 — indistinguishable from a healthy link with nothing to recover.
+    // best_effort is STICKY: nothing clears it but stream teardown, so
+    // re-aligning the two tables does not heal a stream that already latched
+    // under the mismatch — it must re-latch. table_mismatch counts PACKETS,
+    // not transitions, so it doubles as the rate at which the peer is still
+    // disagreeing.
+    bool best_effort = false;
+    uint64_t table_mismatch = 0;
     // §17 gate-3 estimator: cumulative NACK→RETRANSMIT latency histograms,
     // ms upper bounds 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK
     // anchor (pure round-trip); arq_rec = first-NACK anchor (recovery vs

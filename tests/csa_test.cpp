@@ -743,7 +743,61 @@ int main() {
         // Pass 92: the seed the ENGINE ships. Pass 89 ruled 500 ms; the value
         // that actually runs comes from §15.2 (config_test pins that it is
         // derived from this constant, not restated).
-        CHECK_EQ_U(kCsaVerifyTimeoutMsDefault, 500u);
+        // §11.2 (Pass 197) the dt budget IS the retune class, and quick-connect
+    // was issuing the class §11.2 rejected. Pinned both ways: class 0 = 300 ms
+    // (Pass 91 raised it from 150 for exactly this reason), class 1 = 500 ms.
+    {
+        CsaParams cls_pol = policy_with_psk();
+        CsaIssuer c0(cls_pol);
+        CHECK(c0.start({9, 0, 1234}, 5745, 0, /*retune_class=*/0, 5805, 0, 4, 0));
+        const auto a0 = c0.tick(0);
+        CHECK_EQ_U(a0.kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSendCopy));
+        CHECK_EQ_U(a0.pkt.dt_to_switch_ms, 300);
+        CHECK_EQ_U(a0.pkt.retune_class, 0);
+
+        CsaIssuer c1(cls_pol);
+        CHECK(c1.start({9, 0, 1234}, 5745, 0, /*retune_class=*/1, 5805, 0, 4, 0));
+        const auto a1 = c1.tick(0);
+        CHECK_EQ_U(a1.pkt.dt_to_switch_ms, 500);
+        CHECK_EQ_U(a1.pkt.retune_class, 1);
+    }
+
+    // §11.6 (Pass 197) WHY class 1 loses campaigns that class 0 wins, in the
+    // one quantity the issuer alone can express: how long it sits ALONE on the
+    // target. It commits the instant the craft ACKs (Pass 69 pre-position),
+    // but the craft does not leave the old channel until T_switch — so the
+    // issuer hears nothing for (T_switch - commit). Class 1 doubles that
+    // silence, and it is silence the §11.6 rx_liveness_ms guard counts while
+    // verify_timeout_ms does not. Bench 2026-08-30, .242 vs .181, SAME-channel
+    // campaigns so retune distance was not a confound: class 0 confirmed
+    // 20/20, class 1 8/20 REVERTED.
+    {
+        CsaParams sil_pol = policy_with_psk();
+        uint64_t commit_us[2] = {0, 0};
+        const uint16_t dt_ms[2] = {300, 500};
+        for (int klass = 0; klass < 2; ++klass) {
+            CsaIssuer is(sil_pol);
+            CHECK(is.start({9, 0, 1234}, 5745, 0, static_cast<uint8_t>(klass),
+                           5805, 0, 4, 0));
+            for (int i = 0; i < 5; ++i) is.tick(static_cast<uint64_t>(i) * 20'000);
+            is.note_craft_armed(100'000);
+            const auto commit = is.tick(101'000);
+            CHECK_EQ_U(commit.kind,
+                       static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+            commit_us[klass] = 101'000;
+            // Evidence (Pass 197): the ACK landed, nothing else has yet.
+            const CsaIssuer::Evidence ev = is.evidence();
+            CHECK(ev.armed_seen);
+            CHECK(!ev.landing_seen);
+            CHECK(!ev.video_seen);
+            // T_switch - commit: the pre-position silence.
+            CHECK_EQ_U(static_cast<uint64_t>(dt_ms[klass]) * 1000 - commit_us[klass],
+                       klass == 0 ? 199'000u : 399'000u);
+        }
+    }
+
+    CHECK_EQ_U(kCsaVerifyTimeoutMsDefault, 500u);
         CHECK_EQ_U(CsaParams{}.verify_timeout_ms, 500u);
     }
     {

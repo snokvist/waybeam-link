@@ -1800,6 +1800,18 @@ std::string dump_config_summary(const Config& cfg) {
                    : s.classifier == RtpClassifier::kH265 ? "h265"
                                                           : "size");
         }
+        // §15.2 streams[].originator. Printed because it is otherwise
+        // invisible: it is a legitimate key so --check --strict says nothing,
+        // and a stale pin makes every OTHER craft unlatchable at boot with no
+        // log line anywhere (bench 2026-08-30 — a ground pinned to a craft
+        // that was not present scouted, claimed and heard a second craft while
+        // reporting "latched": false, and the §11.6 campaign then reverted).
+        // The pin is a boot seed, not a lock: a committed selection repins
+        // every want (RxEngine::select_originator), and a §11.6 revert
+        // restores it — so a craft whose claims always revert never escapes.
+        if (s.originator) {
+            ss << " pin=" << *s.originator;
+        }
         ss << "\n";
     }
     ss << "policy: report_hz=" << cfg.policy.report_hz

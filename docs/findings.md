@@ -12,6 +12,72 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — the CSA retune class, measured: class 1 loses 40% of campaigns class 0 wins
+
+The `.242` x86 ground (2 ears: 8812CU rx + 8812AU tx, auto-elected) against the
+`.181` CV610 craft (8733BU) on 5700 MHz. **Same-channel** campaigns —
+`POST /api/v1/csa {"mhz":5700,"class":K}` while already resting on 5700 — so the
+retune distance is zero on both ends and `retune_class` is the only variable.
+20 campaigns per arm, 6.5 s apart (`min_interval_s` is 5).
+
+| retune_class | dt budget | confirmed | reverted |
+|---|---|---|---|
+| 0 | 300 ms | **20** | 0 |
+| 1 | 500 ms | 12 | **8** |
+
+Verdict latency was 0.90 s for every class-0 confirm, and 1.01 s (confirm) /
+1.12 s (revert) at class 1 — the extra 200 ms is the dt difference, so the
+campaigns are running the arithmetic §11.2 describes.
+
+**This under-states it.** The operator's actual failure was `quickconnect`,
+which is a CROSS-channel move (ground on 5805 or 5540, craft on 5700) and was
+observed reverting **7/7** before the class was changed. Same-channel was chosen
+here to isolate the class; the real path adds retune time on top.
+
+**What class 1 costs that class 0 does not.** `T_switch - commit`: the issuer
+commits the instant the craft ACKs (Pass 69 pre-position) but the craft does not
+leave the old channel until T_switch, so the issuer sits alone on the target for
+~400 ms at class 1 against ~200 ms at class 0. That silence is outside
+`verify_timeout_ms` and inside the §11.6 `rx_liveness_ms` guard (seed 750). A
+backend re-init mid-campaign was observed directly: `GET /api/v1/stats` adapter
+`rx` froze and every stream counter reset to 0 about 6 s after a quick-connect.
+
+**Not isolated:** whether the re-init is the mechanism for every one of the 8
+class-1 reverts, or only for the long tail. The A/B settles which class to ship;
+it does not settle why each individual campaign failed. The §11.6 revert-reason
+log added in the same Pass is what would answer that on the next occurrence.
+
+## 2026-08-30 — a §9.3 table mismatch costs ARQ, not just the §9.4 probe
+
+Craft `.181` ran `table-8733b.json` (tv **164**), the `.242` ground
+`table.example.json` (tv **242**). The divergence is *deliberate* and recorded
+above (2026-08-21: rung-4 `airtime_budget_frac` 510 vs 600, the CV610 craft's
+clean point never measured) — the finding here is what it silently costs.
+
+§3.4 drops a mismatched stream to best-effort, which suspends **NACK generation,
+§6.2-2 supersession and deadline drops**. Measured on the ground while latched:
+`nacks_sent 0`, `recovered_arq 0`, and `frames_unrecoverable` climbing to 11.
+Temporarily aligning the two tables and re-latching: **0 unrecoverable in 45 s**
+at 50.6 fps, everything else unchanged. Raw radio loss did not move
+(`loss_prediversity_milli` 15-16 either way) — the fallback was costing recovery,
+not reception.
+
+**Nothing said so.** `RxStreamInfo::best_effort` existed and was populated but
+had no consumer; `counters.table_mismatch` never left `core/`;
+`dropped_unrecoverable` is not in `StreamStats` at all; RX-side
+`StreamStats::table_version` is always 0; and `/api/v1/features` reported
+`arq_enabled: true` throughout, because that field is the §11.7 operator latch
+and cannot see the engine. Pass 197 adds §15.3 `best_effort` / `table_mismatch`,
+the §15.5 `arq_effective` sibling, and a one-shot log naming both versions.
+
+**What stays open.** (a) `best_effort` is sticky — nothing clears it but stream
+teardown — so aligning tables mid-flight does not heal a latched stream. That is
+deliberate (a flapping peer must not flap the profile logic) but it means the
+recovery needs an explicit re-latch, and no REST call forces one today. (b) A
+mixed-die fleet on one ground cannot give every craft a matching table: a ground
+loads exactly one. Either per-craft tuning or ARQ, not both, until §3.4 gains a
+per-peer table.
+
 ## 2026-08-30 — a RadioAir created and destroyed WITHOUT a poll hangs in teardown
 
 Found while device-verifying §15.2 auto on the x86 bench (.242, 8812CU at
@@ -635,6 +701,10 @@ receiving at rssi −28 / snr 30.
 craft's table and its clean point was not measured here; that craft is
 CPU-limited and pins `venc.max_bitrate_kbps=12288`, which caps rungs 3–5
 anyway. The two tables now legitimately differ at rung 4 (600 vs 510).
+**What that costs was not known when this was written** — see the 2026-08-30
+entry at the top: the differing hash puts every `.181`↔`.242` stream into §3.4
+best-effort, which suspends ARQ, supersession and deadline drops. The
+divergence stands; the price is now measured and, since Pass 197, visible.
 
 ## 2026-08-20 — low-bitrate arm: per-slice overhead is ~26 BYTES, and 17 is free at 2.8 Mbps too
 

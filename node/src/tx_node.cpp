@@ -519,8 +519,11 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                                    air.value ? &*air.value : nullptr);
         };
         h.features_json = [&] {
+            // §3.4 is a RECEIVE-engine state; a TX node has none, so the
+            // operator latch is also the effective answer here.
             return build_features_json(l, tx.cmd_arq_enabled(),
-                                       tx.cmd_fps_ladder());
+                                       tx.cmd_fps_ladder(),
+                                       tx.cmd_arq_enabled());
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.link_mtu_json = [&] {

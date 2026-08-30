@@ -126,6 +126,8 @@ StatsSnapshot sample_snapshot() {
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
     st.nacks_sent = 18;
+    st.best_effort = false;  // true case asserted separately below
+    st.table_mismatch = 4111;
     st.nack_rtt_hist = {0, 2, 7, 6, 2, 1, 0, 0};
     st.nack_rtt_max_ms = 34;
     st.nack_rtt_samples = 24;
@@ -300,6 +302,7 @@ const char* kGolden =
     "\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
     "\"nacks_sent\":18,"
+    "\"best_effort\":false,\"table_mismatch\":4111,"
     "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
     "\"nack_rtt_samples\":24,\"nack_rtt_p95_us\":2000,"
     "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
@@ -423,6 +426,26 @@ int main() {
         CHECK_EQ_U(static_cast<unsigned long long>(n), golden_len);
         CHECK(n >= 0 && static_cast<size_t>(n) == golden_len &&
               std::memcmp(buf, kGolden, golden_len) == 0);
+    }
+
+    // §15.3 (Pass 197) the §3.4 fallback flag renders BOTH values. Same
+    // reasoning as the Pass 195 case below: the golden pins
+    // "best_effort":false, which a build that never wired the field through
+    // would also satisfy — and this is the field whose whole purpose is to
+    // be true exactly when something is wrong.
+    {
+        StatsSnapshot s = sample_snapshot();
+        CHECK(!s.streams.empty());
+        StatsEmitter em(/*to_stdout=*/false, nullptr);
+        s.streams[0].best_effort = false;
+        em.emit(s);
+        CHECK(em.last_line().find("\"best_effort\":false,\"table_mismatch\"") !=
+              std::string::npos);
+        CHECK(em.last_line().find("\"best_effort\":true") == std::string::npos);
+        s.streams[0].best_effort = true;
+        em.emit(s);
+        CHECK(em.last_line().find("\"best_effort\":true,\"table_mismatch\"") !=
+              std::string::npos);
     }
 
     // §15.3 (Pass 195) the elected-uplink flag renders BOTH values. The

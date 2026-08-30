@@ -116,6 +116,11 @@ struct RxStreamInfo {
     uint8_t stream_type = 0;
     bool best_effort = false;  // §3.4 fallback active
     uint8_t active_profile = 0;  // last seen from the TX
+    // §3.4 diagnosis: the TX's own table_version, so a caller reporting the
+    // fallback can name BOTH hashes. Knowing only "they differ" leaves the
+    // operator to go and read two files on two hosts to find out which end
+    // moved.
+    uint8_t peer_table_version = 0;
     RxStreamCounters counters;
 };
 
@@ -235,6 +240,7 @@ class RxEngine {
         uint8_t stream_type = 0;
         bool best_effort = false;
         uint8_t active_profile = 0;
+        uint8_t peer_table_version = 0;
         uint32_t cursor = 0;    // next seq to deliver
         uint32_t max_seq = 0;
         uint32_t max_block = 0;
