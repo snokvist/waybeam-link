@@ -85,7 +85,9 @@
   "air": {
     "kind": "radio",
     "_mcs_probe_comment": "\u00a79.4 ARMED on this node. TX-side half only \u2014 the schedule is table content hashed into table_version, so this key does nothing unless the table carries a probe block AND every receiver has the identical table. The former \"PER-UNIT enablement, do not copy without its own proof\" reservation is WITHDRAWN (operator ruling 2026-08-30, Pass 196): stage 0 measured a property of the DIE, not of a dongle, and passed on all three fleet dies (findings 2026-08-08). The enablement is per-die and these dies are licensed, so this key is safe to copy to any craft on a proven die and composes with \u00a715.2 adapters.auto. Since Pass 186 the candidate is clamped to policy.select.max_profile, so a craft at its ceiling flies no probes at all.",
-    "mcs_probe": true
+    "mcs_probe": true,
+    "ack_responder": true,
+    "_ack_responder_comment": "\u00a73.0 hybrid, responder half. ARMED 2026-08-30, device-verified on this craft: with the ground soliciting, tx_report_fails fell from 2796/2796 (nothing answering) to 48/2790 (1.7%), and report delivery reached 99.89%. This die (8812EU / Jaguar3) implements SetAckResponder; the .181 8733BU does not yet (OpenIPC/devourer#406 ports it), which is why that craft's config does NOT carry this. Live-toggleable without a restart: POST /api/v1/air/ack_responder {\"armed\":bool}."
   },
   "policy": {
     "report_timeout_ms": 750,
