@@ -24,7 +24,14 @@ int main() {
     // Referenced, never called: run_rx opens adapters and blocks. Spell the
     // original three-argument type so this gate also proves the additive
     // runtime-control overload did not remove that embedding symbol.
-    using RunRxEntry = int (*)(const wblink::node::Loaded&,
+    //
+    // `Loaded&`, not `const Loaded&`, since Pass 195: under the §15.2 auto
+    // form the adapter array does not exist until the backend has elected
+    // one, and run_rx is where that result is written back into the config
+    // every later stage reads. An embedder therefore hands over a Loaded it
+    // still owns and must not treat as unchanged afterwards — which is
+    // exactly the kind of contract this gate exists to make visible.
+    using RunRxEntry = int (*)(wblink::node::Loaded&,
                                const std::atomic<int>&,
                                const wblink::node::FrameSink&);
     const RunRxEntry entry = static_cast<RunRxEntry>(&wblink::node::run_rx);
