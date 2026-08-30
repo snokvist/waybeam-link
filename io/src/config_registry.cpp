@@ -304,6 +304,7 @@ const KeyEntry kKeys[] = {
     {"policy.fec",                                KeyType::kObject},
     {"policy.fec.overhead_frac",                  KeyType::kNumber},
     {"policy.fec.scheme",                         KeyType::kString},
+    {"policy.mtu_default",                        KeyType::kString},
     {"policy.report_hz",                          KeyType::kNumber},
     {"policy.report_timeout_ms",                  KeyType::kNumber},
     {"policy.return",                             KeyType::kObject, has_uplink, kWhyNoUplink},
