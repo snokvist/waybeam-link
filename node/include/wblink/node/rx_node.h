@@ -89,6 +89,16 @@ static_assert(std::atomic<int>::is_always_lock_free,
 // the frame-shm-bound out-streams instead, which is what lets a node run on a
 // build with WBLINK_FRAME_SHM=OFF. Configuring a frame-shm stream on such a
 // build with NO sink is refused at startup rather than silently dropped.
+//
+// §15.2 (Pass 195): the `Loaded&` is NON-CONST, and both overloads MUTATE it —
+// under the auto adapter form the stanza array does not exist until the
+// backend has elected roles, and this is where that result is written back
+// into the config every later stage reads. Three consequences for an embedder:
+// the Loaded must outlive the call and stay writable, one Loaded must not be
+// shared between two nodes, and any reference taken into `l.cfg.adapters`
+// before the call is invalidated by it. The C++ MANGLED NAME changed with the
+// signature, so a prebuilt out-of-tree C++ embedder needs a rebuild; the C ABI
+// in {rx,tx}_node_c.h is untouched.
 int run_rx(Loaded& l, const std::atomic<int>& stop,
            const FrameSink& frame_out = {});
 

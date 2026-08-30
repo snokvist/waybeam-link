@@ -502,6 +502,27 @@ int run_loopback(const Loaded& l) {
     return 0;
 }
 
+// §15.2 (Pass 195): a JSON string for `adapters --emit`. The tree escapes
+// this field everywhere else it is serialized (stats_fill.h's json_escape);
+// an adapter named `wing"1` would otherwise emit a block that does not parse,
+// and this mode accepts the array form, where the name is operator-supplied.
+std::string json_quote(const std::string& in) {
+    std::string out = "\"";
+    for (const char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) >= 0x20) out += c;
+                break;
+        }
+    }
+    return out + "\"";
+}
+
 int usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s <tx|rx|loopback> -c <config.json> "
@@ -646,11 +667,19 @@ int main(int argc, char** argv) {
         //    the backend's threading contract and its own device pass; this
         //    mode simply does what every real consumer does. See
         //    docs/findings.md 2026-08-30.
-        std::vector<uint64_t> heard(l.cfg.adapters.size(), 0);
-        for (int tick = 0; tick < 20; ++tick) {  // ~1 s, 50 ms per poll
+        // A WALL-CLOCK deadline, not a poll count: poll_once only waits when
+        // its queue is EMPTY, so on an ear that is actually receiving, twenty
+        // 50 ms calls return in well under a millisecond — and the frame
+        // counts below are advanced by the RX threads over elapsed time, not
+        // by the poll. A fixed count would therefore give the shortest window
+        // exactly where traffic is heaviest, which is backwards.
+        const auto drain_until =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+        while (std::chrono::steady_clock::now() < drain_until) {
             air.value->iface()->poll_once(50, [](const AirRxMeta&,
                                                  const uint8_t*, size_t) {});
         }
+        std::vector<uint64_t> heard(l.cfg.adapters.size(), 0);
         for (size_t i = 0; i < heard.size(); ++i) {
             heard[i] = air.value->iface()->rx_frames(i);
         }
@@ -660,6 +689,13 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
             const AdapterCfg& a = l.cfg.adapters[i];
             const AirIface::AdapterCapsView caps = air.value->adapter_caps(i);
+            // The LIVE EFUSE identity, not the stanza's. Under auto they are
+            // the same; under the array form `resolved_adapters()` returns the
+            // AUTHORED stanzas untouched, so `a.mac` is whatever the operator
+            // wrote — normally nothing. Printing that would make this mode
+            // useless for the very thing it advertises on the array form:
+            // confirming which physical unit a pin landed on.
+            const std::string live_mac = air.value->adapter_mac(i);
             std::fprintf(stderr,
                          "adapter %zu: %-20s role=%-2s chan=%u bw=%u "
                          "part=%s (%s) chip=%s mac=%s power_actuator=%s "
@@ -669,7 +705,7 @@ int main(int argc, char** argv) {
                          caps.part.empty() ? "unknown" : caps.part.c_str(),
                          caps.aliases.empty() ? "-" : caps.aliases.c_str(),
                          caps.chip.c_str(),
-                         a.mac.empty() ? "none" : a.mac.c_str(),
+                         live_mac.empty() ? "none" : live_mac.c_str(),
                          caps.power_actuator ? "yes" : "no",
                          static_cast<unsigned long long>(heard[i]));
         }
@@ -677,18 +713,64 @@ int main(int argc, char** argv) {
             // stdout, while the table above went to stderr: this is the half a
             // caller redirects into a config, and mixing the two would make
             // `> adapters.json` produce something that does not parse.
+            // A COMPLETE stanza, or the "freeze" silently changes the node.
+            // The emitted block replaces the adapters section outright — the
+            // two §15.2 forms are exclusive, so pasting it means deleting the
+            // auto block — and every key that only lived there has to come
+            // with it. Omitting the power keys would drop the operator's
+            // §10.5 boot offset back to the -24 seed and remove the §10.3
+            // ceiling, which is a power change disguised as a refactor.
+            const auto qdb_list = [](const char* key,
+                                     const std::vector<int32_t>& v) {
+                if (v.empty()) return std::string{};
+                std::string s2 = std::string(", \"") + key + "\": [";
+                for (size_t k = 0; k < v.size(); ++k) {
+                    if (k) s2 += ", ";
+                    s2 += std::to_string(v[k]);
+                }
+                return s2 + "]";
+            };
             std::string out = "  \"adapters\": [\n";
             for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
                 const AdapterCfg& a = l.cfg.adapters[i];
-                out += "    { \"name\": \"" + a.name + "\"";
-                // The mac is the point of emitting: it is what makes the
-                // frozen array bind to the same physical units after a
-                // re-plug (§15.2 precedence mac > bus > first-free).
-                if (!a.mac.empty()) out += ", \"mac\": \"" + a.mac + "\"";
+                // Escaped like every other serializer in the tree: under auto
+                // the names are synthesized and safe, but this mode also
+                // accepts the array form, where the name is operator-supplied
+                // and validated only for non-emptiness and uniqueness.
+                out += "    { \"name\": " + json_quote(a.name);
+                // The identity is the point of emitting: it is what makes the
+                // frozen array bind to the same physical units after a re-plug
+                // (§15.2 precedence mac > bus > first-free). Taken LIVE from
+                // the backend, because on the array form the stanza usually
+                // carries no mac at all and the emitted block would then bind
+                // first-free — moving role:"tx" to another dongle, which is
+                // precisely what the mac is here to prevent.
+                const std::string live_mac = air.value->adapter_mac(i);
+                if (!live_mac.empty()) {
+                    out += ", \"mac\": " + json_quote(live_mac);
+                }
+                // A bus pin the operator authored survives the round trip; it
+                // is the §15.2 port pin and dropping it would silently widen
+                // the binding.
+                if (!a.bus.empty()) out += ", \"bus\": " + json_quote(a.bus);
                 out += ", \"role\": \"";
                 out += a.role == Role::kTx ? "tx" : "rx";
                 out += "\", \"channel\": " + std::to_string(a.channel_mhz);
                 out += ", \"bw\": " + std::to_string(unsigned(a.bw));
+                if (!a.power_map.empty()) {
+                    out += ", \"power_map\": " + json_quote(a.power_map);
+                }
+                if (a.max_power_qdb) {
+                    out += ", \"max_power_qdb\": " +
+                           std::to_string(*a.max_power_qdb);
+                }
+                out += ", \"power_offset_qdb\": " +
+                       std::to_string(a.power_offset_qdb);
+                out += ", \"power_offset_max_qdb\": " +
+                       std::to_string(a.power_offset_max_qdb);
+                out += qdb_list("power_presets_qdb", a.power_presets_qdb);
+                out += qdb_list("power_offset_presets_qdb",
+                                a.power_offset_presets_qdb);
                 out += " }";
                 if (i + 1 < l.cfg.adapters.size()) out += ',';
                 out += '\n';

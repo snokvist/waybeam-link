@@ -134,6 +134,11 @@ struct AdapterAutoCfg {
     // policy.csa.home_chan at load; with neither set the config is refused —
     // there is no safe default channel.
     uint16_t channel_mhz = 0;
+    // True when channel_mhz came from policy.csa.home_chan rather than from
+    // adapters.auto.channel. Recorded because the fallback collapses the two
+    // into one field, and the §15.2 key registry has to be able to say
+    // afterwards whether home_chan was actually read (§11.5 Pass 195).
+    bool channel_from_home_chan = false;
     uint8_t bw = 20;
     // Cap on the claimed set, applied AFTER ranking (best N, not first N).
     // A host's bus order has no relation to which radio should fly. 0 = no cap.

@@ -307,6 +307,39 @@ void test_craft_response_declares_downlink() {
 
 }  // namespace
 
+// §10.7 (Pass 195) legacy fallback: a pre-195 ground has one fixed
+// uplink-artifact.json and must keep it across the upgrade — while the
+// identity gate stays the thing that decides whether it may be APPLIED.
+void test_legacy_fallback() {
+    const std::string dir = temp_dir();
+    CHECK(!dir.empty());
+    if (dir.empty()) return;
+
+    CHECK(uplink_calib_store_write(dir, make_artifact()) != 0);
+    const std::string body = slurp(artifact_file(dir));
+    CHECK(!body.empty());
+    std::remove(artifact_file(dir).c_str());
+    {
+        std::ofstream f(dir + "/uplink-artifact.json", std::ios::trunc);
+        f << body;
+    }
+
+    // Found through the fallback, and it parses + integrity-checks.
+    auto loaded = uplink_calib_store_load(dir, kIdentity);
+    CHECK(static_cast<bool>(loaded));
+    if (loaded) {
+        CHECK(loaded.value->local_adapter_identity == kIdentity);
+        // The gate that matters: the SAME unit matches...
+        CHECK(uplink_calib_matches(*loaded.value, kIdentity, 17, 0x5a, 5805, 20));
+        // ...and a different local adapter does not, so a legacy file from
+        // another dongle can be read but never applied.
+        CHECK(!uplink_calib_matches(*loaded.value, "mac/00:11:22:33:44:55", 17,
+                                    0x5a, 5805, 20));
+    }
+    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(dir.c_str());
+}
+
 int main() {
     test_craft_response_declares_downlink();
     test_round_trip();
@@ -371,5 +404,6 @@ int main() {
         CHECK(calib_identity(a, AirCfg::Kind::kRadio, {}).empty());
     }
 
+    test_legacy_fallback();
     return wbtest_finish("uplink_calib_store_test");
 }

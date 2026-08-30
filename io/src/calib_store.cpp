@@ -31,7 +31,19 @@ bool write_atomic(const std::string& path, const std::string& body) {
         std::ofstream f(tmp, std::ios::trunc);
         if (!f) return false;
         f << body;
-        if (!f.good()) return false;
+        // close() BEFORE the check, and remove the partial file: a buffered
+        // stream reports ENOSPC/EIO only when the buffer is actually flushed,
+        // so testing good() at scope exit — where the destructor swallows the
+        // error — promotes a truncated temp file over a valid artifact. The
+        // §10.7 twin (io/src/uplink_calib_store.cpp) was fixed for exactly
+        // this; §10.6 was left behind, and Pass 195's legacy fallback makes it
+        // matter more: a zero-length per-identity file falls through to a
+        // superseded artifact.
+        f.close();
+        if (!f.good()) {
+            std::remove(tmp.c_str());
+            return false;
+        }
     }
     return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
@@ -135,9 +147,23 @@ uint8_t calib_store_write(const std::string& dir, const std::string& identity,
 
 Result<CalibStored> calib_store_load(const std::string& dir,
                                     const std::string& identity) {
-    std::string body =
-        read_file(dir + "/artifact-" + calib_identity_slug(identity) + ".json");
+    const std::string own =
+        dir + "/artifact-" + calib_identity_slug(identity) + ".json";
+    std::string body = read_file(own);
     if (body.empty()) {
+        // ABSENT, not merely unreadable. read_file() cannot tell "no file"
+        // from "zero bytes", and a zero-byte file is what a failed write
+        // leaves — so keying the fallback on emptiness alone would let a
+        // truncated write resurrect a SUPERSEDED legacy artifact and install
+        // it as a fresh boot auto-load. Pre-195 the same truncation gave "no
+        // artifact" and the node stayed on the §10.5 safe boot offset, which
+        // is the behaviour to preserve.
+        std::ifstream probe(own, std::ios::binary);
+        if (probe.good()) {
+            return Result<CalibStored>::fail(
+                "artifact-<identity>.json is empty (a failed write?) — "
+                "refusing to fall back to the pre-195 artifact.json");
+        }
         // Pre-Pass-195 layout. Read it, but do not privilege it: the stored
         // identity is parsed below exactly as for a per-identity file and the
         // caller's own match check decides, so a legacy artifact belonging to

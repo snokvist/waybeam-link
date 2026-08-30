@@ -298,7 +298,19 @@ struct AirBackend {
             // what tells the backend to find its own. config load has already
             // refused the auto form on every non-radio backend, so there is no
             // branch for it above.
-            rc.auto_cfg = cfg.adapter_auto;
+            // Gated on the array being EMPTY, not on the flag alone. create()
+            // writes its election back into cfg.adapters and leaves
+            // adapter_auto.enabled set, which is exactly the combination
+            // RadioAir::create refuses as "the §15.2 forms are exclusive" — so
+            // a second create() on the same Config (a supervisor re-creating
+            // the backend after a wedge, the natural reason this takes a
+            // non-const reference) would come back with a permanent config
+            // error for a transient USB failure. With this gate the second
+            // call simply takes the resolved array, which is the right answer:
+            // the discovery already happened.
+            if (cfg.adapters.empty()) {
+                rc.auto_cfg = cfg.adapter_auto;
+            }
             rc.stamp_net_id = cfg.node.net_id.value_or(0);
             rc.filter_net_id = cfg.node.net_id;
             rc.originator = cfg.node.originator;

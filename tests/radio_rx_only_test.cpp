@@ -136,18 +136,36 @@ int main() {
     }
 
     // §15.2 (Pass 195): auto with an fd device set. The fd list IS the device
-    // set under auto — no enumeration, no parallel-array rule — so a bogus fd
-    // exercises the skip path to exhaustion and must report the AUTO error,
-    // not the array form's "adapter_fds must be empty ... or exactly as long
-    // as adapters". Hermetic: fd -2 is rejected before any libusb call.
+    // set under auto, so EVERY entry must be a real descriptor. The -1
+    // "enumerate this stanza" sentinel is an array-form concept and must be
+    // REFUSED here rather than honoured: honouring it manufactures an
+    // enumerating stanza, which on unrooted Android — the only reason the fd
+    // source exists — finds nothing and silently shrinks the device set, and
+    // on a rooted host can claim the same physical dongle another entry
+    // supplied by fd (a wrapped unit never enters used_paths, and the dev_key
+    // guard is disabled at bus 0, which is what the wrap path reports).
+    //
+    // Hermetic: all of these are refused before any libusb call.
     {
-        RadioAirCfg cfg;
-        cfg.auto_cfg.enabled = true;
-        cfg.auto_cfg.channel_mhz = 5805;
-        cfg.allow_rx_only = true;
-        cfg.adapter_fds = {-2};
-        CHECK(fails_containing(cfg, "only -1 means"));
+        RadioAirCfg base;
+        base.auto_cfg.enabled = true;
+        base.auto_cfg.channel_mhz = 5805;
+        base.allow_rx_only = true;
+
+        RadioAirCfg cfg = base;
+        cfg.adapter_fds = {-1};
+        CHECK(fails_containing(cfg, "the fd list is the device set"));
+        // NOT the array form's parallelism message — under auto there is no
+        // stanza array for the fds to be parallel to.
         CHECK(!fails_containing(cfg, "adapter_fds must be empty"));
+
+        cfg = base;
+        cfg.adapter_fds = {3, -1};  // one good, one sentinel
+        CHECK(fails_containing(cfg, "adapter_fds[1]"));
+
+        cfg = base;
+        cfg.adapter_fds = {-2};
+        CHECK(fails_containing(cfg, "the fd list is the device set"));
     }
 
     return wbtest_finish("radio_rx_only_test");

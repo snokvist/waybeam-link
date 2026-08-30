@@ -37,11 +37,25 @@ std::vector<std::string> alias_tokens(const std::string& aliases) {
     return out;
 }
 
-// Lowercased first alias token with the RTL prefix dropped — the name an
-// operator would use for the part ("8812eu"), for the synthesized stanza name.
-std::string short_name(const AdapterCandidate& c) {
+// Lowercased part name for the synthesized stanza, in the spelling the
+// OPERATOR uses. Prefers whichever alias the priority list actually named, so
+// a stanza cannot disagree with the election table that produced it: an
+// RTL8733B reports "RTL8731BU/RTL8733BU", and taking the first token blindly
+// named an 8733BU dongle `autoN-8731bu` while the table said it matched
+// "8733BU". Falls back to the first alias, then to the die name.
+std::string short_name(const AdapterCandidate& c,
+                       const std::vector<std::string>& priority) {
     const std::vector<std::string> toks = alias_tokens(c.aliases);
-    std::string s = toks.empty() ? norm_part(c.part) : norm_part(toks.front());
+    std::string s;
+    for (const std::string& want : priority) {
+        if (part_matches(c, want)) {
+            s = norm_part(want);
+            break;
+        }
+    }
+    if (s.empty()) {
+        s = toks.empty() ? norm_part(c.part) : norm_part(toks.front());
+    }
     if (s.empty()) return "unknown";
     for (char& ch : s) {
         if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
@@ -128,15 +142,19 @@ AdapterPlan plan_adapters(const std::vector<AdapterCandidate>& cands,
 std::vector<AdapterCfg> auto_stanzas(const std::vector<AdapterCandidate>& cands,
                                      const AdapterPlan& plan,
                                      const AdapterAutoCfg& cfg) {
+    const std::vector<std::string>& prio =
+        cfg.tx_priority.empty() ? default_tx_priority() : cfg.tx_priority;
     std::vector<AdapterCfg> out;
     out.reserve(plan.keep.size());
     for (const std::size_t i : plan.keep) {
         if (i >= cands.size()) continue;  // defensive; plan_adapters never does
         const AdapterCandidate& c = cands[i];
         AdapterCfg a;
-        // The claim index, not the position in `out`: with a cap in play those
-        // differ, and the log table an operator reads is indexed by claim.
-        a.name = "auto" + std::to_string(i) + "-" + short_name(c);
+        // Indexed like `cands`, which is the SURVIVING claimed set — the same
+        // space describe_plan's [N] uses, so the table and the stanza names
+        // always agree. Not the enumeration index: a skipped candidate shifts
+        // those, which is why the skip log names a path instead.
+        a.name = "auto" + std::to_string(i) + "-" + short_name(c, prio);
         // Descriptive, not a pin — the binding already happened. It is stamped
         // so `adapters --emit` produces a directly pasteable pinned array and
         // so GET /api/v1/info reports the identity behind each role.

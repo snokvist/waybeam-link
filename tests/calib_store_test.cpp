@@ -235,6 +235,49 @@ void test_absent_and_corrupt() {
     cleanup(dir);
 }
 
+// A ZERO-LENGTH per-identity artifact — what a failed write actually leaves —
+// must NOT fall through to the legacy file. Pre-195 a truncated artifact gave
+// "no artifact" and the node stayed on the §10.5 safe boot offset; a fallback
+// keyed on emptiness alone would instead resurrect a SUPERSEDED curve for the
+// very same unit and install it as a normal boot auto-load.
+void test_empty_does_not_resurrect_legacy() {
+    const std::string dir = temp_dir();
+    CHECK(!dir.empty());
+    if (dir.empty()) return;
+
+    // A legacy artifact for unit A holding an OLD curve...
+    CHECK(calib_store_write(dir, kMacA, artifact_with(40)) != 0);
+    const std::string old_body = slurp(artifact_file(dir, kMacA));
+    {
+        std::ofstream f(dir + "/artifact.json", std::ios::trunc);
+        f << old_body;
+    }
+    // ...and a newer per-identity one for the same unit, then truncated to
+    // zero bytes by a write that ran out of space.
+    CHECK(calib_store_write(dir, kMacA, artifact_with(88)) != 0);
+    {
+        std::ofstream f(artifact_file(dir, kMacA), std::ios::trunc);
+    }
+    CHECK(slurp(artifact_file(dir, kMacA)).empty());
+
+    auto loaded = calib_store_load(dir, kMacA);
+    CHECK(!loaded);  // refused — NOT the 40-curve legacy body
+    if (loaded) {
+        // Name the actual failure rather than just the count: silently
+        // applying qdb[0]=40 here is the bug, and a bare CHECK would not say
+        // which curve came back.
+        std::fprintf(stderr, "  resurrected curve qdb[0]=%d\n",
+                     loaded.value->curve.qdb[0]);
+    }
+    // Remove the empty file and the legacy one IS reachable again — the
+    // refusal is about an unusable file being present, not a permanent veto.
+    std::remove(artifact_file(dir, kMacA).c_str());
+    auto again = calib_store_load(dir, kMacA);
+    CHECK(static_cast<bool>(again));
+    if (again) CHECK_EQ_U(again.value->curve.qdb[0] + 512, 40 + 512);
+    cleanup(dir);
+}
+
 }  // namespace
 
 int main() {
@@ -243,5 +286,6 @@ int main() {
     test_swap_and_return();
     test_legacy_fallback();
     test_absent_and_corrupt();
+    test_empty_does_not_resurrect_legacy();
     return wbtest_finish("calib_store");
 }

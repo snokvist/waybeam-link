@@ -334,12 +334,31 @@ Result<Config> load_config_json(const std::string& json_text) {
                     "(§15.2); an array of stanzas is the other shape");
             }
             const json& aa = ao.at("auto");
+            if (!aa.is_object()) {
+                // Otherwise nlohmann's own type_error surfaces one line below
+                // the hand-written message for the sibling typo — the exact
+                // "raw JSON type error" this branch exists to prevent.
+                return Result<Config>::fail(
+                    "adapters.auto must be an object (§15.2)");
+            }
             AdapterAutoCfg& au = cfg.adapter_auto;
             au.enabled = true;
-            // 0 here means "unset". The policy block has not been parsed yet,
-            // so the policy.csa.home_chan fallback is applied after it, with
-            // the rest of the auto cross-checks.
-            au.channel_mhz = aa.value("channel", uint16_t{0});
+            // Read WIDE, then range-check. get<uint16_t> static_casts without
+            // checking, so 65536 would land on 0 — which is this loader's own
+            // "unset" sentinel, silently substituting home_chan for a channel
+            // the operator did write. A Hz-for-MHz typo (5825000) would wrap
+            // to 57832 and fly. The auto form concentrates one channel value
+            // across every synthesized stanza, so one typo reaches them all.
+            {
+                const int64_t chan = aa.value("channel", int64_t{0});
+                if (chan != 0 && (chan < 2400 || chan > 7125)) {
+                    return Result<Config>::fail(
+                        "adapters.auto: channel " + std::to_string(chan) +
+                        " MHz is outside 2400..7125 — the value is a CENTER "
+                        "FREQUENCY IN MHz (§11.1)");
+                }
+                au.channel_mhz = static_cast<uint16_t>(chan);
+            }
             const uint32_t abw = aa.value("bw", 20u);
             if (abw != 20 && abw != 40 && abw != 80) {
                 return Result<Config>::fail(
@@ -356,6 +375,18 @@ Result<Config> load_config_json(const std::string& json_text) {
             }
             au.max_adapters = static_cast<uint8_t>(amax);
             if (aa.contains("tx_priority")) {
+                // Type-checked, unlike the pre-195 preset lists: nlohmann
+                // iterates an OBJECT by value and a scalar as one element, so
+                // {"a":"b"} would load as the single-entry priority ["b"] and
+                // "8812EU" as ["8812EU"] — a silently wrong election order
+                // reported by --strict as an "unknown key", which blames the
+                // wrong thing. The registry declares this kArray; the loader
+                // now agrees.
+                if (!aa.at("tx_priority").is_array()) {
+                    return Result<Config>::fail(
+                        "adapters.auto: tx_priority must be an array of part "
+                        "names (§15.2)");
+                }
                 for (const json& v : aa.at("tx_priority")) {
                     const std::string p = v.get<std::string>();
                     if (p.empty()) {
@@ -1516,6 +1547,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 // Taking the default from it is what makes one channel value
                 // enough for a whole config.
                 cfg.adapter_auto.channel_mhz = cfg.policy.csa.home_chan;
+                cfg.adapter_auto.channel_from_home_chan =
+                    cfg.adapter_auto.channel_mhz != 0;
             }
             if (cfg.adapter_auto.channel_mhz == 0) {
                 return Result<Config>::fail(

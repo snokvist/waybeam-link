@@ -88,35 +88,48 @@ bool is_radio_candidate(libusb_device* dev) {
         dd.idVendor != kRealtekVid) {
         return false;
     }
-    libusb_config_descriptor* cfg = nullptr;
-    if (libusb_get_active_config_descriptor(dev, &cfg) != 0 || cfg == nullptr) {
-        return false;
-    }
+    // EVERY configuration, not just the active one. A device that no kernel
+    // driver has configured sits in configuration 0, where
+    // libusb_get_active_config_descriptor returns NOT_FOUND — and that is a
+    // state the claim path deliberately RESCUES a few hundred lines down
+    // (devourer's claim_interface_then_reset: "a chip that was never
+    // kernel-configured is in config 0, where claim / bulk I/O fail with
+    // ESRCH", third_party/devourer/src/UsbOpen.cpp). Filtering on the active
+    // descriptor would therefore hide exactly the radios that path exists to
+    // recover — an unbound or blacklisted dongle — and it would do it to the
+    // ARRAY form too, where the operator named the port. devourer's own
+    // find_wifi_interface walks all configurations for the same reason.
     bool radio = false;
-    for (uint8_t i = 0; i < cfg->bNumInterfaces && !radio; ++i) {
-        const libusb_interface& itf = cfg->interface[i];
-        for (int alt = 0; alt < itf.num_altsetting && !radio; ++alt) {
-            const libusb_interface_descriptor& id = itf.altsetting[alt];
-            if (id.bInterfaceClass != LIBUSB_CLASS_VENDOR_SPEC) continue;
-            bool bulk_in = false;
-            bool bulk_out = false;
-            for (uint8_t e = 0; e < id.bNumEndpoints; ++e) {
-                const libusb_endpoint_descriptor& ep = id.endpoint[e];
-                if ((ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
-                    LIBUSB_TRANSFER_TYPE_BULK) {
-                    continue;
-                }
-                if ((ep.bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) ==
-                    LIBUSB_ENDPOINT_IN) {
-                    bulk_in = true;
-                } else {
-                    bulk_out = true;
-                }
-            }
-            radio = bulk_in && bulk_out;
+    for (uint8_t c = 0; c < dd.bNumConfigurations && !radio; ++c) {
+        libusb_config_descriptor* cfg = nullptr;
+        if (libusb_get_config_descriptor(dev, c, &cfg) != 0 || cfg == nullptr) {
+            continue;
         }
+        for (uint8_t i = 0; i < cfg->bNumInterfaces && !radio; ++i) {
+            const libusb_interface& itf = cfg->interface[i];
+            for (int alt = 0; alt < itf.num_altsetting && !radio; ++alt) {
+                const libusb_interface_descriptor& id = itf.altsetting[alt];
+                if (id.bInterfaceClass != LIBUSB_CLASS_VENDOR_SPEC) continue;
+                bool bulk_in = false;
+                bool bulk_out = false;
+                for (uint8_t e = 0; e < id.bNumEndpoints; ++e) {
+                    const libusb_endpoint_descriptor& ep = id.endpoint[e];
+                    if ((ep.bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
+                        LIBUSB_TRANSFER_TYPE_BULK) {
+                        continue;
+                    }
+                    if ((ep.bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) ==
+                        LIBUSB_ENDPOINT_IN) {
+                        bulk_in = true;
+                    } else {
+                        bulk_out = true;
+                    }
+                }
+                radio = bulk_in && bulk_out;
+            }
+        }
+        libusb_free_config_descriptor(cfg);
     }
-    libusb_free_config_descriptor(cfg);
     return radio;
 }
 
@@ -193,6 +206,51 @@ struct RadioAir::Impl {
         std::string aliases;
         bool fastretune_ok = false;
         std::thread rx_thread;
+
+        // §15.2 (Pass 195): the per-unit teardown lives HERE, not only in
+        // ~Impl. It used to be a loop inside ~Impl over `adapters`, which made
+        // "every unit is cleaned up" depend on every unit still being in that
+        // vector at teardown. Auto broke that invariant twice — a skipped
+        // claim pops one, and the max_adapters cap drops several — and a
+        // removed unit was then destroyed with `handle` and `ctx` raw and
+        // untouched: libusb context leaked, and worse, the USB interface left
+        // CLAIMED and the kernel driver left detached for the life of the
+        // process. The next process to want that dongle sees BUSY from the
+        // kernel and blames a process that does not exist, which is the exact
+        // failure the dev_key guard above was written to avoid.
+        //
+        // ORDER IS THE WHOLE CONTENT of this destructor. The device destructor
+        // IS the chip power-down (RtlJaguarDevice runs rtw_hal_deinit's control
+        // writes there), so it must run while the handle is still open. Members
+        // are destroyed in reverse declaration order, which puts `dev` before
+        // `handle`/`ctx` — but those two are RAW pointers, so leaving it to
+        // member destruction powers the chip down correctly and then leaks
+        // both. Sequencing it explicitly is what makes removal safe anywhere.
+        //
+        // rx_thread is deliberately NOT joined here: joining a thread still
+        // inside devourer's StartRxLoop without a preceding StopRxLoop would
+        // hang. ~Impl owns that half and does it for every live adapter; a
+        // unit removed during create() never started one.
+        ~Adapter() {
+            dev.reset();
+            if (handle) {
+                libusb_release_interface(handle, 0);
+                // B1: a wrapped handle is fd_keep, so this releases libusb's
+                // side and leaves the caller's descriptor open — closing it
+                // is the caller's job, and doing it here would close a
+                // descriptor we never owned.
+                libusb_close(handle);
+                handle = nullptr;
+            }
+            lock.reset();
+            if (ctx) {
+                libusb_exit(ctx);
+                ctx = nullptr;
+            }
+        }
+        Adapter() = default;
+        Adapter(const Adapter&) = delete;
+        Adapter& operator=(const Adapter&) = delete;
         // RX-thread-owned counters (relaxed atomics; read from stats).
         std::atomic<uint64_t> rx_frames{0};
         std::atomic<uint64_t> rx_filtered{0};
@@ -430,25 +488,13 @@ struct RadioAir::Impl {
             if (a->dev) {
                 a->dev->Stop();
             }
-            // The device destructor is the chip power-down (RtlJaguarDevice
-            // runs rtw_hal_deinit's control writes there) — it must run
-            // while the handle is still open. Leaving it to ~Adapter ran it
-            // after the libusb_close below: a use-after-free on every
-            // teardown (ASan, 2026-08-08 bench).
-            a->dev.reset();
-            if (a->handle) {
-                libusb_release_interface(a->handle, 0);
-                // B1: a wrapped handle is fd_keep, so this releases libusb's
-                // side and leaves the caller's descriptor open — closing it
-                // is the caller's job, and doing it here would close a
-                // descriptor we never owned.
-                libusb_close(a->handle);
-            }
-            a->lock.reset();
-            if (a->ctx) {
-                libusb_exit(a->ctx);
-            }
         }
+        // Power-down, release, close and exit are ~Adapter's, so a unit
+        // removed from this vector earlier gets exactly this teardown too
+        // (§15.2 Pass 195). Cleared EXPLICITLY rather than left to member
+        // destruction: that runs at the end of ~Impl, after the streams
+        // below are closed, and a devourer power-down still logs.
+        adapters.clear();
         // Only after every writer (RX threads, device Stop paths) is gone.
         if (ev_stream != nullptr) {
             if (logger) {
@@ -675,6 +721,25 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
     if (automode) {
         size_t found = 0;
         if (!cfg.adapter_fds.empty()) {
+            // Under auto the fd list IS the device set, so the -1 "enumerate
+            // this stanza" sentinel has no meaning here and must not silently
+            // manufacture an enumerating stanza: on unrooted Android — the
+            // whole reason the fd source exists — that stanza finds nothing
+            // and quietly shrinks the set, and on a rooted host it can claim
+            // the SAME physical dongle another entry supplied by fd, which
+            // neither used_paths (a wrapped unit never enters it) nor the
+            // dev_key guard (bus 0 on the wrap path) can catch.
+            for (size_t k = 0; k < cfg.adapter_fds.size(); ++k) {
+                if (cfg.adapter_fds[k] < 0) {
+                    return Result<RadioAir>::fail(
+                        "radio: adapters.auto: adapter_fds[" +
+                        std::to_string(k) + "] is " +
+                        std::to_string(cfg.adapter_fds[k]) +
+                        "; under auto the fd list is the device set, so every "
+                        "entry must be a real descriptor (the -1 \"enumerate "
+                        "this stanza\" sentinel is an array-form concept)");
+                }
+            }
             found = cfg.adapter_fds.size();
         } else {
             libusb_context* scan = nullptr;
@@ -781,9 +846,11 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
     im.rx_drop_permille.store(cfg.rx_drop_permille,
                               std::memory_order_relaxed);
     im.usb_tx_agg = cfg.usb_tx_agg;
-    // §3.11 Pass 162; roles never change post-create. Under auto this is
-    // false here — cfg.adapters is still empty — and is re-set from the
-    // election below, before any RX thread or inject can observe it.
+    // §3.11 Pass 162; roles never change post-create. Under auto the
+    // provisional stanzas already exist here and are all Role::kRx, so this
+    // computes false — the right answer — and the election below re-sets it
+    // before any RX thread or inject can observe it. (It is NOT "empty" here:
+    // the enumeration above ran first.)
     im.has_tx = false;
     for (const AdapterCfg& a : cfg.adapters) {
         im.has_tx = im.has_tx || (a.role == Role::kTx);
@@ -879,7 +946,13 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
         const auto skip_or_fail =
             [&](const std::string& why) -> std::optional<std::string> {
             if (!automode) return why;
-            wb_logf("radio: adapters.auto: SKIPPING a candidate — %s\n",
+            // Named by PATH, never by the synthetic "autoN": that name is an
+            // ENUMERATION index, while the election table below and the
+            // synthesized stanza names both index the surviving set. After a
+            // skip the two spaces disagree, and printing both would show two
+            // different physical units called auto0.
+            wb_logf("radio: adapters.auto: SKIPPING candidate at %s — %s\n",
+                    ad->path.empty() ? "(unclaimed)" : ad->path.c_str(),
                     why.c_str());
             im.adapters.pop_back();  // `ad` dangles past this point
             return std::nullopt;
@@ -943,10 +1016,14 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
                     // This scan used to test the vendor id alone, so a
                     // first-free claim could open a Bluetooth dongle or the
                     // ZeroCD storage identity and then detach its kernel
-                    // driver. An explicit bus pin is unaffected — it names a
-                    // port, and a non-radio at that port still fails at claim,
-                    // now with a filter that never offered it in the first
-                    // place.
+                    // driver.
+                    //
+                    // This runs BEFORE the bus comparison below, so it vetoes
+                    // a pinned port too — which is why is_radio_candidate must
+                    // walk every configuration rather than the active one. An
+                    // unconfigured radio is still a radio, and telling an
+                    // operator "no matching Realtek device" about a port they
+                    // named is a worse answer than claiming it and failing.
                     if (!is_radio_candidate(list[k])) {
                         continue;
                     }
@@ -1249,8 +1326,10 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
                 im.has_tx = true;
             }
         }
-        // The stored copy is what resolved_adapters() publishes; im.cfg was
-        // taken before the enumeration and still holds the empty array.
+        // The stored copy is what resolved_adapters() publishes. im.cfg was
+        // taken AFTER the enumeration, so until this line it holds the
+        // PROVISIONAL stanzas (all Role::kRx, synthetic names) — not an empty
+        // array. Overwritten here, before create() can return.
         im.cfg.adapters = cfg.adapters;
     }
 

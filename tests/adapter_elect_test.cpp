@@ -262,6 +262,36 @@ int main() {
         CHECK(st[0].name != st[1].name);
     }
     {
+        // The stanza name uses the spelling the PRIORITY LIST named, so it can
+        // never disagree with the election table that produced it. An RTL8733B
+        // reports aliases "RTL8731BU/RTL8733BU"; taking the first token blindly
+        // named an 8733BU dongle `auto0-8731bu` while the table said it matched
+        // "8733BU".
+        const std::vector<AdapterCandidate> cands = {bu("44:44:44:44:44:44")};
+        const AdapterAutoCfg c = cfg_at();
+        const AdapterPlan plan = plan_adapters(cands, c, true);
+        const std::vector<AdapterCfg> st = auto_stanzas(cands, plan, c);
+        CHECK_EQ_U(st.size(), 1u);
+        CHECK(st[0].name == "auto0-8733bu");
+        CHECK(st[0].name != "auto0-8731bu");
+
+        // An operator override renames it to THEIR spelling too.
+        AdapterAutoCfg alt = cfg_at();
+        alt.tx_priority = {"RTL8731BU"};
+        const std::vector<AdapterCfg> st2 =
+            auto_stanzas(cands, plan_adapters(cands, alt, true), alt);
+        CHECK(st2[0].name == "auto0-8731bu");
+    }
+    {
+        // A part nobody ranked falls back to its first alias.
+        const std::vector<AdapterCandidate> cands = {
+            {"RTL8821C", "RTL8821CU", "c1:c1:c1:c1:c1:c1", "2-2"}};
+        const AdapterAutoCfg c = cfg_at();
+        const std::vector<AdapterCfg> st =
+            auto_stanzas(cands, plan_adapters(cands, c, true), c);
+        CHECK(st[0].name == "auto0-8821cu");
+    }
+    {
         // An unidentified unit still gets a usable, unique name.
         const std::vector<AdapterCandidate> cands = {{"", "", "", "3-1"}};
         const AdapterPlan plan = plan_adapters(cands, cfg_at(), true);
