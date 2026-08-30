@@ -157,6 +157,78 @@ void test_probe_fields_do_not_depend_on_the_craft_selector_word() {
     CHECK_EQ_U(snap.link.probe_observed, 0);
 }
 
+// Two dir:"out" streams on ONE RxCore — which is what every deployed ground
+// runs (RTP + AUDIO, and .242 adds TELEMETRY). A stream with no traffic of its
+// own must report 0 best-ear loss, NOT whatever the previous stream in
+// fill_stats' loop just computed. The hold was a single scalar until review,
+// and an idle AUDIO stream showed the VIDEO stream's number.
+void test_best_ear_hold_does_not_leak_across_streams() {
+    Config c = rx_config();
+    for (uint8_t id : {uint8_t{0}, uint8_t{1}}) {
+        wblink::StreamCfg s;
+        s.stream_id = id;
+        s.stream_type = id == 0 ? wblink::stream_type::kRtp
+                                : wblink::stream_type::kAudio;
+        s.dir = wblink::Dir::kOut;
+        c.streams.push_back(s);
+    }
+    RxCore rx(c, /*session=*/1, nullptr, std::nullopt);
+
+    // Latch BOTH streams — the leak needs two entries in fill_stats' loop —
+    // then keep feeding only stream 0, lossily, while stream 1 goes silent.
+    std::vector<uint8_t> pkt;
+    auto send = [&](uint8_t sid, uint8_t stype, uint32_t seq, uint64_t now) {
+        wblink::DataHeader h{};
+        h.prefix.originator = 17;
+        h.prefix.destination = 0;
+        h.prefix.session_id = 4242;
+        h.stream_id = sid;
+        h.stream_type = stype;
+        h.seq = seq;
+        h.block_id = 0;
+        const uint8_t payload[4] = {1, 2, 3, 4};
+        pkt.assign(256, 0);
+        const size_t n = wblink::encode_data(h, payload, sizeof payload,
+                                             pkt.data(), pkt.size());
+        pkt.resize(n);
+        rx.on_air(/*adapter=*/0, pkt.data(), pkt.size(), now,
+                  [](uint8_t, uint32_t, uint8_t, const uint8_t*, size_t) {});
+    };
+
+    uint32_t v_seq = 0, a_seq = 0;
+    uint64_t t = 1000;
+    wblink::StatsSnapshot snap;
+    for (int i = 0; i < 4; ++i) {                       // latch both, cleanly
+        send(0, wblink::stream_type::kRtp, v_seq++, t += 10);
+        send(1, wblink::stream_type::kAudio, a_seq++, t += 10);
+    }
+    // Stream 1 now goes silent; stream 0 keeps losing 4 of every 5.
+    for (int round = 0; round < 6; ++round) {
+        for (int i = 0; i < 4; ++i) {
+            v_seq += 5;
+            send(0, wblink::stream_type::kRtp, v_seq, t += 10);
+        }
+        snap = wblink::StatsSnapshot{};
+        rx.fill_stats(snap, t);
+    }
+
+    const wblink::StreamStats* video = nullptr;
+    const wblink::StreamStats* audio = nullptr;
+    for (const wblink::StreamStats& st : snap.streams) {
+        if (st.stream_id == 0) video = &st;
+        if (st.stream_id == 1) audio = &st;
+    }
+    // Both must be present, or the leak path is not exercised at all.
+    CHECK(video != nullptr);
+    CHECK(audio != nullptr);
+    if (video == nullptr || audio == nullptr) return;
+    // Stream 0 really is losing; without this the next assertion is vacuous.
+    CHECK(video->loss_best_ear_window_milli > 0);
+    // Stream 1 has no evidence of its own and must say 0 — NOT stream 0's
+    // number, which is what a shared hold produced.
+    CHECK_EQ_U(audio->loss_best_ear_window_milli, 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -166,5 +238,6 @@ int main() {
     test_fill_stats_on_an_idle_node();
     test_unknown_block_has_no_nack();
     test_probe_fields_do_not_depend_on_the_craft_selector_word();
+    test_best_ear_hold_does_not_leak_across_streams();
     return wbtest_finish("node_rx_core_test");
 }

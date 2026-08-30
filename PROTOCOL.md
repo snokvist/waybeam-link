@@ -653,6 +653,52 @@ so late adapter startup is not counted as loss. The missing set is bounded by
 the existing plausible-forward clamp. Stats reset zeros estimator totals while
 preserving each adapter's current sequence anchor.
 
+**Both §3.7 ratios are CUMULATIVE, and a live view is published beside them
+(Pass 198).** `loss_prediversity_milli` and `loss_postdiv_prearq_milli` are
+computed from totals since latch, so their inertia grows without bound: on the
+x86 ground the pre-diversity figure moved 33.6 -> 33.4 across 90 s and 88,000
+delivered frames. That is the correct definition for a session average and the
+wrong one for anything that has to react — a burst now barely moves it, and a
+scout sweep that parks one ear off-channel bakes a 100%-loss stretch in for the
+rest of the session, which is enough to pin an operator's loss bar at alert on
+a link that is delivering cleanly. A receiver MUST therefore also publish
+`loss_prediversity_window_milli` and `loss_postdiv_window_milli` (§15.3): the
+same two ratios over a short trailing window, anchored on the oldest sample
+still inside it so the span is bounded however irregularly the emitter ticks.
+The window forgets completely rather than decaying, because "loss in the last
+N ms" is what a consumer of these fields is asking. An empty denominator —
+no traffic in the window — MUST hold the previous value rather than report
+zero: a silent link is not a clean one. The window length is a §17 seed
+(500 ms), not a wire constant; both ends compute it locally and it appears in
+no packet.
+
+**Pre- and post-diversity answer different questions, and a multi-ear receiver
+makes the difference large.** The pre-diversity figure sums opportunities
+across every adapter, so it is the MEAN PER-EAR loss — one weak ear holds it
+high while every packet still arrives on some ear. Measured on a two-ear
+ground, one ear seeing ~100% of unique packets and the other 2.7%: **491
+permille pre-diversity against 1 post-diversity**, with the picture clean. A
+consumer presenting "is the link healthy" wants post-diversity; the mean is a
+fleet-diagnostic ("is an ear failing"), not an air-quality indicator.
+
+Do not confuse these with the §3.5 `loss_window_milli` that rides the wire in a
+LINK_REPORT and feeds the §9.1 demote cascade: that one is the reporter's own
+short selector window, is a wire field both peers agree on, and is scoped to
+the adaptive decision. The `streams[].loss_*_window_milli` fields here are
+RX-local, appear in no packet, and exist for presentation. Both are called
+"window"; they are different windows with different lengths and different
+owners.
+
+For air quality a receiver MUST also publish `loss_best_ear_window_milli`
+(§15.3): the windowed loss of the ear currently hearing best, i.e. what the air
+is doing on the path actually carrying the link. Each ear is windowed
+SEPARATELY and the minimum taken — differencing a "best pair" instead would
+mix a numerator from one ear with a denominator from another whenever the best
+ear changes, which is a rate of nothing. On the ground measured above this
+reads **0-16 permille and moves every sample**, against the 491 the mean
+reports; the mean is what had pinned that operator's loss bar at alert for the
+life of every session.
+
 ### 3.8 HEARTBEAT packet (type `0x4`) — 11 bytes
 
 The common prefix (§3.1) alone; there is no body (operator-ruled 2026-07-10). A
@@ -5650,6 +5696,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "nacks_sent": 18,
     "best_effort": false,
     "table_mismatch": 0,
+    "loss_prediversity_window_milli": 0,
+    "loss_postdiv_window_milli": 0,
+    "loss_best_ear_window_milli": 0,
     "nack_rtt_hist": [0,2,7,6,2,1,0,0], "nack_rtt_max_ms": 34,
     "arq_rec_hist": [0,1,6,6,3,1,1,0], "arq_rec_max_ms": 61,
     "resends_sent": 230, "arq_lock_holder": 9, "double_send_suppressed": 5,

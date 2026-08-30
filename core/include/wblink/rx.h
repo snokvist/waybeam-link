@@ -121,6 +121,19 @@ struct RxStreamInfo {
     // operator to go and read two files on two hosts to find out which end
     // moved.
     uint8_t peer_table_version = 0;
+    // §3.7 (Pass 198) per-EAR opportunities, alongside the summed pair in
+    // `counters`. The sum is the MEAN per-ear loss, which on a diversity
+    // receiver is not "how good is the air": measured on a two-ear ground, one
+    // ear saw ~100% of unique packets and the other 2.7%, so the mean read 50%
+    // while every packet arrived and the picture was clean. A consumer that
+    // wants air quality wants the BEST ear; one that wants "is an ear failing"
+    // wants the spread. Both need the ears kept apart.
+    struct AdapterLoss {
+        uint8_t adapter_id = 0;
+        uint64_t expected = 0;
+        uint64_t lost = 0;
+    };
+    std::vector<AdapterLoss> per_adapter;
     RxStreamCounters counters;
 };
 
