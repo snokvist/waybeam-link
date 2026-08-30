@@ -1530,13 +1530,21 @@ int main() {
         // Radio-only: the udp dev backend has no devices to discover.
         expect_error(subst(kHome, "\"kind\": \"radio\"", "\"kind\": \"udp\""),
                      "radio-backend feature");
-        // §9.4 stage-0 is a per-UNIT proof and auto elects the unit, so the
-        // combination is refused rather than probing on an unproven die.
-        // On a TX node: an rx node is already refused by the older §15.2
-        // "mcs_probe is a TX-node key" rule, which would mask this one.
-        expect_error(subst(kAutoFull, "\"kind\": \"radio\"",
-                           "\"kind\": \"radio\", \"mcs_probe\": true"),
-                     "per-UNIT enablement");
+        // §9.4 (Pass 196): mcs_probe and auto COMPOSE. The enablement is
+        // per-die and the fleet dies are licensed, so an election has nothing
+        // to inherit and nothing to violate. Pass 195 refused this pairing
+        // while the §9.4 gate still read per-unit; asserted here so the
+        // withdrawal cannot silently regress into a refusal again.
+        {
+            auto probe_auto = load_config_json(
+                subst(kAutoFull, "\"kind\": \"radio\"",
+                      "\"kind\": \"radio\", \"mcs_probe\": true"));
+            CHECK(bool(probe_auto));
+            if (probe_auto) {
+                CHECK(probe_auto.value->air.mcs_probe);
+                CHECK(probe_auto.value->adapter_auto.enabled);
+            }
+        }
         expect_error(subst(kHome, "\"auto\": {}", "\"auto\": {\"bw\": 30}"),
                      "bw must be 20, 40 or 80");
         expect_error(subst(kHome, "\"auto\": {}",
@@ -1550,6 +1558,43 @@ int main() {
         expect_error(subst(kHome, "\"auto\": {}",
                            "\"auto\": {\"tx_priority\": [\"\"]}"),
                      "tx_priority holds an empty name");
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"tx_priority\": \"8812EU\"}"),
+                     "tx_priority must be an array");
+
+        // §11.1 channel range. These values do NOT fail closed downstream:
+        // mhz_to_channel ends in a uint8 cast, so 5825000 truncates to
+        // channel 70 (DFS) and 6285 to channel 1 (2.4 GHz) — both of which
+        // pass the backend's `== 0` guard and fly. Checked at load instead,
+        // on all three keys that carry a centre frequency.
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"channel\": 5825000}"),
+                     "outside 2400..5900");
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"channel\": 6285}"),
+                     "outside 2400..5900");
+        // 65536 would static_cast to 0 — this loader's own "unset" sentinel —
+        // and silently take home_chan instead of reporting the typo.
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"channel\": 65536}"),
+                     "outside 2400..5900");
+        expect_error(subst(kHome, "\"home_chan\": 5825",
+                           "\"home_chan\": 5825000"),
+                     "policy.csa.home_chan");
+        expect_error(subst(kSample, "\"channel\": 5805, \"bw\": 20",
+                           "\"channel\": 5825000, \"bw\": 20"),
+                     "outside 2400..5900");
+
+        // §11.7 0x0A ladders must be arrays: an object loads in nlohmann's
+        // SORTED-KEY order, so {"low":-96,"mid":-48,"high":16} becomes
+        // [16,-96,-48] and cmd_arg 0 selects the operator's HIGHEST offset.
+        expect_error(subst(kHome, "\"auto\": {}",
+                           "\"auto\": {\"power_offset_presets_qdb\": "
+                           "{\"low\": -96, \"high\": 0}}"),
+                     "must be an array");
+        expect_error(subst(kSample, "\"power_presets_qdb\": [60, 76, 84]",
+                           "\"power_presets_qdb\": 60"),
+                     "must be an array");
     }
 
     return wbtest_finish("config_test");

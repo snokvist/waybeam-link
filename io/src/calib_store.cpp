@@ -2,6 +2,10 @@
 // §10.6 (Pass 120) calibration artifact persistence — see calib_store.h.
 #include "wblink/calib_store.h"
 
+#include <sys/stat.h>
+
+#include <cerrno>
+
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -158,11 +162,17 @@ Result<CalibStored> calib_store_load(const std::string& dir,
         // it as a fresh boot auto-load. Pre-195 the same truncation gave "no
         // artifact" and the node stayed on the §10.5 safe boot offset, which
         // is the behaviour to preserve.
-        std::ifstream probe(own, std::ios::binary);
-        if (probe.good()) {
+        // ENOENT specifically. `ifstream::good()` is false for EVERY open
+        // failure — EACCES on a root-owned artifact under a dropped-privilege
+        // daemon, EMFILE during a multi-adapter boot — and reading those as
+        // "absent" would resurrect the superseded legacy artifact through a
+        // different errno than the one this guard was added to close.
+        struct stat st;
+        if (::stat(own.c_str(), &st) == 0 || errno != ENOENT) {
             return Result<CalibStored>::fail(
-                "artifact-<identity>.json is empty (a failed write?) — "
-                "refusing to fall back to the pre-195 artifact.json");
+                "artifact-<identity>.json is present but unreadable or empty "
+                "(a failed write?) — refusing to fall back to the pre-195 "
+                "artifact.json");
         }
         // Pre-Pass-195 layout. Read it, but do not privilege it: the stored
         // identity is parsed below exactly as for a per-identity file and the

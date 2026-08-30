@@ -340,6 +340,36 @@ void test_legacy_fallback() {
     std::remove(dir.c_str());
 }
 
+// §10.7 (Pass 195): a ZERO-LENGTH per-identity artifact — what a failed write
+// leaves — must NOT fall through to the legacy file. Without this guard a
+// truncated write resurrects a SUPERSEDED placement whose identity matches, so
+// uplink_calib_matches() accepts it and the ground flies an old §10.7 point.
+// The §10.6 twin got this guard first; this is the same hole in this store.
+void test_empty_does_not_resurrect_legacy() {
+    const std::string dir = temp_dir();
+    CHECK(!dir.empty());
+    if (dir.empty()) return;
+
+    CHECK(uplink_calib_store_write(dir, make_artifact()) != 0);
+    const std::string body = slurp(artifact_file(dir));
+    {
+        std::ofstream f(dir + "/uplink-artifact.json", std::ios::trunc);
+        f << body;                       // a legacy artifact for this identity
+    }
+    {
+        std::ofstream f(artifact_file(dir), std::ios::trunc);  // truncated
+    }
+    CHECK(slurp(artifact_file(dir)).empty());
+    CHECK(!uplink_calib_store_load(dir, kIdentity));  // refused, not resurrected
+
+    // Remove the empty file and the legacy one is reachable again — the
+    // refusal is about an unusable file being PRESENT, not a permanent veto.
+    std::remove(artifact_file(dir).c_str());
+    CHECK(static_cast<bool>(uplink_calib_store_load(dir, kIdentity)));
+    std::remove((dir + "/uplink-artifact.json").c_str());
+    std::remove(dir.c_str());
+}
+
 int main() {
     test_craft_response_declares_downlink();
     test_round_trip();
@@ -405,5 +435,6 @@ int main() {
     }
 
     test_legacy_fallback();
+    test_empty_does_not_resurrect_legacy();
     return wbtest_finish("uplink_calib_store_test");
 }

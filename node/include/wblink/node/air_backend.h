@@ -710,10 +710,16 @@ struct AirBackend {
                 as.drop = udp->rx_dropped(i);
                 as.kernel_drop = udp->kernel_dropped(i);
                 if (i == 0) {
-                    // The udp dev backend has no per-adapter TX: index 0
-                    // carries the node's aggregate, so it is the one entry
-                    // that can honestly claim the uplink.
-                    as.tx = udp->has_tx();
+                    // §15.3 `tx` stays FALSE here. The udp dev backend has no
+                    // per-adapter uplink — UdpAir::has_tx() hardcodes true
+                    // ("the dev backend has an uplink by construction"), and
+                    // these entries are UDP RX ENDPOINTS, a different array
+                    // from the /info stanza list: a udp config need carry no
+                    // `adapters` at all, in which case /info reports [] while
+                    // this reports udp0. Claiming an uplink here would publish
+                    // an index nothing can cross-reference. Index 0 still
+                    // carries the node's aggregate TX counters, which is a
+                    // bookkeeping slot, not a designation.
                     as.tx_submitted = udp->tx_submitted();
                     as.tx_failed = udp->tx_failed();
                 }
@@ -723,7 +729,6 @@ struct AirBackend {
             if (n == 0 && (udp->tx_submitted() != 0 || udp->tx_failed() != 0)) {
                 AdapterStats as;
                 as.name = "udp-tx";
-                as.tx = true;
                 as.tx_submitted = udp->tx_submitted();
                 as.tx_failed = udp->tx_failed();
                 snap.adapters.push_back(std::move(as));

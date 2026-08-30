@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "wblink/uplink_calib_store.h"
 
+#include <sys/stat.h>
+
+#include <cerrno>
+
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -151,8 +155,24 @@ uint8_t uplink_calib_store_write(const std::string& dir,
 
 Result<UplinkArtifact> uplink_calib_store_load(const std::string& dir,
                                               const std::string& identity) {
-    std::string body = read_file(artifact_path(dir, identity));
-    if (body.empty()) body = read_file(dir + kLegacyFile);
+    const std::string own = artifact_path(dir, identity);
+    std::string body = read_file(own);
+    if (body.empty()) {
+        // Same guard as the §10.6 twin, and for the same reason: read_file
+        // cannot tell "absent" from "zero bytes", and zero bytes is what a
+        // failed write leaves. Without this a truncated per-identity artifact
+        // falls through to a SUPERSEDED legacy one whose identity matches, so
+        // uplink_calib_matches() accepts it and the ground flies an old §10.7
+        // placement. ENOENT specifically — any other open failure is
+        // "present but unreadable", not absent.
+        struct stat st;
+        if (::stat(own.c_str(), &st) == 0 || errno != ENOENT) {
+            return Result<UplinkArtifact>::fail(
+                "uplink-artifact-<identity>.json is present but unreadable or "
+                "empty (a failed write?) — refusing the pre-195 fallback");
+        }
+        body = read_file(dir + kLegacyFile);
+    }
     if (body.empty()) return Result<UplinkArtifact>::fail("no artifact");
     json j = json::parse(body, nullptr, false);
     if (j.is_discarded() || !j.is_object()) {

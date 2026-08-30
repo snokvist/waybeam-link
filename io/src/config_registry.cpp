@@ -180,9 +180,10 @@ const char* kWhyOffsetPresets =
     "air.kind is not radio, so this node's TX actuation is absolute and its "
     "\u00a711.7 0x0A tier reads adapters[].power_presets_qdb instead";
 const char* kWhyHomeChanUnread =
-    "no code path reads policy.csa.home_chan on an array-form config \u2014 "
-    "the power-on channel is adapters[].channel. It becomes live under the "
-    "\u00a715.2 auto form, as the synthesized stanzas' channel default";
+    "no code path reads policy.csa.home_chan here \u2014 the power-on channel "
+    "is adapters[].channel on the array form, and adapters.auto.channel when "
+    "the auto form sets it explicitly. It is read ONLY when the auto form "
+    "omits a channel and falls back to it (\u00a711.5)";
 // §15.2 (Pass 195): the auto form is refused on every non-radio backend, and
 // radio is relative — so unlike its array twin this key is inert in 100% of
 // configs that can load, not merely on some backends. It is registered rather

@@ -2086,7 +2086,7 @@ injection model has no such side stream, so that mechanism is **dropped**.
   `probe_observed` is guard (4)'s counter and is the operational proof that a
   TX is probing *and* that this receiver can see it; a nonzero value is the
   only reading that separates a working probe from a scheduled one.
-  Observability is not optional here: the probe is a per-unit fail-closed
+  Observability is not optional here: the probe is a per-node fail-closed
   enablement (below), so "is it on, and is it working" is a question the
   operator must be able to answer per node.
 - **Receiver window guards (normative — the subtlety lives here).** The RX
@@ -2103,7 +2103,7 @@ injection model has no such side stream, so that mechanism is **dropped**.
   reports only after the candidate rate has been directly observed at least
   once this window** — a rate-verified success or a CRC-verified failure
   (operator ruling 2026-08-08). Without (4), a non-probing TX (probing is
-  per-unit while the table is fleet-shared) satisfies (2) on every non-probe
+  per-node while the table is fleet-shared) satisfies (2) on every non-probe
   frame and ordinary air loss on probe-slot seqs manufactures a
   full-strength phantom veto; the window cannot otherwise distinguish
   "candidate failing" from "TX not probing". The one case (4) forfeits — a
@@ -2114,13 +2114,40 @@ injection model has no such side stream, so that mechanism is **dropped**.
   gate or clear a veto. Because the receiver rate-verifies, one-sided
   enablement degrades to inert stats, never mis-evidence.
 - **Fail-closed enablement (stage 0 is law).** TX probing is off by default
-  and radio-backend-only (`air.mcs_probe`, §15.2): a die/unit whose
-  per-packet commanded rate is not stage-0-proven (issue #101; findings.md
-  2026-08-08 proves 8812AU/8812CU/8812EU on this bench's units — per-unit,
-  not per-part, Pass 139) must not probe, and an RX with no probe evidence
-  reports `0xFFFF`. The retry rate-walk is dormant on the broadcast video
-  path (CCX-verified); §96's nonzero return retry limit does not touch video
-  DATA.
+  and radio-backend-only (`air.mcs_probe`, §15.2): a die whose per-packet
+  commanded rate is not stage-0-proven (issue #101) must not probe, and an RX
+  with no probe evidence reports `0xFFFF`. The retry rate-walk is dormant on
+  the broadcast video path (CCX-verified); §96's nonzero return retry limit
+  does not touch video DATA.
+
+  > **AMENDED (Pass 196) — the enablement is PER-DIE, and the fleet dies are
+  > licensed.** This clause read "a die/unit … per-unit, not per-part, Pass
+  > 139" and gated probing on a per-unit proof. That reservation is withdrawn
+  > by operator ruling 2026-08-30.
+  >
+  > The property being gated — does this silicon honour the per-packet
+  > commanded rate in the TX descriptor — is a property of the die and its HAL
+  > path, not of an individual dongle. findings.md 2026-08-08 measured it that
+  > way and it passed on **every die present**: AU→CU 3600/3600 with an EMPTY
+  > mismatch matrix, CU→AU 3590/3590, EU→dual ears 3593/3593 + 3600/3600, with
+  > `tx_reports == tx_submitted` exactly across ~11k broadcast frames.
+  >
+  > The per-unit framing came from Pass 139's scar — one defective dongle once
+  > carried an entire architectural posture — and it was carried as caution,
+  > not as a measurement. Caution is not free: it left the gate as an
+  > honour-system config comment that **no code enforced** (nothing compared
+  > the bound unit's identity against any proof, and the §10.6 D2 fallback did
+  > not disarm the probe), and it blocked the §15.2 auto form on every craft
+  > that had it set. A rule nobody can enforce and everybody must work around
+  > is worse than a rule that matches the evidence.
+  >
+  > So: `air.mcs_probe` is licensed on the stage-0-proven dies — Jaguar1
+  > (RTL8812A), Jaguar2, Jaguar3 (RTL8822C/RTL8822E) and RTL8733B — with no
+  > per-unit qualification and no interaction with §15.2 `adapters.auto`. A die
+  > family with no stage-0 evidence still must not probe; adding one is a
+  > stage-0 run, not a config edit. Everything else in §9.4 is unchanged: it is
+  > still off by default, still radio-only, still TX-node-only, and the four
+  > receiver window guards below still do the real work.
 - **Saturation gate (Pass 160, issue #98 stage 3):** a **fresh `Saturated`
   §3.16 LINK_VERDICT suppresses every climbing path** — both the RSSI-margin
   promote here and the §9.5-adjacent backpressure escape (gating only one
@@ -5103,12 +5130,14 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   result as a paste-ready array-form `adapters` block, so an operator can
   discover once and then freeze the assignment.
 
-  Two refusals, both fail-closed. `air.mcs_probe` with auto is a **config
-  error**: §9.4 gates probing on a *per-unit* stage-0 proof, and an election
-  that may land on a different die cannot inherit one unit's proof. And
-  `air.usb_tx_agg` is applied to **every** claimed unit under auto rather than
-  to the TX alone, because the elected unit is not known when the devices are
-  constructed — the same concession the Pass 154 re-bind already makes for
+  `air.mcs_probe` and auto compose freely (Pass 196): §9.4's enablement is
+  per-DIE and the fleet dies are licensed, so an election has nothing to
+  inherit and nothing to violate. Pass 195 refused the combination while the
+  §9.4 gate still read per-unit; that reservation is withdrawn.
+
+  One concession, stated rather than hidden: `air.usb_tx_agg` is applied to
+  **every** claimed unit under auto rather than to the TX alone, because the
+  elected unit is not known when the devices are constructed — the same concession the Pass 154 re-bind already makes for
   `tx.report`. It costs a diversity ear the aggregation MAC-init write and
   nothing else; the default of 0 leaves every deployment byte-identical.
 
@@ -5126,9 +5155,14 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
 
   `air.kind` must be `"radio"`: the auto form has no meaning on the udp dev
   backend, and is refused there rather than ignored.
-- `adapters[].tx` (§15.3, Pass 195) marks the **designated uplink** — the same
-  split `role` carries in §15.5 `/api/v1/info`, published on the stats plane so
-  a consumer of stats alone does not have to infer it. It exists because the
+- `adapters[].tx` (§15.3, Pass 195) marks the **designated uplink** on the
+  RADIO backend — the same split `role` carries in §15.5 `/api/v1/info`,
+  published on the stats plane so a consumer of stats alone does not have to
+  infer it. It is **always `false` on the udp dev backend**, which has no
+  per-adapter uplink: its stats adapters are UDP rx endpoints (`udp0…udpN`),
+  a different array from `/info`'s stanza list — a udp config need carry no
+  `adapters` at all — so an index into one does not address the other and
+  claiming a uplink there would name a row nothing can cross-reference. It exists because the
   §15.2 auto form ELECTS the split at bring-up rather than reading it from the
   config, and because the elected uplink is not necessarily the best ear: a
   consumer computing a diversity-best RSSI for VIDEO would otherwise report
@@ -6055,7 +6089,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 |---|---|
 | `GET /api/v1/stats` | the current §15.3 snapshot as one JSON object (no trailing newline) |
 | `GET /api/v1/stats/stream` | `text/event-stream`; one §15.3 object per `stats.hz` tick |
-| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]` (each `{name, role, channel, mac, chip, power_actuator, ldpc_rx_flag, fastretune}` — `mac` is the §10.6 per-unit EFUSE identity on the radio backend, `null` where the backend reports none, Pass 154; the four capability fields are static per-die answers read once at bring-up, Pass 172: `chip` is the backend's chip-generation name (`"udp"` on the bench backend), `power_actuator` is §10.5's `actuator` discriminator as a boolean (Pass 171 — `false` = offsets are inert and refused), `ldpc_rx_flag` is per-frame LDPC *reporting* existing on this die (§15.3 Pass 157 — decode capability is separate), `fastretune` says the lean retune override exists), `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
+| `GET /api/v1/info` | static identity: `role`, `node`, `session`, `table_version`, `streams[]`, `adapters[]` (each `{name, role, channel, mac, chip, part, aliases, power_actuator, ldpc_rx_flag, fastretune}` — `mac` is the §10.6 per-unit EFUSE identity on the radio backend, `null` where the backend reports none, Pass 154; `part` and `aliases` (Pass 195) name the DIE and its marketing aliases (`"RTL8822E"`, `"RTL8812EU/RTL8822EU"`), added because `chip` is the chip GENERATION and reads `jaguar3` for both an 8812EU and an 8812CU — which is exactly the distinction the §15.2 auto election turns on, so a consumer cannot name the dongle from `chip` alone; both are empty strings on a backend with no die, which a consumer must distinguish from a die it does not recognise; the capability fields are static per-die answers read once at bring-up, Pass 172: `chip` is the backend's chip-generation name (`"udp"` on the bench backend), `power_actuator` is §10.5's `actuator` discriminator as a boolean (Pass 171 — `false` = offsets are inert and refused), `ldpc_rx_flag` is per-frame LDPC *reporting* existing on this die (§15.3 Pass 157 — decode capability is separate), `fastretune` says the lean retune override exists), `build`; on a TX/craft node also the live self state `channel`, `psk_announced`, `claimed`, `claimed_by` (Pass 113) |
 | `GET /api/v1/features` | sanitized effective feature state loaded by this process: `{air:{backend,ldpc,stbc,mcs_probe_configured,mcs_probe_scheduled},video:{present,stream_id,direction,binding,arq_mode,arq_enabled,fec:{scheme,i_permille,p_permille,e_permille,min_k,min_r},spatial_recovery:{mode,freeze_frame},jscc:{configured,enforce}},venc:{enabled,recovery_enabled,fps_ladder_boot,fps_ladder_enabled}}`. `video` describes the first configured RTP stream (the role's video stream); absent video uses `present:false` and neutral defaults. `arq_enabled` and `fps_ladder_enabled` are live gates; the other fields are the validated configuration/table actually loaded at process start. No config path, bind address, PSK, or other secret-bearing field is returned. |
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |

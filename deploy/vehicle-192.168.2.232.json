@@ -9,7 +9,7 @@
   "profile_table": "/etc/waybeam-link/table.example.json",
   "adapters": [
     {
-      "_power_comment": "§10.5 offset space. 8812EU craft floor MEASURED at the ground 2026-08-16: 0/-24/-48 qdb read -13/-20/-27 dBm and -72/-96/-128 all pin at -28 with saturated_low true. 14 dB of travel; -48 is the last rung that moves the air, so the ladder's -72 bottom rung is below the floor and kept only because it saturates honestly. Reversibility checked (0/-48/0/-48 repeated within 2 dB). BENCH-LOW for 50 cm geometry — raise before any range or flight test.",
+      "_power_comment": "\u00a710.5 offset space. 8812EU craft floor MEASURED at the ground 2026-08-16: 0/-24/-48 qdb read -13/-20/-27 dBm and -72/-96/-128 all pin at -28 with saturated_low true. 14 dB of travel; -48 is the last rung that moves the air, so the ladder's -72 bottom rung is below the floor and kept only because it saturates honestly. Reversibility checked (0/-48/0/-48 repeated within 2 dB). BENCH-LOW for 50 cm geometry \u2014 raise before any range or flight test.",
       "name": "eu-craft",
       "role": "tx",
       "channel": 5805,
@@ -62,7 +62,7 @@
       }
     },
     {
-      "_comment": "§7.5 uplink RC delivery — into mod_telemetry's UDP bind",
+      "_comment": "\u00a77.5 uplink RC delivery \u2014 into mod_telemetry's UDP bind",
       "stream_id": 2,
       "stream_type": "CONTROL",
       "dir": "out",
@@ -72,7 +72,7 @@
       }
     },
     {
-      "_comment": "downlink FC telemetry ingest — hub telemetry.udp_target points here",
+      "_comment": "downlink FC telemetry ingest \u2014 hub telemetry.udp_target points here",
       "stream_id": 3,
       "stream_type": "TELEMETRY",
       "dir": "in",
@@ -84,13 +84,13 @@
   ],
   "air": {
     "kind": "radio",
-    "_mcs_probe_comment": "§9.4 ARMED on this node since 2026-08-21. TX-side half only — the schedule is table content hashed into table_version, so this key does nothing unless the table carries a probe block AND every receiver has the identical table. It is a PER-UNIT enablement, not a per-part one: §9.4 fail-closed requires the die's per-packet commanded rate to be stage-0-proven, and the proof here is for THIS craft's 8812EU 98:03:cf:cf:a4:28 (findings 2026-08-21 — both grounds independently derived the same probe set from seq, and an off control read exactly 0). Do not copy this key onto another craft without its own proof. Since Pass 186 the candidate is also clamped to policy.select.max_profile, so a craft sitting at its ceiling flies no probes at all.",
+    "_mcs_probe_comment": "\u00a79.4 ARMED on this node. TX-side half only \u2014 the schedule is table content hashed into table_version, so this key does nothing unless the table carries a probe block AND every receiver has the identical table. The former \"PER-UNIT enablement, do not copy without its own proof\" reservation is WITHDRAWN (operator ruling 2026-08-30, Pass 196): stage 0 measured a property of the DIE, not of a dongle, and passed on all three fleet dies (findings 2026-08-08). The enablement is per-die and these dies are licensed, so this key is safe to copy to any craft on a proven die and composes with \u00a715.2 adapters.auto. Since Pass 186 the candidate is clamped to policy.select.max_profile, so a craft at its ceiling flies no probes at all.",
     "mcs_probe": true
   },
   "policy": {
     "report_timeout_ms": 750,
     "select": {
-      "_profile_pin_comment": "Read back from the node 2026-08-21. min_profile is 1, not the 2 this file used to carry: a LOWER floor is the more robust value (§9.0 nothing may make demotion harder), so the node's is the one that wins. max_profile 5 is the shipped envelope and the node had drifted DOWN to 4 — which Pass 186 turned from cosmetic into load-bearing, since the probe candidate is now clamped to this pin and a craft pinned at its own rung flies no probes.",
+      "_profile_pin_comment": "Read back from the node 2026-08-21. min_profile is 1, not the 2 this file used to carry: a LOWER floor is the more robust value (\u00a79.0 nothing may make demotion harder), so the node's is the one that wins. max_profile 5 is the shipped envelope and the node had drifted DOWN to 4 \u2014 which Pass 186 turned from cosmetic into load-bearing, since the probe candidate is now clamped to this pin and a craft pinned at its own rung flies no probes.",
       "min_profile": 1,
       "max_profile": 5,
       "demote_milli": 45
@@ -150,7 +150,7 @@
       ]
     },
     "mode_apply_cmd": "/etc/waybeam-link/modes/apply-mode.sh",
-    "_active_mode_comment": "Read back from the node 2026-08-21; this file said mcs2 while the craft has been running mcs1. Unrelated to §9.4 — recorded here because leaving a known-wrong value in a reference config is how the §6.3b parity gap happened.",
+    "_active_mode_comment": "Read back from the node 2026-08-21; this file said mcs2 while the craft has been running mcs1. Unrelated to \u00a79.4 \u2014 recorded here because leaving a known-wrong value in a reference config is how the \u00a76.3b parity gap happened.",
     "active_mode": "imx335-060fps-mcs1",
     "fps_ladder": {
       "enabled": false,

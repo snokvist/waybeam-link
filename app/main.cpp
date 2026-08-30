@@ -516,7 +516,20 @@ std::string json_quote(const std::string& in) {
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
             default:
-                if (static_cast<unsigned char>(c) >= 0x20) out += c;
+                if (static_cast<unsigned char>(c) >= 0x20) {
+                    out += c;
+                } else {
+                    // \uXXXX, never DROPPED. Silently deleting control bytes
+                    // mutates the name: two adapters called "ear\x01" and
+                    // "ear\x02" would both emit as "ear" and the frozen block
+                    // would then be refused for a duplicate name, blaming the
+                    // config rather than the emitter.
+                    char esc[7];
+                    std::snprintf(esc, sizeof esc, "\\u%04x",
+                                  static_cast<unsigned>(
+                                      static_cast<unsigned char>(c)));
+                    out += esc;
+                }
                 break;
         }
     }
@@ -748,6 +761,23 @@ int main(int argc, char** argv) {
                 const std::string live_mac = air.value->adapter_mac(i);
                 if (!live_mac.empty()) {
                     out += ", \"mac\": " + json_quote(live_mac);
+                } else {
+                    // §10.6 D3: this unit reports no EFUSE identity, and auto
+                    // never sets `bus` — so the stanza carries NO pin at all
+                    // and the frozen array binds first-free by enumeration
+                    // order. One re-plug and role:"tx" lands on a diversity
+                    // ear, which is the exact hazard emitting the mac exists
+                    // to prevent. Say so IN the emitted block: a warning only
+                    // on stderr would be lost the moment this is redirected
+                    // into a config, which is the whole point of the mode.
+                    out += ", \"_unpinned\": \"this unit reports no EFUSE "
+                           "identity, so this stanza has no mac and no bus "
+                           "pin and will bind FIRST-FREE\"";
+                    std::fprintf(stderr,
+                                 "adapters --emit: %s has no EFUSE identity — "
+                                 "the emitted stanza is UNPINNED and will bind "
+                                 "first-free (\u00a710.6 D3)\n",
+                                 a.name.c_str());
                 }
                 // A bus pin the operator authored survives the round trip; it
                 // is the §15.2 port pin and dropping it would silently widen

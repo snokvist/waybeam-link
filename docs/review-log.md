@@ -24,6 +24,57 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 196 — §9.4 probing is per-DIE, and the fleet dies are licensed (2026-08-30)
+
+**Verdict.** The `air.mcs_probe` enablement stops being per-unit. Operator
+ruling 2026-08-30: enable it fleet-wide and withdraw the reservations against
+it. §15.2's Pass-195 refusal of `air.mcs_probe` + `adapters.auto` goes with
+them — the two now compose.
+
+**Changed:** §9.4 (enablement clause AMENDED; two "per-unit" phrasings in the
+observability and guard-4 prose corrected to per-node), §15.2 (the refusal
+paragraph replaced), `docs/findings.md` 2026-08-08 (its "Open: per-unit
+coverage" clause struck and closed), `deploy/vehicle-192.168.2.232.json`
+(the "do not copy without its own proof" note withdrawn). No wire change, no
+default changed: probing is still off unless a config asks for it, still
+radio-only, still TX-node-only.
+
+**Why the reservation did not survive contact with the evidence.** The gated
+property is whether the silicon honours the per-packet commanded rate in the
+TX descriptor. That is a property of the die and its HAL path — there is no
+per-dongle state it could depend on — and findings.md 2026-08-08 measured it
+that way and passed on every die present: AU→CU 3600/3600 with an EMPTY
+mismatch matrix, CU→AU 3590/3590, EU→dual ears 3593/3593 + 3600/3600, and
+`tx_reports == tx_submitted` exactly across ~11k broadcast frames.
+
+The per-unit framing came from Pass 139's scar — one defective dongle once
+carried an entire architectural posture — and was applied to a measurement it
+did not fit. Pass 139's lesson is real and stays: two adapters of one part are
+not a replicate. It earns its keep where the quantity is per-unit (a power
+curve, an EFUSE table, a compressing PA). A logic path either exists in the
+HAL or it does not.
+
+**What the caution actually cost.** Three things, all found while implementing
+§15.2 auto:
+
+1. **Nobody enforced it.** `node/src/tx_node.cpp` arms the probe on
+   `l.cfg.air.mcs_probe` alone. Nothing compares the bound unit's EFUSE
+   identity against any proof, and the §10.6 D2 fallback — mac pin absent, a
+   DIFFERENT unit bound — does not disarm it. The comment above that line said
+   "on this stage-0-proven unit"; nothing checked which unit that was. The rule
+   lived only in a config comment.
+2. **It blocked auto** on every craft that had the key set, which is the one
+   craft with a probe-carrying table.
+3. It invited a fix in the wrong direction — binding the proof to a MAC —
+   which would have made an unenforceable rule enforceable rather than asking
+   whether the rule was right.
+
+**What still fails closed.** A die family with no stage-0 evidence must still
+not probe; adding one is a stage-0 run, not a config edit. Off by default,
+radio-only, TX-node-only, and the four §9.4 receiver window guards are
+untouched — guard (4) in particular, which is what stops a non-probing TX
+manufacturing a phantom veto, and which does not depend on this ruling.
+
 ## Pass 195 — §15.2 `adapters` gains an auto form; §10.6 artifacts key by identity (2026-08-30)
 
 **Verdict.** `adapters` may be an OBJECT carrying an `auto` block instead of a

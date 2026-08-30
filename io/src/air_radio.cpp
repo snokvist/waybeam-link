@@ -232,6 +232,26 @@ struct RadioAir::Impl {
         // hang. ~Impl owns that half and does it for every live adapter; a
         // unit removed during create() never started one.
         ~Adapter() {
+            // Stop() FIRST, and it lives here rather than in ~Impl. It is the
+            // chip's clean de-init, and on Jaguar3 — RTL8822E and RTL8822C,
+            // i.e. the 8812EU and 8812CU, ranks 0 and 2 of the default TX
+            // priority — it is the ONLY thing that runs `rtw_hal_deinit`: that
+            // generation's destructor quiesces TX, stops a CW tone and joins
+            // coex, and never touches the TRX engine
+            // (third_party/devourer/src/jaguar3/RtlJaguar3Device.cpp).
+            // devourer's own comment on rtw_hal_deinit says what skipping it
+            // costs: "left the chip hung (RX DMA running, RX FIFO overflowing)
+            // and unable to re-enumerate (-71)" — a physical re-plug, on a
+            // dongle whose kernel driver the claim already detached.
+            //
+            // That is not hypothetical for the removal paths: the max_adapters
+            // cap drops units that are FULLY brought up (InitWrite has run and
+            // dc.rx.enable_with_tx left MACRXEN set), so leaving Stop() in
+            // ~Impl would abandon exactly those. ~Impl no longer calls it —
+            // one Stop() per unit, wherever the unit dies.
+            if (dev) {
+                dev->Stop();
+            }
             dev.reset();
             if (handle) {
                 libusb_release_interface(handle, 0);
@@ -485,15 +505,16 @@ struct RadioAir::Impl {
             if (a->rx_thread.joinable()) {
                 a->rx_thread.join();
             }
-            if (a->dev) {
-                a->dev->Stop();
-            }
         }
-        // Power-down, release, close and exit are ~Adapter's, so a unit
-        // removed from this vector earlier gets exactly this teardown too
-        // (§15.2 Pass 195). Cleared EXPLICITLY rather than left to member
-        // destruction: that runs at the end of ~Impl, after the streams
-        // below are closed, and a devourer power-down still logs.
+        // Stop(), power-down, release, close and exit are all ~Adapter's, so a
+        // unit removed from this vector earlier gets exactly this teardown too
+        // (§15.2 Pass 195) — which is the whole point of that destructor, and
+        // is why Stop() is NOT also called here: on Jaguar3 it runs
+        // rtw_hal_deinit's control writes, and doing that twice per unit on
+        // every normal teardown would be a regression in the other direction.
+        // Cleared EXPLICITLY rather than left to member destruction: that runs
+        // at the end of ~Impl, after the streams below are closed, and a
+        // devourer power-down still logs.
         adapters.clear();
         // Only after every writer (RX threads, device Stop paths) is gone.
         if (ev_stream != nullptr) {
@@ -1215,6 +1236,18 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
             wb_logf("radio: adapters.auto: %zu of %zu candidate(s) claimed\n",
                     im.adapters.size(), cfg.adapters.size());
             cfg.adapters.resize(im.adapters.size());
+            // The fd list is declared parallel to adapters[], so it has to
+            // shrink with it — otherwise resolved_adapters() publishes a
+            // Config whose two arrays disagree, and the NEXT
+            // AirBackend::create on it is refused by this function's own
+            // parallelism check for what was a transient claim failure. That
+            // is exactly the "permanent config error for a transient USB
+            // failure" the air_backend.h re-create gate exists to prevent,
+            // and it lands on the fd path — unrooted Android, the one
+            // consumer that has no other device source.
+            if (cfg.adapter_fds.size() > cfg.adapters.size()) {
+                cfg.adapter_fds.resize(cfg.adapters.size());
+            }
         }
     }
 

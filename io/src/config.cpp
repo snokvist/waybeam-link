@@ -127,6 +127,25 @@ Result<BindCfg> parse_bind(const json& j, Dir dir, const char* where) {
 // path reconstruction on that name, and any other name drops every accessor
 // here into its `skipped` list, which is a hard failure rather than a silent
 // undercount — but a confusing one, so it is stated here instead.
+// §11.1 center frequency, in MHz, for every key that carries one. Read WIDE
+// and checked BEFORE the uint16 cast: get<uint16_t> static_casts, so 65536
+// lands on 0 — which is the auto form's own "unset" sentinel — and a
+// Hz-for-MHz typo (5825000) wraps to 57832. Neither is caught downstream,
+// because mhz_to_channel() ends in a uint8 cast that TRUNCATES rather than
+// returning its 0 sentinel: 57832 comes out as channel 70 (5350 MHz, DFS) and
+// flies. The upper bound is 5900 rather than a 6 GHz band edge for the same
+// reason — 6285 MHz truncates to channel 1 and would tune 2.4 GHz.
+// nullptr = acceptable; 0 means "unset" and is the caller's to interpret.
+const char* channel_range_error(int64_t mhz) {
+    if (mhz == 0) return nullptr;
+    if (mhz < 2400 || mhz > 5900) {
+        return "is outside 2400..5900 — the value is a CENTER FREQUENCY in "
+               "MHz (\u00a711.1), and out-of-range values do NOT fail closed: "
+               "they truncate into a valid-looking channel";
+    }
+    return nullptr;
+}
+
 Result<AdapterCfg> parse_adapter_power(const json& j, AdapterCfg ac,
                                        const std::string& where) {
     ac.power_map = j.value("power_map", std::string{});
@@ -201,6 +220,14 @@ Result<AdapterCfg> parse_adapter_power(const json& j, AdapterCfg ac,
                 ": power_presets_qdb on a role:\"rx\" adapter is never "
                 "applied (§10.3) — put it on the role:\"tx\" adapter");
         }
+        if (!j.at("power_presets_qdb").is_array()) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_presets_qdb must be an array — an object loads in nlohmann's "
+                "SORTED-KEY order, silently reordering the \u00a711.7 0x0A "
+                "ladder so cmd_arg 0 selects a different rung than the one "
+                "authored first");
+        }
         for (const json& v : j.at("power_presets_qdb")) {
             ac.power_presets_qdb.push_back(v.get<int32_t>());
         }
@@ -245,6 +272,14 @@ Result<AdapterCfg> parse_adapter_power(const json& j, AdapterCfg ac,
                 ": power_offset_presets_qdb on a role:\"rx\" adapter "
                 "is never applied (§10.3) — put it on the "
                 "role:\"tx\" adapter");
+        }
+        if (!j.at("power_offset_presets_qdb").is_array()) {
+            return Result<AdapterCfg>::fail(
+                where +
+                ": power_offset_presets_qdb must be an array — an object loads in nlohmann's "
+                "SORTED-KEY order, silently reordering the \u00a711.7 0x0A "
+                "ladder so cmd_arg 0 selects a different rung than the one "
+                "authored first");
         }
         for (const json& v : j.at("power_offset_presets_qdb")) {
             ac.power_offset_presets_qdb.push_back(v.get<int32_t>());
@@ -351,11 +386,10 @@ Result<Config> load_config_json(const std::string& json_text) {
             // across every synthesized stanza, so one typo reaches them all.
             {
                 const int64_t chan = aa.value("channel", int64_t{0});
-                if (chan != 0 && (chan < 2400 || chan > 7125)) {
+                if (const char* e = channel_range_error(chan)) {
                     return Result<Config>::fail(
                         "adapters.auto: channel " + std::to_string(chan) +
-                        " MHz is outside 2400..7125 — the value is a CENTER "
-                        "FREQUENCY IN MHz (§11.1)");
+                        std::string(" MHz ") + e);
                 }
                 au.channel_mhz = static_cast<uint16_t>(chan);
             }
@@ -477,7 +511,16 @@ Result<Config> load_config_json(const std::string& json_text) {
                                     ("adapter " + ac.name).c_str());
             if (!arole) return Result<Config>::fail(arole.error);
             ac.role = *arole.value;
-            ac.channel_mhz = a.at("channel").get<uint16_t>();
+            {
+                const int64_t chan = a.at("channel").get<int64_t>();
+                if (const char* e = channel_range_error(chan)) {
+                    return Result<Config>::fail("adapter " + ac.name +
+                                                ": channel " +
+                                                std::to_string(chan) +
+                                                std::string(" MHz ") + e);
+                }
+                ac.channel_mhz = static_cast<uint16_t>(chan);
+            }
             const uint32_t bw = a.value("bw", 20u);
             if (bw != 20 && bw != 40 && bw != 80) {
                 return Result<Config>::fail("adapter " + ac.name + ": bw must be 20, 40 or 80");
@@ -921,7 +964,16 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pc.value("bind_release_s", csa.bind_release_s);
                 csa.persist_channel =
                     pc.value("persist_channel", csa.persist_channel);
-                csa.home_chan = pc.value("home_chan", csa.home_chan);
+                {
+                    const int64_t hc =
+                        pc.value("home_chan", int64_t{csa.home_chan});
+                    if (const char* e = channel_range_error(hc)) {
+                        return Result<Config>::fail(
+                            "policy.csa.home_chan " + std::to_string(hc) +
+                            std::string(" MHz ") + e);
+                    }
+                    csa.home_chan = static_cast<uint16_t>(hc);
+                }
                 csa.adjacent_guard_mhz =
                     pc.value("adjacent_guard_mhz", csa.adjacent_guard_mhz);
                 if (pc.contains("channel_allowlist")) {
@@ -1555,17 +1607,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                     "adapters.auto: no channel — set adapters.auto.channel or "
                     "policy.csa.home_chan (§15.2); there is no safe default");
             }
-            // §9.4 fail-closed (stage-0, issue #101): the probe is licensed
-            // per UNIT, on evidence that this die's per-packet commanded rate
-            // is proven. An election may land on a different die, so it cannot
-            // inherit another unit's proof — refuse rather than probe blind.
-            if (cfg.air.mcs_probe) {
-                return Result<Config>::fail(
-                    "air.mcs_probe with adapters.auto: §9.4 probing is a "
-                    "per-UNIT enablement and auto elects the tx adapter at "
-                    "bring-up, so no unit's stage-0 proof carries — pin the "
-                    "proven adapter with an adapters array to probe");
-            }
         }
 
         // §15.1: <=4 UDP bindings node-wide (conservatively counting the
@@ -1718,9 +1759,11 @@ std::string dump_config_summary(const Config& cfg) {
         // §15.2 (Pass 195). The summary is printed at load, BEFORE the
         // backend has found anything, so at that point the array below is
         // legitimately empty — say why, or the operator reads "adapters (0)"
-        // as a config that forgot its radios. load_finish() prints this once;
-        // run_tx/run_rx print it again after the election, when the array is
-        // filled in and the same lines describe real hardware.
+        // as a config that forgot its radios. load_finish() prints this
+        // once, BEFORE the backend exists — there is no second summary after
+        // the election. What describes the resolved set is the backend's own
+        // declaration table (adapter_elect.h describe_plan) and §15.5
+        // /api/v1/info.
         const AdapterAutoCfg& au = cfg.adapter_auto;
         ss << "adapters: AUTO (ch=" << au.channel_mhz
            << " bw=" << unsigned(au.bw)

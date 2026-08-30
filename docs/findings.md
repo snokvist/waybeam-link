@@ -2390,10 +2390,14 @@ au 3593/3593 + cu 3600/3600 (both ears independently agree). CCX
 cross-check on every TX: `tx_reports == tx_submitted` exactly (3737,
 3741), `tx_report_fails = 0` across ~11k broadcast frames — the Jaguar
 retry rate-walk is dormant on the no-ACK path, confirmed on air.
-Kernel-monitor leg: MOOT (ruling #120). **Open:** per-unit coverage is one
+Kernel-monitor leg: MOOT (ruling #120). ~~**Open:** per-unit coverage is one
 unit per die — Pass 139's lesson wants a second unit of at least the CU/EU
 parts on the rig before probing is enabled fleet-wide (fail-closed default
-stands).
+stands).~~ **CLOSED by operator ruling 2026-08-30 (Pass 196):** the property
+measured here is a property of the die and its HAL path, not of a dongle, and
+it passed on every die present. The second-unit requirement was Pass 139
+caution carried onto a per-die measurement; it is withdrawn and probing is
+licensed fleet-wide on these dies. See §9.4 AMENDED (Pass 196).
 
 **#97 LDPC/STBC — proof-of-flight PASS both codings (AU TX → CU ear).**
 `air.ldpc`: rx_ldpc 1878/1878 received frames; control (T1, ldpc off)
