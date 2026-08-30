@@ -43,8 +43,8 @@ different questions and a consumer must label which it is showing.
 receiver MUST also publish the windowed pair; empty denominator holds rather
 than reads zero; pre-diversity is mean-per-ear and must be labelled as such),
 §15.3 (`loss_prediversity_window_milli`, `loss_postdiv_window_milli`,
-`loss_best_ear_window_milli` — each ear windowed separately, minimum taken).
-No wire change and no packet field — both ends compute locally, and the window length
+`loss_best_ear_window_milli` — ears windowed separately, minimum taken). No
+wire change and no packet field — both ends compute locally, and the window length
 is a §17 seed (500 ms), not a constant either peer depends on.
 
 **Why a window and not an EWMA.** A window forgets completely where an EWMA
@@ -59,10 +59,9 @@ DIFFERENTLY at that instant — without that they would pass against the average
 they replace. Mutation-verified: disabling the aging reports 800 permille where
 the window reports 0, and 71 where it reports 500.
 
-**Device result.** With AIR bound to the best ear it reads **0.0-1.6% and
-moves every sample**, against a mean-per-ear of ~49% and a session average
-frozen at 48.2% on the same link, same instant. The bar had been pinned past
-its 12% alert threshold for the life of every session.
+**Device result.** AIR bound to the best ear reads **0.0-1.6%, moving every
+sample**, against a mean-per-ear of ~49% and a session average frozen at 48.2%
+on the same link at the same instant.
 
 **Evidence.** Branch `impl/live-loss-window`; `docs/findings.md` 2026-08-30
 entry for the 90-second cumulative-drift measurement and the two-ear split.
