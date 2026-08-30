@@ -12,6 +12,57 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — a RadioAir created and destroyed WITHOUT a poll hangs in teardown
+
+Found while device-verifying §15.2 auto on the x86 bench (.242, 8812CU at
+1-1). `waybeam-link adapters -c <cfg>` brought the adapter up, printed the
+election correctly, and then never exited — killed at 45 s, 60 s and 90 s.
+
+**It is not the auto path, and it is not new.** Isolated in four steps:
+
+| binary | shape | result |
+|---|---|---|
+| this branch, `adapters`, auto form | create, no poll, destroy | HANGS |
+| this branch, `adapters`, array form (role rx AND role tx) | create, no poll, destroy | HANGS |
+| this branch, `hwtrial_bringup --bus 1-1 --seconds 2` | create, POLL 2 s, destroy | exits, 9 s |
+| **main**, `hwtrial_bringup --bus 1-1 --seconds 0` | create, no poll, destroy | **HANGS** |
+
+The last row is the one that matters: a binary built from `origin/main`, with
+none of this branch's changes, hangs identically. The condition is
+create-then-destroy with no `poll_once()` in between; auto, the adapter role
+and the stanza form are all irrelevant.
+
+**Where it is stuck.** `/proc/<pid>/task/*/stack` on the hung process: main
+thread in `futex_wait` (a `std::thread::join`), plus a `libusb_event` thread in
+`poll`, one worker in `poll` and one in `nanosleep`. So `~Impl`'s
+StopRxLoop-then-join is not bringing the RX loop down.
+
+**Likely mechanism, NOT yet proven.** `~Impl` already documents the shape of
+it: *"A join can block while a bring-up is still in flight (bring-up does not
+poll the stop flag)."* With a poll in between, the RX thread is well inside
+devourer's loop when `StopRxLoop` arrives and sees the flag; with no poll,
+create() spawns the thread and teardown starts before it gets there, so the
+stop is set and cleared — or simply never observed — and the loop runs
+forever. That is a start/stop race in the backend's threading contract, and
+the fix is not in this tree: `third_party/` is never edited, so it is either an
+upstream devourer change or an `~Impl`-side handshake (an atomic the RX thread
+raises before entering the loop, which teardown waits on — and even that is not
+airtight against devourer's internal state).
+
+**What was done instead.** `waybeam-link adapters` drains for ~1 s before
+tearing down, which is what every real consumer does anyway and lets the mode
+report per-adapter `rx_frames`. 5/5 clean exits at 9–10 s. This is a
+work-around at the one new call site, not a fix: **any future caller that
+constructs a RadioAir and drops it without polling will hang**, and there is
+nothing in the type that says so.
+
+**Open.** (a) Prove the race rather than infer it — instrument the RX thread's
+entry into `StartRxLoop` against the `StopRxLoop` timestamp. (b) Decide whether
+the handshake belongs in `~Impl` or upstream. (c) Until then, consider whether
+`RadioAir::create` should simply refuse to hand back a backend nobody can
+safely destroy, or whether the poll requirement belongs on the contract in
+air_radio.h.
+
 ## 2026-08-30 — the §15.2 auto TX-priority order is a seed, and it is not a ranking of "best radio"
 
 Pass 195 gives `adapters.auto.tx_priority` a default of

@@ -5112,7 +5112,18 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   `tx.report`. It costs a diversity ear the aggregation MAC-init write and
   nothing else; the default of 0 leaves every deployment byte-identical.
 
-  Zero surviving candidates is a hard error, the same posture as an empty array.
+  **A candidate that cannot be claimed is SKIPPED, not fatal** — under auto
+  only. In the array form a claim failure stays a hard error and must: the
+  operator named a specific device, so not getting it is a configuration
+  error. Under auto there is no per-device intent — the node asked for "the
+  radios on this host" — so a unit another process legitimately owns is
+  logged, dropped, and the node flies on what it did get. This is not a corner
+  case: measured on the shared x86 bench 2026-08-30, where a running
+  `waybeam_hub` ground held the 8812AU at `8-1` via usbfs while an auto node
+  enumerated the same bus. A fatal claim there means auto cannot start at all
+  on any host that shares its radios, which is most of them. Zero surviving
+  candidates is still a hard error, the same posture as an empty array.
+
   `air.kind` must be `"radio"`: the auto form has no meaning on the udp dev
   backend, and is refused there rather than ignored.
 - `node.spectator` (default `false`, §2/§13 spectator RX, Pass 74) opts a display

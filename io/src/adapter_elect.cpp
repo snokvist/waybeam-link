@@ -114,7 +114,10 @@ AdapterPlan plan_adapters(const std::vector<AdapterCandidate>& cands,
     }
     if (elect_tx) plan.tx = ranked.front();
 
-    plan.keep.assign(ranked.begin(), ranked.begin() + keep_n);
+    plan.keep.assign(
+        ranked.begin(),
+        ranked.begin() +
+            static_cast<std::vector<std::size_t>::difference_type>(keep_n));
     // Claim order, so a kept unit never moves relative to the backend's
     // already-brought-up array. The cap decided membership; it does not get to
     // reorder what survived.

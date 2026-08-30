@@ -87,6 +87,24 @@ an explicitly requested mode whose full outcome is logged, printed through the
 config summary, served by `GET /api/v1/info`, and reproducible as a pasteable
 array via `waybeam-link adapters --emit`.
 
+**A busy dongle must not be fatal — found on hardware, not in review.** The
+first device run of this feature (x86 bench, 8812CU + 8812AU) failed outright:
+a running `waybeam_hub` ground held the AU via usbfs, and auto refused the
+whole node over a radio it never asked for by name. Under auto there is no
+per-device intent, so an unclaimable candidate is now logged and skipped and
+only an empty survivor set fails. The array form keeps its hard failure, where
+the operator did name the device. §15.2 records the measurement.
+
+**Also found on hardware, and NOT fixed here.** A `RadioAir` created and
+destroyed with no `poll_once()` in between hangs in `~Impl`'s join. It is
+pre-existing — `hwtrial_bringup --seconds 0` built from `origin/main` hangs
+identically — and `~Impl` already names the mechanism in its own comment
+("a join can block while a bring-up is still in flight"). The new `adapters`
+mode is simply the first shipping caller to reach it; it drains for ~1 s
+before teardown, which is what every real consumer does. The backend's
+start/stop race is its own change with its own device pass:
+`docs/findings.md` 2026-08-30 carries the isolation table and what stays open.
+
 **Not done, deliberately.** No sticky TX election across replugs (operator
 ruling 2026-08-30) — the MAC tiebreak is deterministic and the array form is
 the pin. No mac-keyed per-unit power table — the auto block's power keys cover

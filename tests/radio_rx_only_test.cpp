@@ -135,5 +135,20 @@ int main() {
         CHECK(fails_containing(cfg, "no adapters"));
     }
 
+    // §15.2 (Pass 195): auto with an fd device set. The fd list IS the device
+    // set under auto — no enumeration, no parallel-array rule — so a bogus fd
+    // exercises the skip path to exhaustion and must report the AUTO error,
+    // not the array form's "adapter_fds must be empty ... or exactly as long
+    // as adapters". Hermetic: fd -2 is rejected before any libusb call.
+    {
+        RadioAirCfg cfg;
+        cfg.auto_cfg.enabled = true;
+        cfg.auto_cfg.channel_mhz = 5805;
+        cfg.allow_rx_only = true;
+        cfg.adapter_fds = {-2};
+        CHECK(fails_containing(cfg, "only -1 means"));
+        CHECK(!fails_containing(cfg, "adapter_fds must be empty"));
+    }
+
     return wbtest_finish("radio_rx_only_test");
 }

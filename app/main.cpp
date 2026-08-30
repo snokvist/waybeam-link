@@ -631,6 +631,30 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "air error: %s\n", air.error.c_str());
             return 1;
         }
+        // Drain briefly before tearing down. TWO reasons, and the second is
+        // not optional:
+        //
+        // 1. It makes the report answer something create() cannot — whether
+        //    each ear is actually hearing frames on the configured channel.
+        // 2. A RadioAir created and destroyed with NO poll in between hangs in
+        //    ~Impl's join. That is a pre-existing condition, not one this mode
+        //    introduced: `hwtrial_bringup --bus <p> --seconds 0` on main hangs
+        //    identically, and ~Impl says why in its own comment — "a join can
+        //    block while a bring-up is still in flight (bring-up does not poll
+        //    the stop flag)". So StopRxLoop can be missed by an RX thread that
+        //    has not yet reached devourer's loop. Fixing that race belongs to
+        //    the backend's threading contract and its own device pass; this
+        //    mode simply does what every real consumer does. See
+        //    docs/findings.md 2026-08-30.
+        std::vector<uint64_t> heard(l.cfg.adapters.size(), 0);
+        for (int tick = 0; tick < 20; ++tick) {  // ~1 s, 50 ms per poll
+            air.value->iface()->poll_once(50, [](const AirRxMeta&,
+                                                 const uint8_t*, size_t) {});
+        }
+        for (size_t i = 0; i < heard.size(); ++i) {
+            heard[i] = air.value->iface()->rx_frames(i);
+        }
+
         // After create(), l.cfg.adapters is the RESOLVED array either way, so
         // one loop describes both forms.
         for (size_t i = 0; i < l.cfg.adapters.size(); ++i) {
@@ -638,14 +662,16 @@ int main(int argc, char** argv) {
             const AirIface::AdapterCapsView caps = air.value->adapter_caps(i);
             std::fprintf(stderr,
                          "adapter %zu: %-20s role=%-2s chan=%u bw=%u "
-                         "part=%s (%s) chip=%s mac=%s power_actuator=%s\n",
+                         "part=%s (%s) chip=%s mac=%s power_actuator=%s "
+                         "rx_frames=%llu\n",
                          i, a.name.c_str(), a.role == Role::kTx ? "tx" : "rx",
                          a.channel_mhz, unsigned(a.bw),
                          caps.part.empty() ? "unknown" : caps.part.c_str(),
                          caps.aliases.empty() ? "-" : caps.aliases.c_str(),
                          caps.chip.c_str(),
                          a.mac.empty() ? "none" : a.mac.c_str(),
-                         caps.power_actuator ? "yes" : "no");
+                         caps.power_actuator ? "yes" : "no",
+                         static_cast<unsigned long long>(heard[i]));
         }
         if (emit) {
             // stdout, while the table above went to stderr: this is the half a

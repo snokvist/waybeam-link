@@ -15,6 +15,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "IRtlDevice.h"
@@ -855,11 +856,34 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
         // to hand it.
         im.adapters.push_back(std::make_unique<Impl::Adapter>());
         Impl::Adapter* ad = im.adapters.back().get();
+        // §15.2 (Pass 195): once a claim can be SKIPPED, im.adapters is no
+        // longer indexed by the stanza counter. `cur` is the unit's real
+        // index; using `i` for the collision scan below would walk past the
+        // end after any skip.
+        const size_t cur = im.adapters.size() - 1;
         ad->name = ac.name.empty() ? ("adapter" + std::to_string(i))
                                    : ac.name;
         ad->tx = (ac.role == Role::kTx);
         // Nonzero, adapter-distinct xorshift32 seed for the bench drop knob.
-        ad->drop_rng = 0x9E3779B9u ^ static_cast<uint32_t>(i + 1);
+        ad->drop_rng = 0x9E3779B9u ^ static_cast<uint32_t>(cur + 1);
+
+        // A candidate that cannot be claimed. Under the ARRAY form this stays
+        // fatal and must: the operator named a specific device, so failing to
+        // get it is a configuration error. Under AUTO there is no per-device
+        // intent — the node asked for "the radios on this host" — so a unit
+        // another process legitimately owns is skipped and the node flies on
+        // what it did get. That is not a corner case: on a shared bench the
+        // ground hub holds one dongle while a second instance enumerates the
+        // same bus, and a fatal claim there means auto cannot start at all.
+        // Loudly, never silently, and only down to zero — see after the loop.
+        const auto skip_or_fail =
+            [&](const std::string& why) -> std::optional<std::string> {
+            if (!automode) return why;
+            wb_logf("radio: adapters.auto: SKIPPING a candidate — %s\n",
+                    why.c_str());
+            im.adapters.pop_back();  // `ad` dangles past this point
+            return std::nullopt;
+        };
 
         const int fd = i < cfg.adapter_fds.size() ? cfg.adapter_fds[i] : -1;
         ad->by_fd = fd >= 0;
@@ -954,9 +978,14 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
                                 : LIBUSB_ERROR_NO_DEVICE;
             libusb_free_device_list(list, 1);
             if (open_rc != 0) {
-                return Result<RadioAir>::fail(
-                    "radio: adapter \"" + ad->name + "\" (bus \"" + ac.bus +
-                    "\"): no matching Realtek device / open failed");
+                const std::string why = "radio: adapter \"" + ad->name +
+                                        "\" (bus \"" + ac.bus +
+                                        "\"): no matching Realtek device / "
+                                        "open failed";
+                if (auto fatal = skip_or_fail(why)) {
+                    return Result<RadioAir>::fail(*fatal);
+                }
+                continue;
             }
             used_paths.push_back(found_path);
             ad->path = found_path;
@@ -987,7 +1016,7 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
             if (bus != 0) {
                 ad->dev_key = std::to_string(bus) + ":" +
                               std::to_string(libusb_get_device_address(d));
-                for (size_t j = 0; j < i; ++j) {
+                for (size_t j = 0; j < cur; ++j) {
                     const Impl::Adapter& other = *im.adapters[j];
                     if (other.dev_key == ad->dev_key) {
                         return Result<RadioAir>::fail(
@@ -1026,8 +1055,13 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         if (rc != 0) {
-            return Result<RadioAir>::fail("radio: adapter \"" + ad->name +
-                                          "\" claim/reset failed (in use?)");
+            const std::string why = "radio: adapter \"" + ad->name +
+                                    "\" at " + ad->path +
+                                    " claim/reset failed (in use?)";
+            if (auto fatal = skip_or_fail(why)) {
+                return Result<RadioAir>::fail(*fatal);
+            }
+            continue;
         }
         devourer::DeviceConfig dc{};
         // Jaguar3 needs the RX path armed during the InitWrite bring-up so
@@ -1078,11 +1112,32 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
         WiFiDriver wd(im.logger);
         ad->dev = wd.CreateRtlDevice(ad->handle, ad->ctx, ad->lock, dc);
         if (!ad->dev) {
-            return Result<RadioAir>::fail("radio: adapter \"" + ad->name +
-                                          "\": unsupported chip");
+            const std::string why = "radio: adapter \"" + ad->name + "\" at " +
+                                    ad->path + ": unsupported chip";
+            if (auto fatal = skip_or_fail(why)) {
+                return Result<RadioAir>::fail(*fatal);
+            }
+            continue;
         }
         if (ad->tx) {
-            im.tx_idx = i;
+            im.tx_idx = cur;
+        }
+    }
+
+    // §15.2 (Pass 195): auto claims what it can. cfg.adapters was sized from
+    // the ENUMERATION; trim it to what actually came up, which is safe because
+    // every provisional stanza is identical (same channel, bw and role) and
+    // the election rewrites the array wholesale a few lines below.
+    if (automode) {
+        if (im.adapters.empty()) {
+            return Result<RadioAir>::fail(
+                "radio: adapters.auto: every candidate radio failed to claim "
+                "(another process holding them, or no usbfs write access)");
+        }
+        if (cfg.adapters.size() != im.adapters.size()) {
+            wb_logf("radio: adapters.auto: %zu of %zu candidate(s) claimed\n",
+                    im.adapters.size(), cfg.adapters.size());
+            cfg.adapters.resize(im.adapters.size());
         }
     }
 
