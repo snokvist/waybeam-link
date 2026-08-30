@@ -323,7 +323,7 @@ const char* kGolden =
     "\"reports_rejected\":0,\"feedback_rejected\":0,"
     "\"report_latch_holder\":9,"
     "\"return_window_hits\":7,\"return_window_misses\":2,"
-    "\"unicast_sent\":0,\"unicast_fallback\":0},"
+    "\"unicast_sent\":0,\"unicast_fallback\":0,\"unicast_stale\":0},"
     "\"link\":{\"target_originator\":9,\"target_session\":183726,"
     "\"profile\":4,\"mcs\":4,\"tx_power_qdb\":1800,\"tx_power_tier\":1,"
     "\"tx_power_ceiling_qdb\":76,\"tx_power_tier_effective\":true,"

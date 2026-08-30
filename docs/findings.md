@@ -12,6 +12,50 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-30 — hardware-ACK hybrid seeds: retry 3, stale 1000 ms, ACK window 128 us
+
+Pass 198 turns the Pass 12 hybrid into the return path's ARQ. Three of its
+numbers are SEEDS, not measurements, and are recorded here rather than argued
+in the spec.
+
+**`air.tx_retry_limit` 3 (was 8).** Operator-ruled band 3-5; 3 is the only rung
+inside it the devourer sweep actually measured (99.72% delivered, 0.26%
+residual, vs 8's 99.97%/0.03%). 4 and 5 are authorable and unmeasured. The
+trade is airtime per UNDELIVERABLE frame — 4 copies rather than 9, each retry
+also waiting a full ACK window. **Open:** the delivery cost of dropping from 8
+to 3 has never been measured on OUR return path, only in devourer's collision
+regime; and finding #96 still stands — at bench SNR the retry distribution is
+degenerate (`tx_report_fails` 0, the ceiling never touched), so the number that
+matters only appears on a marginal link.
+
+**`policy.return.unicast_stale_ms` 1000.** Derived, not measured: an order of
+magnitude above the §1 correlated-fade band (~5-30 ms) so a fade the hybrid
+exists to punch through cannot disarm it, 10x the §7.3 LINK_REPORT interval,
+and an order of magnitude below §2 `idle_teardown_ms` so the latch always ages
+out before the stream is torn down. **Open:** the real question is the worst
+fade a healthy link produces at range, which is a gate-4 measurement. Watch
+`unicast_stale` rising while `unicast_sent` stalls — that pair IS the
+out-of-range signal, and a nonzero `unicast_stale` on a link nobody considers
+out of range means the seed is too tight.
+
+**`air.ack_timeout_us` 128.** Not a new value — devourer's own unified default,
+so this changes nothing on air. It becomes a key because the number is a range
+budget (~6.7 us/km round trip, so ~15 km once ~50 us of ACK flight and
+detection margin is out) that used to be inherited silently. Operator ruling:
+128 is the fleet value and a longer link leans on §3.4 fallback video.
+**Open, and it is a real one:** the fleet's `.181` craft is an **8733BU**,
+where devourer hardcodes REG_ACKTO to 0x21 = **33 us** in `init_wmac()` and
+never reads `tx.ack_timeout_us` at all (snokvist/devourer#2). That die also has
+no ACK responder and no CCX `tx.report`, so on the `.181` craft the hybrid's
+craft half cannot be armed and the per-frame retry-drop sensor does not exist.
+Today that costs nothing — the craft is the responder, not the solicitor, and
+the responder half is what is missing — but any future craft-side unicast on
+that die would run a 33 us window without saying so.
+
+**Not measured at all yet:** the whole pass is bench-unvalidated. §4.4's
+86.9% -> 99.9% at 3000 pps was measured with retry 8, a never-expiring latch and
+NACK/LINK_REPORT only. Every one of those three has changed.
+
 ## 2026-08-30 — the CSA retune class, measured: class 1 loses 40% of campaigns class 0 wins
 
 The `.242` x86 ground (2 ears: 8812CU rx + 8812AU tx, auto-elected) against the

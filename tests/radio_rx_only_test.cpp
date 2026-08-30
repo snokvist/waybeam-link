@@ -168,5 +168,43 @@ int main() {
         CHECK(fails_containing(cfg, "the fd list is the device set"));
     }
 
+    // --- §3.0 (Pass 198) SA-latch freshness ---------------------------------
+    // inject_return's entire out-of-range decision is this predicate: fresh
+    // keeps unicast + hardware retries, stale falls back to one broadcast
+    // copy. The cases below are the ones a hardware run cannot stage.
+    {
+        // Plain aging. The boundary is exclusive-at-stale: a latch exactly
+        // `stale_ms` old is already stale, so the window means "unheard for
+        // this long", not "this long plus a tick".
+        CHECK(RadioAir::sa_fresh(1000, 500, 1000));   // 500 ms old
+        CHECK(RadioAir::sa_fresh(1499, 500, 1000));   // 999 ms old
+        CHECK(!RadioAir::sa_fresh(1500, 500, 1000));  // exactly 1000 ms
+        CHECK(!RadioAir::sa_fresh(9000, 500, 1000));  // long gone
+
+        // Just-heard is always fresh, at every window.
+        CHECK(RadioAir::sa_fresh(500, 500, 1000));
+        CHECK(RadioAir::sa_fresh(500, 500, 1));
+
+        // stale_ms == 0 disables the age-out entirely (the Pass 12
+        // never-expiring latch, kept for the A/B). Nothing is ever stale,
+        // however old — this is the footgun §15.2 names, and it has to keep
+        // working exactly as Pass 12 did or the A/B measures two changes.
+        CHECK(RadioAir::sa_fresh(0xffffffffull, 0, 0));
+
+        // THE CLOCK RACE. last_ms is stamped by the RX thread and read by
+        // the main one, so the two steady_ms() reads can land out of order.
+        // Unguarded, now - last underflows to ~1.8e19 ms and every target
+        // reads permanently stale — the hybrid would disarm itself for the
+        // rest of the session on a one-millisecond interleave. A latch from
+        // the future is not-yet-aged, which is the only safe reading.
+        CHECK(RadioAir::sa_fresh(500, 501, 1000));
+        CHECK(RadioAir::sa_fresh(0, 1, 1));
+        CHECK(RadioAir::sa_fresh(0, 0xffffffffull, 1000));
+
+        // A 1 ms window still ages: the guard above must not swallow real
+        // staleness at small windows.
+        CHECK(!RadioAir::sa_fresh(502, 500, 1));
+    }
+
     return wbtest_finish("radio_rx_only_test");
 }

@@ -313,8 +313,19 @@ struct ReturnPolicy {
     uint32_t return_window_us = 2000;
     // §3.0 Pass 12: send returns as hardware-ACKed unicast QoS-Data to the
     // target's latched SA (ground half of the gate-4 A/B; craft half is
-    // air.ack_responder). Off = pinned broadcast returns.
+    // air.ack_responder). Off = pinned broadcast returns. Since Pass 198
+    // this covers every SINGLE-TARGET return class, not just NACK and
+    // LINK_REPORT — §7.5 uplink DATA, §10.7 calibration, §3.4 verdicts and
+    // §11.7 VEHICLE_CMD ride the same shape.
     bool unicast = false;
+    // §3.0 (Pass 198): age-out for the per-originator SA latch, ms. A target
+    // unheard this long is treated as unlatched and its returns go broadcast
+    // (§15.3 unicast_stale) until it is heard again. This is the hybrid's
+    // only out-of-range posture — the retry limit bounds one frame's cost,
+    // this bounds how long a departed craft is retried at. 0 restores the
+    // never-expiring Pass 12 latch and is kept for the A/B only.
+    // §17 seed: re-derive at gate 4 with the rest of §7.2.
+    uint32_t unicast_stale_ms = 1000;
     // §7.2 Pass 78: anchored LINK_REPORT batches repeat once at the next
     // return window (spread across two listen gaps). 1 disables.
     uint32_t report_redundancy = 2;
@@ -476,12 +487,31 @@ struct AirCfg {
     bool ack_responder = false;
     // §15.2 (Pass 156): per-frame hardware retry limit for unicast
     // ACK-policy TX (devourer dc.tx.retry_limit; 0-63, descriptor width).
-    // Default 8 = the operator-ruled sweep point for an airtime-precious
-    // link with a §14 FEC floor. Inert for broadcast (no ACK policy => the
-    // MAC never retries). Coupling law: on the radio backend, unicast
-    // returns or the ACK responder with retry limit 0 is a CONFIG ERROR —
-    // the armed hybrid must never run silently inert (§3.0).
-    int tx_retry_limit = 8;
+    // Inert for broadcast (no ACK policy => the MAC never retries).
+    // Coupling law: on the radio backend, unicast returns or the ACK
+    // responder with retry limit 0 is a CONFIG ERROR — the armed hybrid
+    // must never run silently inert (§3.0).
+    //
+    // Default 3 (Pass 198), down from Pass 156's 8. Pass 156 read the
+    // devourer sweep's DELIVERY column while ARQ still mattered for video;
+    // with §14 FEC + GDR + §3.9 slice recovery carrying the video, the
+    // return path carries telemetry and the quantity to minimise is what an
+    // UNDELIVERABLE frame costs — 4 copies rather than 9, each retry also
+    // waiting a full ack_timeout_us. 3 is the lowest rung the sweep actually
+    // measured (99.72% delivered, 0.26% residual vs 8's 99.97%/0.03%), so
+    // the default sits on evidence; 4 and 5 are inside the operator's ruled
+    // 3-5 band, authorable, and unmeasured.
+    int tx_retry_limit = 3;
+    // §15.2 (Pass 198): hardware ACK response window in microseconds
+    // (devourer dc.tx.ack_timeout_us; 1-255, the REG_ACKTO field width).
+    // The hardware-ARQ RANGE lever — round-trip propagation eats ~6.7 us/km,
+    // so 128 is ~15 km once the ~50 us of ACK flight and detection margin is
+    // taken out. 128 is also devourer's own unified default, so authoring
+    // this key changes nothing until an operator moves it; it exists because
+    // the number is a deployment property that used to be inherited in
+    // silence. Operator ruling 2026-08-30: 128 is the fleet value, and a
+    // link that outruns it leans on §3.4 fallback video, not a wider window.
+    int ack_timeout_us = 128;
     // USB TX aggregation: how many already-decided frames the radio backend
     // may fold into ONE bulk-OUT URB (devourer send_packets; the HalMAC
     // families parse at most 3, and the driver clamps). Host-CPU only — same

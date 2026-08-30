@@ -463,6 +463,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.ret.unicast_sent);
     out += ",\"unicast_fallback\":";
     append_u64(out, snap.ret.unicast_fallback);
+    out += ",\"unicast_stale\":";  // §3.0 Pass 198
+    append_u64(out, snap.ret.unicast_stale);
     out += '}';
 
     out += ",\"link\":{\"target_originator\":";

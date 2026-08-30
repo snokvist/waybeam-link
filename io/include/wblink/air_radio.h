@@ -60,8 +60,21 @@ struct RadioAirCfg {
     // §15.2 (Pass 156): unicast hardware-retry limit (devourer
     // dc.tx.retry_limit). Config load enforces the §3.0 coupling law, so a
     // constructed RadioAir with either hybrid half on always has this
-    // nonzero.
-    int tx_retry_limit = 8;
+    // nonzero. Pass 198 re-ruled the default 8 -> 3: the return path now
+    // carries telemetry, not video reliability, so the quantity to minimise
+    // is what an UNDELIVERABLE frame costs (4 copies, not 9).
+    int tx_retry_limit = 3;
+    // §15.2 (Pass 198): hardware ACK window in us (devourer
+    // dc.tx.ack_timeout_us), 1..255. The hardware-ARQ RANGE lever —
+    // ~6.7 us/km round trip, so 128 is ~15 km. Same value devourer defaults
+    // to, so this being a knob changes nothing until an operator moves it.
+    int ack_timeout_us = 128;
+    // §3.0 (Pass 198): age-out for the per-originator SA latch, in ms.
+    // A target unheard this long is treated as unlatched and its returns go
+    // BROADCAST — the out-of-range posture the Pass 12 latch never had, and
+    // the only thing bounding how long a departed craft is retried at.
+    // 0 = never expire (the Pass 12 behaviour, kept for the A/B).
+    uint32_t unicast_stale_ms = 1000;
     // Frames per bulk-OUT URB (devourer cfg.tx.usb_agg_max). 0/1 = off, the
     // per-frame path, byte-identical. See config.h's air.usb_tx_agg.
     int usb_tx_agg = 0;
@@ -156,15 +169,58 @@ class RadioAir : public AirIface {
     size_t flush_staged() override;
     size_t inject_resend(const uint8_t* frame, size_t len) override;
 
-    // Send one return (NACK/LINK_REPORT) toward dest_originator. With
-    // unicast_returns on and an SA latched for the target, this goes out as
-    // the §3.0 Pass-12 hardware-ACKed unicast QoS-Data; otherwise it is a
-    // plain broadcast inject() (fallback counted).
+    // Send one return toward dest_originator — §3.0 (Pass 198) every
+    // single-target class, not just NACK/LINK_REPORT. With unicast_returns
+    // on and a FRESH SA latched for the target, this goes out as the §3.0
+    // Pass-12 hardware-ACKed unicast QoS-Data; otherwise it is a plain
+    // broadcast inject(), with the two fallback reasons counted apart.
     size_t inject_return(uint16_t dest_originator, const uint8_t* frame,
                          size_t len, bool urgent) override;
-    // Cumulative unicast-return counters for §15.3.
-    void return_counters(uint64_t& unicast_sent,
-                         uint64_t& unicast_fallback) const;
+    // Cumulative unicast-return counters for §15.3. `unicast_fallback` is
+    // the never-heard target; `unicast_stale` is one whose latch aged out
+    // (§3.0 Pass 198) — separated because they mean different things: the
+    // first is a node that has not arrived, the second one that left, and
+    // only the second is the out-of-range signal.
+    void return_counters(uint64_t& unicast_sent, uint64_t& unicast_fallback,
+                         uint64_t& unicast_stale) const;
+
+    // §15.5 (Pass 198) live ACK-responder toggle — the RESPONDER half of the
+    // §3.0 hybrid, and the only half that HAS a live form: devourer holds its
+    // DeviceConfig by value and const, so tx_retry_limit / ack_timeout_us are
+    // fixed at bring-up and a full-hybrid A/B still costs a restart.
+    //
+    // Arming programs this node's own §3.0 SA as the MACID (byte-identical to
+    // what create() arms from air.ack_responder); disarming returns net_type
+    // to No Link and leaves the MACID standing, per devourer's recipe.
+    // False = refused: no TX adapter, or the die does not implement it.
+    bool set_ack_responder(bool armed);
+
+    // §3.0 (Pass 198) SA-latch freshness. Public and static because the two
+    // cases that actually bite are unreachable through a RadioAir without
+    // hardware: `stale_ms == 0` (never expire — the Pass 12 behaviour kept
+    // for the A/B) and a clock read that races backwards between the RX
+    // thread's stamp and the main thread's check, where an unsigned wrap
+    // would read as ~584 million years stale and disarm the hybrid for the
+    // rest of the session. inject_return's whole out-of-range decision is
+    // this predicate, so this is where it gets tested.
+    static bool sa_fresh(uint64_t now_ms, uint64_t last_ms, uint32_t stale_ms) {
+        if (stale_ms == 0) return true;
+        if (now_ms <= last_ms) return true;  // no wrap: not-yet-aged
+        return now_ms - last_ms < stale_ms;
+    }
+    struct AckResponderState {
+        bool armed = false;
+        // The die's answer, learned at the first arm ATTEMPT rather than
+        // read from a cap: devourer exposes no capability flag for the
+        // responder, only a false return from SetAckResponder. So this
+        // stays true until an arm has actually been refused — it reports
+        // "not known to be unsupported", which is why §15.5 says so.
+        bool supported = true;
+        bool has_tx = false;
+        // §3.0 SA the responder is armed to; empty while disarmed.
+        std::string mac;
+    };
+    AckResponderState ack_responder_state() const;
 
     // Deliver queued RX frames (§3.0 payloads, header stripped); blocks up
     // to timeout_ms when the queue is empty. Returns frames delivered.

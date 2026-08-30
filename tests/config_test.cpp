@@ -319,16 +319,55 @@ int main() {
 
     // --- §3.0/§15.2 tx_retry_limit coupling (Pass 156) ----------------------
     {
-        // Default seeds 8 (operator-ruled); parse override works.
+        // Default seeds 3 (Pass 198, down from Pass 156's 8); override works.
         auto r = load_config_json(R"({
           "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
         CHECK(bool(r));
-        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 8);
+        if (r) CHECK_EQ_U(r.value->air.tx_retry_limit, 3);
         auto r2 = load_config_json(R"({
           "node": {"originator": 3, "role": "rx"},
           "air": {"kind": "radio", "tx_retry_limit": 16}})");
         CHECK(bool(r2));
         if (r2) CHECK_EQ_U(r2.value->air.tx_retry_limit, 16);
+    }
+
+    // --- §15.2 air.ack_timeout_us (Pass 198) --------------------------------
+    {
+        // Default 128 = devourer's own unified value, so an unauthored node
+        // programs byte-identically to before the key existed.
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->air.ack_timeout_us, 128);
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ack_timeout_us": 255}})");
+        CHECK(bool(r2));
+        if (r2) CHECK_EQ_U(r2.value->air.ack_timeout_us, 255);
+        // REFUSED, not clamped, at both rails: devourer clamps silently, and
+        // an authored 500 running as 255 is a range budget the operator
+        // believes and does not have.
+        CHECK(!load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ack_timeout_us": 256}})"));
+        CHECK(!load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"},
+          "air": {"kind": "radio", "ack_timeout_us": 0}})"));
+    }
+
+    // --- §3.0 policy.return.unicast_stale_ms (Pass 198) ---------------------
+    {
+        auto r = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"}})");
+        CHECK(bool(r));
+        if (r) CHECK_EQ_U(r.value->policy.ret.unicast_stale_ms, 1000u);
+        // 0 is legal and means "never expire" — the Pass 12 behaviour, kept
+        // for the A/B, so it must parse rather than read as unset.
+        auto r2 = load_config_json(R"({
+          "node": {"originator": 3, "role": "rx"}, "air": {"kind": "radio"},
+          "policy": {"return": {"unicast_stale_ms": 0}}})");
+        CHECK(bool(r2));
+        if (r2) CHECK_EQ_U(r2.value->policy.ret.unicast_stale_ms, 0u);
     }
     // The hybrid armed with retries disabled is refused, not run inert —
     // either half arms it.

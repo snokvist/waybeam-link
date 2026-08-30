@@ -910,6 +910,9 @@ Result<Config> load_config_json(const std::string& json_text) {
                     pr.value("return_window_us", cfg.policy.ret.return_window_us);
                 cfg.policy.ret.unicast =
                     pr.value("unicast", cfg.policy.ret.unicast);
+                // §3.0 (Pass 198) SA-latch age-out. 0 = never expire.
+                cfg.policy.ret.unicast_stale_ms = pr.value(
+                    "unicast_stale_ms", cfg.policy.ret.unicast_stale_ms);
                 cfg.policy.ret.report_redundancy = pr.value(
                     "report_redundancy", cfg.policy.ret.report_redundancy);
                 if (cfg.policy.ret.report_redundancy < 1) {
@@ -1396,6 +1399,18 @@ Result<Config> load_config_json(const std::string& json_text) {
                     "air.tx_retry_limit " +
                     std::to_string(cfg.air.tx_retry_limit) +
                     " out of range 0..63 (§15.2 Pass 156)");
+            }
+            // §15.2 (Pass 198): hardware ACK window, 1..255 (REG_ACKTO field
+            // width). Refused rather than clamped — devourer clamps
+            // silently, and an authored 500 that ran as 255 would be a range
+            // budget the operator believes and does not have.
+            cfg.air.ack_timeout_us =
+                a.value("ack_timeout_us", cfg.air.ack_timeout_us);
+            if (cfg.air.ack_timeout_us < 1 || cfg.air.ack_timeout_us > 255) {
+                return Result<Config>::fail(
+                    "air.ack_timeout_us " +
+                    std::to_string(cfg.air.ack_timeout_us) +
+                    " out of range 1..255 (§15.2 Pass 198)");
             }
             // USB TX aggregation depth. 0/1 = off (one frame per URB); the
             // HalMAC families parse at most 3 descriptors per bulk transfer

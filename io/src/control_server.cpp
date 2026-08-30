@@ -325,6 +325,14 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             }
             return reply(200, "OK", h_.bench_rx_drop_json());
         }
+        if (path == "/api/v1/air/ack_responder") {  // §3.0/§15.5 Pass 198
+            if (!h_.ack_responder_json) {
+                return reply(409, "Conflict",
+                             json_err("ack responder not available in this "
+                                      "mode"));
+            }
+            return reply(200, "OK", h_.ack_responder_json());
+        }
         if (path == "/api/v1/tx/power") {  // §10.5 Pass 114
             if (!h_.tx_power_json) {
                 return reply(409, "Conflict",
@@ -639,6 +647,17 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     if (path == "/api/v1/video/recover") {
         if (!h_.video_recover) return na();
         return done(h_.video_recover(j.value("stream_id", -1)));
+    }
+    if (path == "/api/v1/air/ack_responder") {  // §3.0/§15.5 Pass 198
+        if (!h_.ack_responder_set) return na();
+        // Required and typed: an absent or non-bool `armed` is a 400, never
+        // a default. This endpoint makes a radio transmit or stop
+        // transmitting — the one direction a typo must not pick.
+        if (!j.contains("armed") || !j["armed"].is_boolean()) {
+            return reply(400, "Bad Request",
+                         json_err("armed boolean required"));
+        }
+        return done(h_.ack_responder_set(j["armed"].get<bool>()));
     }
     if (path == "/api/v1/bench/rx-drop") {
         if (!h_.bench_rx_drop) return na();

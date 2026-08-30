@@ -64,7 +64,7 @@ before merge instead of stacking a correction on top.
   is **silently ignored**. `--check` passing proves the config parses, not that
   it says what you meant. See "Authoring configs" below.
   `waybeam-link config-schema --json` prints the declared key surface
-  (`io/src/config_registry.cpp`, 273 keys) so a key can be checked without
+  (`io/src/config_registry.cpp`, 283 keys) so a key can be checked without
   reading the loader. The registry is not a second source of truth:
   `tests/config_registry_test.py` reconstructs every accessor site in
   `config.cpp` and fails the build if the two disagree in either direction.
@@ -121,7 +121,7 @@ Current phase order (operator direction, 2026-08-06): **consolidate → expand
 
 ## Authoring configs
 
-Node configs are dense (273 registered keys, `config-schema --json`) and
+Node configs are dense (283 registered keys, `config-schema --json`) and
 **coupled across nodes**: the
 cache's `store.controller.endpoint` must equal the owning ground's
 `cache.repair.listen`, the ground's `cache.repair.caches[]` must name the
