@@ -12,6 +12,71 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-31 — the scout dropped a craft it could plainly hear (4/8 -> 8/8)
+
+Craft **19** (`.181`, -50 dBm, 5700 MHz at ~920 permille interference) appeared
+in only **4 of 8** sweeps using the WebUI's exact call (`mode:list`, no
+`dwell_ms`). Crafts 17 and 18 were 8/8. `rejects` read all-zero on every miss.
+
+**A wrong mechanism, recorded so it is not re-derived.** First hypothesis: the
+8812AU is deaf ~220-270 ms after a retune, the base dwell defaults to 300 ms,
+so the extension gate — `accum_.frames > 0`, which decides whether a channel
+earns the 1500 ms window its ANNOUNCE needs — was being decided on ~30-80 ms of
+real listening. Plausible, and false. Charging a 250 ms settle to the sweep
+instead of the listening window moved the rate **not at all**: 4/8 before, 4/8
+after, on the same craft and geometry. Reverted rather than shipped, since it
+cost ~6 s per 25-channel sweep for no measured benefit.
+
+**What the measurement actually said.** Probing the per-channel record on a
+MISS sweep: 5700 came back `tuned=true, evidence_valid=true,
+wifi_util_permille=256, bss_count=1`. `wifi_util` is accumulated inside
+`on_frame` from decodable waybeam frames on the scout adapter — so on a sweep
+where the craft was "not found", the scout had heard a quarter of that
+channel's airtime in that craft's own frames. The dwell extended. It still
+produced no candidate.
+
+**Cause.** `Candidate` is only ever constructed inside
+`if (const Announce* an = std::get_if<Announce>(&dec))`
+(`node/include/wblink/node/discovery.h`). Presence is fully known from ANY
+frame — `frames_by_orig`, `best_rssi_by_orig`, and the originator read straight
+out of the §3.1 prefix — and is discarded unless a §3.12 ANNOUNCE also lands.
+On a weak craft on a saturated channel the announce is precisely the frame most
+likely to be missing, so the scout knew where the craft was and refused to say.
+
+**Fix and result.** Emit heard-but-unannounced craft with `announced:false` and
+session/claimed/psk_known left at their unknown defaults:
+
+| craft | before | after |
+|---|---|---|
+| 17 (-18 dBm) | 8/8 | 8/8 |
+| 18 (-42 dBm) | 8/8 | 8/8 |
+| **19 (-50 dBm, congested)** | **4/8** | **8/8** |
+
+And it is switchable, not merely visible: quickconnect to craft 19 while it
+listed `announced=false, psk_known=false` reached `committed|19|5700`. The CSA
+token survives in `DiscoveryCatalog` from an earlier announce (the token cache
+has no aging, only a 64-entry cap), so the claim keys fine.
+
+Three containments, because this touches a shared structure:
+- **Occupancy is untouched** — only `announced` rows may invalidate a channel
+  in `channel_evidence_valid`, so which channels fold into the occupancy store
+  is unchanged. That subsystem has its own evidence rules.
+- **The claim path refuses precisely** — `do_claim`'s staleness check now runs
+  only for announced candidates. An unannounced one carries `session 0`, which
+  that check would have reported as "craft rebooted since scout": the right
+  refusal for the wrong reason.
+- **The API distinguishes them** (`announced`), so a picker can grey the row
+  instead of implying full metadata.
+
+STILL OPEN: why the announce specifically fails on this craft. 242 frames
+decoded in a dwell but no ANNOUNCE suggests either a cadence below the §3.12
+>=1 Hz floor on that build (`.181` runs a hub binary predating today's), or
+announce-sized frames losing preferentially on a 920 permille channel. The
+picker no longer depends on the answer, which is why this is a finding and not
+a blocker.
+
+---
+
 ## 2026-08-31 — Pass 199 device matrix: an acquire parks, a retune still reverts
 
 Ground `.242` (x86, in-process node) against three crafts: **17** = `.232`
@@ -61,20 +126,15 @@ was a re-scout dropping the weak craft, not the switch discarding anything.
 `/api/v1/discovery` does age a silent node at 5 s, but the WebUI renders the
 scout list, not that catalogue.)
 
-### OPEN — the scout still loses the weak craft, and it is not Pass 199
+### CLOSED — the scout lost the weak craft (see the 2026-08-31 scout entry above)
 
-Craft 19 is intermittently absent from the candidate list: 2/4 sweeps early on,
-5/5 later, absent again in a 3-craft sweep. It is weak (-50 dBm) and on a
-saturated channel. Mechanism (`node/include/wblink/node/discovery.h`): the
-1800 ms dwell EXTENSION — the window in which the >=1 Hz ANNOUNCE that creates
-a candidate arrives — is gated on `accum_.frames > 0` at the end of a 300 ms
-base dwell, and the 8812AU is deaf ~220-270 ms after each retune, so that gate
-is decided on ~30-80 ms of listening. A loud craft always lands a frame there;
-a weak one often lands none, the channel is abandoned, and `rejects` stays
-all-zero because it was never rejected — it was never heard. `kSenseSettleMs`
-is 30 ms, an order of magnitude below the real deafness, and is applied only
-to FA/CCA draining, never to this gate. Workaround: pass `dwell_ms: 1200+`.
-The WebUI sends no dwell at all.
+Craft 19 listed in only 4/8 sweeps. My first mechanism for this was WRONG and
+is recorded here so nobody re-derives it: I attributed it to the ~220-270 ms
+post-retune deafness eating the 300 ms base dwell, so that the extension gate
+(`accum_.frames > 0`) was decided on ~30-80 ms of listening. Charging the
+settle to the sweep changed the detection rate by exactly nothing — 4/8 before,
+4/8 after — and the change was reverted. The real cause was the ANNOUNCE gate;
+see the entry above.
 
 ---
 
