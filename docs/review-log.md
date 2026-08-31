@@ -24,6 +24,39 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 199 — a CSA campaign's failure posture is scoped to its INTENT (2026-08-31)
+
+Two operator-visible operations shared one campaign machine and one failure
+posture. §11.6's revert is correct for a RETUNE (move the craft we already
+fly) and wrong for an ACQUIRE (leave this craft, take that one): reverting
+undoes the operator's explicit request, and lands them on a craft §15.5a has
+already aged out at 5 s of silence — so the "safety net" also removes the only
+visible target to retry from. Operator-reported as "I cannot switch freely
+between my vehicles once I have claimed one".
+
+Ruled:
+
+1. §11.6 — campaigns carry `CampaignIntent` (`core/include/wblink/csa.h`).
+   `kRetune` reverts to `prev_chan` as before. `kAcquire` **PARKS**: stays on
+   the target channel, adopts the target selection (a failed verify is not
+   proof of absence, so §2 first-latch may still take it), drops the previous
+   selection, reports `select_failed`. Both failure paths — `kAbort` (no
+   CSA_ARMED) and `kRevert` (committed, no video) — take the same posture.
+2. §11.6 — an ACQUIRE does not move the craft. `quickconnect` claims on the
+   channel the craft was FOUND on. It previously defaulted an absent
+   `target_chan` to `scout.emptiest()`, silently making "switch to craft B"
+   into "switch to craft B and move it elsewhere" — two operations, only the
+   second of which can fail, and whose failure reverted the first. A
+   `target_chan` that is neither absent nor the craft's own channel is now
+   refused; moving a craft is `POST /api/v1/csa`, once it is yours.
+
+Pinning `target == cand->chan` is what makes PARK well defined: the craft is
+on that channel whether the campaign aborted before the commit or reverted
+after it, so both paths park somewhere the craft actually is.
+
+Spec: §11.6. Evidence: `docs/findings.md` 2026-08-31 (device matrix, .242
+ground ↔ crafts 17/19), branch `fix/csa-acquire-parks`.
+
 ## Pass 198 — the hardware-ACK hybrid, retargeted at telemetry and given an out-of-range posture (2026-08-30)
 
 **Verdict.** Four operator rulings, one decision: the hybrid stops being a

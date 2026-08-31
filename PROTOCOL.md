@@ -4181,7 +4181,34 @@ direction** lets us make the strand class *never happen* rather than recover aft
   revert — only at the deadline. The craft's §11.5 VERIFY confirms on the
   first matching beacon; every other receiver drops zero-dt CSAs without
   effect.
-- **Issuer revert-on-no-video:** if ground did commit (craft ACKed) but then sees
+- **Issuer failure posture is INTENT-SCOPED (Pass 199).** Two operator-visible
+  operations share this one campaign machine and need opposite failures:
+  - **RETUNE** — move the craft we already fly to another channel
+    (`POST /api/v1/csa`). The operator never asked to leave it, so a failed
+    move MUST NOT strand it: revert to `prev_chan` as below.
+  - **ACQUIRE** — leave the current craft and take a different one
+    (`POST /api/v1/scout/quickconnect`). The operator explicitly abandoned the
+    previous craft, so a revert UNDOES the request. It also lands them on a
+    craft the catalogue has usually already aged out (§15.5a ages a node at
+    5 s of silence), so the "safety net" removes the only visible target to
+    retry from — the operator is returned to a craft they did not ask for and
+    can no longer see the one they did. An ACQUIRE therefore **PARKS**: it
+    stays on the target channel, adopts the target selection (a failed verify
+    is not proof the craft is absent, so §2 first-latch may still pick it up),
+    drops the previous selection, and reports `select_failed`. This holds for
+    BOTH failure paths — no `CSA_ARMED` (abort) and committed-but-no-video
+    (revert) — which is well defined because an acquire's `target_chan` is
+    pinned to the craft's own channel (below).
+- **An ACQUIRE does not move the craft (Pass 199).** `quickconnect` claims on
+  the channel the craft was **found** on. It previously defaulted a absent
+  `target_chan` to the *emptiest allowlisted channel*, silently turning
+  "switch to craft B" into "switch to craft B and move it elsewhere" — two
+  operations, of which only the second can fail, and whose failure then
+  reverted the first. A `target_chan` that is neither absent nor the craft's
+  own channel is refused. Moving a craft is `POST /api/v1/csa`, once it is
+  yours.
+- **Issuer revert-on-no-video (RETUNE intent):** if ground did commit (craft
+  ACKed) but then sees
   no craft video on `target_chan` within its verify deadline, ground reverts to
   `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
   **The revert MUST name which half failed (Pass 197):** "no craft video"
