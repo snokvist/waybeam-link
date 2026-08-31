@@ -12,6 +12,72 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-08-31 — Pass 199 device matrix: an acquire parks, a retune still reverts
+
+Ground `.242` (x86, in-process node) against three crafts: **17** = `.232`
+8812EU @5540 (table 242), **18** = `.233` maruko 8812AU @5825 (table 242),
+**19** = `.181` 8733BU @5700 (table 164, so §3.4 BEST-EFFORT, on a channel
+measuring ~920 permille interference).
+
+| # | scenario | result |
+|---|---|---|
+| S1 | quickconnect with a foreign `target_chan` | REFUSED, selection untouched |
+| S2 | acquire 19→17, no `target_chan` | `committed\|17\|5540` — craft NOT moved |
+| S3 | acquire back 17→19 | `committed\|19\|5700` |
+| S4 | acquire FAILS (RX starved via `bench/rx-drop`) | **`select_failed\|17\|5540` — PARKED on target**, not reverted to 19@5700 |
+| S4b | craft reappears after a park | promotes `select_failed` → `latched\|17\|5540` |
+| S5 | **negative control**: retune fails | still REVERTS — `csa: aborted (no CSA_ARMED) -> resting 5540 MHz` |
+| S6 | WebUI click path, 4 clicks over 3 crafts | 4/4 landed, every direction |
+
+S5 is the one that matters for trust: the revert safety net is intact for a
+RETUNE, so Pass 199 is scoped to the acquire intent rather than removing
+revert wholesale.
+
+**S2 is the quiet win.** With `target_chan` omitted, do_claim used to default to
+`scout.emptiest()` — so "switch to craft B" also MOVED it to another channel.
+Two operations, only the second able to fail, and its failure reverted the
+first. Same-channel now, always.
+
+**A second defect S4 surfaced.** Parking worked and video flowed at 6 permille,
+but `selection_state` stayed `select_failed` forever, because promotion to
+`latched` was gated on `selection_state == "configured"` (the boot state). The
+UI would have reported a failure the operator could see was not happening.
+Fixed narrowly: only the originator we parked ON promotes, so it can never
+adopt a different craft that happens to share the channel.
+
+**WebUI verified end to end**, not just the link API: the HTML's
+`cc.chan || sc3.current_chan || 0` expression was evaluated against live
+`/wblink/scout` data and yields each craft's own channel for all three, so a
+click sends exactly what Pass 199 accepts and nothing hits the `|| 0` path.
+Clicks were then issued through the hub proxy at `:8060` in the HTML's payload
+shape.
+
+**The operator workflow works: ONE scout, then click freely.** Three clicks
+(19 → 17 → 18) with no re-scout between them all landed, and the candidate list
+stayed complete — `[(17,5540),(18,5825),(19,5700)]` — after every switch. The
+scout list persists until the NEXT sweep; a selection change does not discard
+it. (An earlier read that "switching forgets the other craft" was wrong: that
+was a re-scout dropping the weak craft, not the switch discarding anything.
+`/api/v1/discovery` does age a silent node at 5 s, but the WebUI renders the
+scout list, not that catalogue.)
+
+### OPEN — the scout still loses the weak craft, and it is not Pass 199
+
+Craft 19 is intermittently absent from the candidate list: 2/4 sweeps early on,
+5/5 later, absent again in a 3-craft sweep. It is weak (-50 dBm) and on a
+saturated channel. Mechanism (`node/include/wblink/node/discovery.h`): the
+1800 ms dwell EXTENSION — the window in which the >=1 Hz ANNOUNCE that creates
+a candidate arrives — is gated on `accum_.frames > 0` at the end of a 300 ms
+base dwell, and the 8812AU is deaf ~220-270 ms after each retune, so that gate
+is decided on ~30-80 ms of listening. A loud craft always lands a frame there;
+a weak one often lands none, the channel is abandoned, and `rejects` stays
+all-zero because it was never rejected — it was never heard. `kSenseSettleMs`
+is 30 ms, an order of magnitude below the real deafness, and is applied only
+to FA/CCA draining, never to this gate. Workaround: pass `dwell_ms: 1200+`.
+The WebUI sends no dwell at all.
+
+---
+
 ## 2026-08-30 — hybrid on the DEPLOYED stack, and the quiet gap misses 89 %
 
 Second session, distinct from the entry below it: that one ran the ground
