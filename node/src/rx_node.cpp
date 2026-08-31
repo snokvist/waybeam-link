@@ -1421,9 +1421,15 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
         // abort (no CSA_ARMED) with no hint to the operator. If the craft has
         // announced a different session more recently than the scout saw it,
         // the candidate is stale; demand a re-scout instead of a silent abort.
-        const auto live_sess = discovery.session_for(orig);
-        if (live_sess && *live_sess != cand->session) {
-            return "stale candidate (craft rebooted since scout) — re-scout";
+        // §15.5a (Pass 200): only an ANNOUNCED candidate has a session to
+        // compare. A heard-but-unannounced one carries session 0, which this
+        // check would read as "rebooted" and refuse with a wrong reason. Its
+        // real blocker, if any, is the CSA key below, which refuses precisely.
+        if (cand->announced) {
+            const auto live_sess = discovery.session_for(orig);
+            if (live_sess && *live_sess != cand->session) {
+                return "stale candidate (craft rebooted since scout) — re-scout";
+            }
         }
         // §2/§13 passive spectator (Pass 74): no uplink for a §11 issuer
         // campaign, so "select" is a passive tune. Retune all ears onto the
