@@ -335,6 +335,9 @@ class ScoutEngine {
         }
         accum_.transmitters.insert(originator);
         ++accum_.frames_by_orig[originator];  // §15.5a (Pass 66): evidence weight
+        // §15.5a (Pass 200): frame-derived rows need the L2 tag too, and the
+        // frame carries it whether or not the announce ever lands.
+        accum_.net_id_by_orig[originator] = meta.net_id;
         // RSSI is negative dBm, so "strongest" is the MAXIMUM. 0 stays the
         // no-reading sentinel: an unreported rssi must not read as 0 dBm, the
         // strongest value representable.
@@ -345,6 +348,7 @@ class ScoutEngine {
         }
         if (const Announce* an = std::get_if<Announce>(&dec)) {
             Candidate& c = accum_.candidates[originator];
+            c.announced = true;
             c.originator = originator;
             c.net_id = meta.net_id;
             c.session = an->prefix.session_id;
@@ -478,6 +482,7 @@ class ScoutEngine {
                        ",\"chan\":" + std::to_string(c.chan) +
                        ",\"frames\":" + std::to_string(c.frames) +
                        ",\"resolved\":true" +
+                       ",\"announced\":" + (c.announced ? "true" : "false") +
                        ",\"rssi_dbm\":" +
                        (c.rssi_dbm != 0 ? std::to_string(c.rssi_dbm) : "null") +
                        ",\"psk_known\":" + (c.psk_known ? "true" : "false") + "}";
@@ -543,6 +548,10 @@ class ScoutEngine {
         uint8_t net_id = 0;     // §3.0 L2 tag to stamp/filter after the claim
         uint32_t session = 0;
         bool psk_known = false; // a usable CSA key is held (token or secret)
+        // §15.5a (Pass 200): false when the craft was HEARD but never
+        // announced on this sweep — `session` is then UNKNOWN (0), not stale,
+        // and the claim path must not read it as a reboot.
+        bool announced = false;
     };
     // Best candidate for `originator` across the last sweep. A clearly dominant
     // channel wins; near-equal evidence prefers the resting channel only when
@@ -560,7 +569,8 @@ class ScoutEngine {
         for (const auto& r : results_) {
             for (const auto& c : r.candidates) {
                 if (c.originator != originator) continue;
-                const Claim claim{c.chan, c.net_id, c.session, c.psk_known};
+                const Claim claim{c.chan, c.net_id, c.session, c.psk_known,
+                                  c.announced};
                 if (c.frames >= best_frames) {
                     best_frames = c.frames;
                     found = claim;
@@ -619,6 +629,11 @@ class ScoutEngine {
         uint16_t availability_permille = 0;
     };
     struct Candidate {
+        // §15.5a (Pass 200): true when a §3.12 ANNOUNCE was decoded for this
+        // originator on this dwell. False means the craft was HEARD — its
+        // frames carry originator, net_id and RSSI — but its announce did not
+        // land, so session/claimed/psk_known stay at their unknown defaults.
+        bool announced = false;
         uint16_t originator = 0;
         uint8_t net_id = 0;
         uint32_t session = 0;
@@ -646,6 +661,7 @@ class ScoutEngine {
         std::set<uint16_t> transmitters;
         std::map<uint16_t, Candidate> candidates;
         std::map<uint16_t, uint64_t> frames_by_orig;  // §15.5a (Pass 66)
+        std::map<uint16_t, uint8_t> net_id_by_orig;   // §15.5a (Pass 200)
         // Strongest RSSI seen per originator this dwell. Keyed like
         // frames_by_orig so a craft heard before its ANNOUNCE still carries
         // its signal into the candidate row.
@@ -726,6 +742,37 @@ class ScoutEngine {
             }
             r.candidates.push_back(c);
         }
+        // §15.5a (Pass 200): a craft we HEARD but whose ANNOUNCE did not decode
+        // is still a craft on this channel. Dropping it is why a weak craft on
+        // a busy channel vanished from the picker intermittently with NOTHING
+        // counted — it was never rejected, it was never announced. Measured
+        // 2026-08-31 on `.181` (-50 dBm, 5700 MHz at ~920 permille
+        // interference): a MISSING sweep still recorded wifi_util 256 permille
+        // and bss_count 1 on that channel, i.e. the frames were plainly there
+        // and only the announce was absent. 4/8 sweeps listed it.
+        //
+        // Emitted UNANNOUNCED: originator, net_id, channel, frames and RSSI are
+        // all frame-derived and trustworthy; session/claimed/psk_known come
+        // only from §3.12 and stay unknown, so a consumer can tell a heard
+        // craft from a fully described one and the claim path can refuse
+        // precisely instead of misreporting it as stale.
+        for (const auto& [orig, n] : accum_.frames_by_orig) {
+            if (accum_.candidates.count(orig)) continue;
+            Candidate c;
+            c.announced = false;
+            c.originator = orig;
+            if (const auto nit = accum_.net_id_by_orig.find(orig);
+                nit != accum_.net_id_by_orig.end()) {
+                c.net_id = nit->second;
+            }
+            c.chan = channels_[chan_idx_];
+            c.frames = n;
+            if (const auto it = accum_.best_rssi_by_orig.find(orig);
+                it != accum_.best_rssi_by_orig.end()) {
+                c.rssi_dbm = it->second;
+            }
+            r.candidates.push_back(c);
+        }
         results_.push_back(std::move(r));
     }
 
@@ -737,6 +784,12 @@ class ScoutEngine {
     bool channel_evidence_valid(const ChannelResult& r) const {
         if (!r.tuned) return false;
         for (const Candidate& c : r.candidates) {
+            // §15.5a (Pass 200): only ANNOUNCED rows may invalidate a channel.
+            // Pass 200 added heard-but-unannounced rows for the picker; letting
+            // them vote here would change which channels fold into the
+            // occupancy store, which is a different subsystem with its own
+            // evidence rules. Keep this exactly as it was.
+            if (!c.announced) continue;
             const auto resolved = candidate_for(c.originator);
             if (!resolved || resolved->chan != r.chan) return false;
         }
