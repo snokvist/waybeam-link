@@ -329,6 +329,12 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                                    l.cfg.node.net_id};
     std::optional<LinkSelection> pending_selection;
     std::optional<LinkSelection> previous_selection;
+    // §11.6 (Pass 199): the intent of the campaign in flight. Decides the
+    // FAILURE posture — restore the previous craft (kRetune) or park on the
+    // target (kAcquire). See CampaignIntent in core/include/wblink/csa.h.
+    // Seeded kRetune: every campaign that is not an operator acquire is a
+    // move of the craft we already fly, and that is the conservative half.
+    CampaignIntent campaign_intent = CampaignIntent::kRetune;
     std::string selection_state = "configured";
     std::string previous_selection_state = selection_state;
 
@@ -1430,13 +1436,24 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
         if (!air.value->supports_csa()) {
             return "CSA unsupported by this backend";
         }
-        uint16_t target = static_cast<uint16_t>(target_chan_i);
-        if (target == 0) {
-            target = scout.emptiest(
-                l.cfg.policy.csa.channel_allowlist, cand->chan,
-                static_cast<int>(l.cfg.policy.csa.adjacent_guard_mhz));
+        // §11.6 (Pass 199): a quickconnect ACQUIRES on the channel the craft
+        // was found on — full stop. It used to default to scout.emptiest(),
+        // which silently turned "switch to craft B" into "switch to craft B
+        // AND move it somewhere else": two operations, of which the second is
+        // the one that fails, and its failure then reverted the first. Moving
+        // a craft is /api/v1/csa, after the craft is yours.
+        //
+        // Keeping target == cand->chan also makes PARKING well defined. The
+        // craft is on that channel whether the campaign aborted before the
+        // commit or reverted after it, so both failure paths park somewhere
+        // the craft actually is.
+        const uint16_t requested = static_cast<uint16_t>(target_chan_i);
+        if (requested != 0 && requested != cand->chan) {
+            return "quickconnect acquires on the craft's own channel; move it "
+                   "with /api/v1/csa once claimed";
         }
-        if (target == 0) return "no target channel (specify target_chan)";
+        const uint16_t target = cand->chan;
+        if (target == 0) return "candidate has no channel (re-scout)";
         // §15.5a (Pass 144): a claim is what a sweep is *for*, so it ends
         // the sweep instead of racing it. Left running, the sweep finishes
         // seconds later and its rest() restores the resting channel and
@@ -1535,6 +1552,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
         previous_selection = active_selection;
         previous_selection_state = selection_state;
         pending_selection = LinkSelection{orig, target, 0, cand->net_id};
+        campaign_intent = CampaignIntent::kAcquire;  // §11.6 Pass 199
         selection_state = "claiming";
         wb_logf("csa: claim originator=%u net_id=%u %u->%u MHz\n",
                 orig, cand->net_id, cand->chan, target);
@@ -2196,6 +2214,9 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                     pending_selection = active_selection;
                     pending_selection->chan = static_cast<uint16_t>(mhz);
                     pending_selection->bw = 0;
+                    // §11.6 (Pass 199): same craft, new channel — a failure
+                    // here must put it back, not strand it.
+                    campaign_intent = CampaignIntent::kRetune;
                     selection_state = "claiming";
                     return std::pair<int, std::string>{200, "{\"ok\":true}"};
                 }
@@ -2938,6 +2959,23 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
             }
         }
+        // §11.6 (Pass 199): a PARKED acquire promotes when its craft turns up.
+        // Parking exists because a failed verify is not proof of absence, so
+        // first-latch is deliberately still allowed to take the craft — and it
+        // does: device-verified 2026-08-31, video at 6 permille while the state
+        // still read select_failed. Leaving it there reports a failure the
+        // operator can see is not happening. Narrower than the adoption above:
+        // only the originator we parked ON promotes, so this can never adopt
+        // some other craft that happens to be on the channel.
+        if (selection_state == "select_failed") {
+            if (const auto latched = rx.latched_originator()) {
+                if (*latched != 0 && *latched == active_selection.originator) {
+                    selection_state = "latched";
+                    wb_logf("link: parked acquire latched originator=%u "
+                            "(%u MHz)\n", *latched, operating_chan);
+                }
+            }
+        }
         // §14.3 cache store: answer requests + push periodic status.
         if (cache_store) {
             uint8_t cbuf[512];
@@ -3139,6 +3177,35 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                         operating_chan);
                 break;
             case CsaIssuer::IssuerAction::Kind::kRevert:
+                // §11.6 (Pass 199): an ACQUIRE parks instead of reverting.
+                // The operator explicitly left the previous craft, so putting
+                // them back undoes the request — and the previous craft has
+                // usually aged out of the catalogue by then (5 s), so the
+                // "safety net" strands them with no visible target to retry.
+                // The ears are already on the target channel (kCommit moved
+                // them) and the craft is on it, so parking costs no retune.
+                // The target selection is applied rather than cleared: a
+                // failed VERIFY is not proof the craft is absent, so §2
+                // first-latch is still allowed to pick it up.
+                if (campaign_intent == CampaignIntent::kAcquire) {
+                    if (pending_selection) {
+                        apply_selection(*pending_selection);
+                        operating_chan = pending_selection->chan;
+                        scout.set_rest_chan(active_selection.chan);
+                        scout.set_rest_filter(active_selection.net_id);
+                    }
+                    selection_state = "select_failed";
+                    pending_selection.reset();
+                    previous_selection.reset();
+                    {
+                        const CsaIssuer::Evidence ev = issuer.evidence();
+                        wb_logf("csa: acquire FAILED verify — parked on %u MHz "
+                                "(armed=%d landed=%d video=%d)\n",
+                                operating_chan, int(ev.armed_seen),
+                                int(ev.landing_seen), int(ev.video_seen));
+                    }
+                    break;
+                }
                 // Pass 67: the craft reverts to the campaign's prev_chan; this
                 // receiver restores its prior vehicle tuple, which may be on a
                 // different channel when switching between vehicles.
@@ -3174,6 +3241,28 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 break;
             case CsaIssuer::IssuerAction::Kind::kAbort:
+                // §11.6 (Pass 199): same split as kRevert. On an ACQUIRE the
+                // ears are already on the craft's own channel (do_claim moved
+                // them there before starting, and Pass 199 pins target ==
+                // cand->chan), so parking is again a no-op on the radio. No
+                // CSA_ARMED means the claim did not take — but the craft is
+                // still transmitting on this channel, so staying here is what
+                // lets the operator see it and retry, and lets first-latch
+                // pick up video even without a claim.
+                if (campaign_intent == CampaignIntent::kAcquire) {
+                    if (pending_selection) {
+                        apply_selection(*pending_selection);
+                        operating_chan = pending_selection->chan;
+                        scout.set_rest_chan(active_selection.chan);
+                        scout.set_rest_filter(active_selection.net_id);
+                    }
+                    selection_state = "select_failed";
+                    pending_selection.reset();
+                    previous_selection.reset();
+                    wb_logf("csa: acquire ABORTED (no CSA_ARMED) — parked on "
+                            "%u MHz\n", operating_chan);
+                    break;
+                }
                 // §15.5a (Pass 65): a failed claim (no CSA_ARMED) rolls every ear
                 // and the net_id stamp/filter back to the resting state, so it's a
                 // clean no-op rather than stranding a diversity ear on the craft.

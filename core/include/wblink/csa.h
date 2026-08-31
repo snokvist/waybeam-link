@@ -73,6 +73,21 @@ struct CsaAction {
     uint8_t power_intent = 0; // §11.1 profile power level to re-apply
 };
 
+// §11.6 (Pass 199): which INTENT started a campaign. Two operator-visible
+// operations share one campaign machine and want OPPOSITE failure postures,
+// which is why this has to be carried rather than inferred at the failure:
+//
+//   kRetune  — move the craft we are already flying to another channel. The
+//              operator never asked to leave it, so a failed move must not
+//              strand it: go back to the channel it is known to be on.
+//   kAcquire — leave the current craft and take a different one. The operator
+//              explicitly abandoned the old craft, so reverting would UNDO the
+//              request. It also lands them on a craft whose catalogue entry has
+//              usually aged out (DiscoveryCatalog ages a node at 5 s), leaving
+//              no visible target to retry from — a "safety net" that removes
+//              the way back. An acquire therefore PARKS on the target.
+enum class CampaignIntent : uint8_t { kRetune, kAcquire };
+
 class CsaFollower {
   public:
     explicit CsaFollower(const CsaParams& policy);
