@@ -68,12 +68,41 @@ Three containments, because this touches a shared structure:
 - **The API distinguishes them** (`announced`), so a picker can grey the row
   instead of implying full metadata.
 
-STILL OPEN: why the announce specifically fails on this craft. 242 frames
-decoded in a dwell but no ANNOUNCE suggests either a cadence below the §3.12
->=1 Hz floor on that build (`.181` runs a hub binary predating today's), or
-announce-sized frames losing preferentially on a 920 permille channel. The
-picker no longer depends on the answer, which is why this is a finding and not
-a blocker.
+CLOSED 2026-08-31 — ONE stale config line explained all of it. `.181`'s
+`craft.json` pointed `profile_table` at `/etc/waybeam-link/table-8733b.json`
+(Aug 15) while the ground and every other craft had moved to
+`table.example.json` (Aug 30). Both files exist on both nodes, byte-identical
+across them, so this was never a deploy or binary problem — I rebuilt and
+redeployed the cv610 hub first on a "stale binary" theory and `table_version`
+stayed at 164, which is what ruled that out.
+
+The two tables differ in `profile 4`'s `airtime_budget_frac` (0.51 vs 0.6),
+in whether the §9.4 MCS probe block is armed, and in two `_note` strings —
+and the notes alone are enough, because §3.6 hashes the whole table into
+`table_version` ("edit in lockstep fleet-wide").
+
+The mismatch put stream 0 into §3.4 BEST-EFFORT, which disables ARQ,
+supersession and deadline drops. Repointing `.181` at the common table:
+
+| | before | after |
+|---|---|---|
+| `table_version` | 164 | **242** |
+| BEST-EFFORT log lines per latch | 2 | **0** |
+| stream 0 loss | **394 permille** | **6 permille** |
+| scout frames per dwell | 242 | **1417** |
+| `announced` in the picker | false (4/8 sweeps listed it) | **true** |
+
+So the announce was never a cadence or 8733B-specific defect: at 394 permille
+the craft simply could not get enough frames through for one to land inside a
+dwell. Note `.181`'s `air.mcs_probe: true` had been INERT the whole time — that
+key does nothing unless the table carries a probe block AND every receiver has
+the identical table; aligning the table also activates the probe on that die.
+
+This does not retire the Pass 200 picker change: a craft you can hear should be
+listed whatever its config, and that fix is what kept the craft selectable
+while the real cause was still unknown. But the operational lesson is that a
+`table_version` mismatch is not cosmetic — it silently costs ARQ, and the loss
+it produces looks exactly like a bad radio.
 
 ---
 
