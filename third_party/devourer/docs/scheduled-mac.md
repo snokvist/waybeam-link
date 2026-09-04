@@ -173,9 +173,22 @@ scheduled MAC runs TX+RX anyway, so this is the relevant session shape.
 | Jaguar2 8812BU | 0.91 / 2.1 (run-to-run 0.12–0.91) | 0.64 / 5.3 | yes (12) | 0.86 | 0 |
 | Jaguar3 8822CU | 1.00 / 0.24 | 1.00 / 0.13 | yes (12) | 0.96 | 0 |
 
+The RTL8733B is deliberately absent from this CCX table: no `tx.report` events
+arrive on that backend, so these columns cannot be filled for it. Independent
+airtime evidence does cover its soliciting side: a passive RTL8812CU witness
+measured 1.032 copies/frame with an RTL8812AU responder armed versus 12.948
+with it off at MCS3; at 11M CCK the corresponding values were 1.002/11.908.
+Its dead-peer retry dose response was 0/3/12 -> 1.00/4.00/12.32–12.33 copies/frame.
+The same unit's BlockAck responder was judged without CCX: a Jaguar2
+aggregating TX plus Jaguar1 passive witness measured armed/active-unarmed
+1.001/12.720 copies per payload, with A-MPDU structure present in both arms;
+the armed/active-unarmed control-frame counts were 14402/0 addressed
+BlockAcks (`tests/rtl8733b_blockack_onair.sh`). All are one-RTL8733B bench
+results; details are in `docs/rtl8733b.md`.
+
 The OFF-phase pin is set by `DEVOURER_TX_RETRY_LIMIT` (the matrix runs 12,
-the value the descriptors used to hardcode) — the knob, not a descriptor
-constant, is now the single source of truth for the retry limit on
+the vendor descriptor default) — the knob, not a descriptor constant, is
+the single source of truth for the retry limit on
 jaguar1/2/3 **and Kestrel** (inert on the 8814A die only). On Kestrel it
 rides the AX WD `DATA_TXCNT_LMT` per-frame field, which counts **attempts**
 — devourer folds +1 so N means N retries on every generation. Witness-
@@ -215,8 +228,8 @@ on-air copy (`tests/retry_ladder_probe.sh`, ~99% capture, modal chains):
 | Jaguar3 8812CU @2.4 GHz | MCS3 ×4 → MCS2 → 5.5M → 1M ×3 (CCK floor) |
 | Jaguar3 8812CU, VHT | M7 ×4 → M4 → M1 → M0 → 6M (coarse −3 steps) |
 
-Why the ladder is MCS-native now, what a family-mismatched RA group did
-historically (the 8822C legacy chain, the 8822B VHT wander), the fallback
+Why the ladder is MCS-native, the family-mismatch failure modes it avoids
+(the 8822C legacy chain, the 8822B VHT wander), the fallback
 knob and the rejected floor form are documented at the source of truth:
 `rateid_for_mgn` in `src/RateDefinitions.h` and the `RetryFallback` note in
 `src/DeviceConfig.h` — read those, not a copy here. The closed ARQ loop
@@ -235,8 +248,8 @@ A cell whose responder never armed reads exactly like a broken chip — on=0%
 / off=0% — which is how the 8821AU carried a false "broken" verdict through
 three runs (silently dead responder: stale advisory adapter lock / open
 failure; root-caused with concurrent register peeks off the live armed die,
-`chipstate --no-claim --peek`). The check script now verifies the arm line
-and aborts loudly instead; treat any historical on=0/off=0 row from a
+`chipstate --no-claim --peek`). The check script verifies the arm line
+and aborts loudly; treat an on=0/off=0 row from a
 harness without arm-verification as unmeasured, not broken.
 
 The full responder matrix (six cells, ch36, MCS3 unicast; run with
@@ -251,7 +264,8 @@ nonzero limit for absolute numbers; 8821AU row re-measured ch6):
 | 8821AU | 62% | 0% | works (94% closed-loop at retry 8) |
 | 8812EU | 98% | 0% | works |
 | 8812CU | 69% | 0% | works |
-| 8852CU (Kestrel) | 0% | 0% | not implemented (SetAckResponder is J1/2/3-only) |
+| 8733B | unmeasured | 0% | works (closed-loop 1725/1725 at retry 12; single-shot cell never run) |
+| 8852CU (Kestrel) | 0% | 0% | not implemented on the AX generation |
 
 Unmeasured for lack of plugged hardware: 8821CU / PCIe 8821CE (recipe-shared
 with the 8822B; their `AdapterCaps.ack_responder_ok` stays false-as-unmeasured
@@ -300,8 +314,12 @@ carry this table per die.
    2,048-bit window leaked 2,846 delivered frames out of coverage when a
    stalled spsc-fat pool drained ~3 k frames in one receipt interval; the
    8192 default clears that bench worst case ~2.7×).
-2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1 and
-   Jaguar3** (100% delivery, retries ≈ 0.2–0.3) including retargeting an
+2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1, Jaguar3 and
+   the RTL8733B** (the CCX delivery/retry figures apply to the Jaguars; the
+   one-sample 8733B closes the loop as responder at 1725/1725 and as soliciting
+   TX collapses from 12.948 to 1.032 witnessed copies/frame at MCS3, but has no
+   per-frame report of its own — `docs/rtl8733b.md`)
+   including retargeting an
    arbitrary UE MAC mid-session (re-arm `SetAckResponder`, change the
    descriptor RA — both fully dynamic). Requires a nonzero
    `DEVOURER_TX_RETRY_LIMIT` — the hardware ARQ loop retransmits until ACK

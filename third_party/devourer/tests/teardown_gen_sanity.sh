@@ -24,6 +24,8 @@ DUTS="${DUTS:-J1-8821AU:0x2357:0x0120,\
 J2-8822BU:0x2357:0x012d,\
 J3-8812CU:0x0bda:0xc812,\
 J3-8812EU:0x0bda:0xa81a,\
+RTL8733B:0x0bda:0xf72b,\
+RTL8733B-combo:0x0bda:0xb733,\
 KESTREL:0x35bc:0x0101}"
 
 mkdir -p "$OUT"; rm -f "$OUT"/*.log "$OUT"/asan.* 2>/dev/null || true

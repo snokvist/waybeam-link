@@ -220,8 +220,10 @@ public:
    * a peer TXing to `mac` with normal ack-policy gets hardware
    * retransmissions until the ACK (its tx.report shows retries~0). `mac`
    * must be unicast (I/G clear). Turning a passive monitor into an active
-   * transmitter is opt-in only — never a default. Returns false where
-   * unsupported. Clear = net_type back to No Link. */
+   * transmitter is opt-in only — never a default. Returns false when
+   * unsupported or when arm/verification fails; false is not proof of passive
+   * state, so implementations log if rollback cannot be verified. Clear is a
+   * non-throwing best effort to return net_type to No Link. */
   virtual bool SetAckResponder(const devourer::MacAddr &mac) {
     (void)mac;
     return false;

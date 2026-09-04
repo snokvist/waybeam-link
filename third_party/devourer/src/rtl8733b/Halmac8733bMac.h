@@ -102,6 +102,12 @@ struct MacState {
   bool matches_normal_usb3out() const;
 };
 
+struct AckTimeoutState {
+  uint8_t non_cck = 0;
+  uint8_t cck = 0;
+  bool writes_ok = false;
+};
+
 /* RTL8733B HALMAC 87xx MAC/EFUSE plane: physical OTP, logical-map decode,
  * normal-mode queue/page allocation, protocol/EDCA/WMAC, USB RX-DMA, and TRX
  * lifecycle. The probe and production device deliberately share this path. */
@@ -112,6 +118,11 @@ public:
   bool read_efuse(EfuseInfo &out);
   bool initialize(const EfuseInfo &efuse);
   bool configure_monitor_rx(bool keep_corrupted);
+  /* Program both response-window registers: REG_ACKTO (0x0640) for OFDM/HT
+   * and REG_ACKTO_CCK (0x0639) for CCK. Returns the actual readback plus the
+   * transport-write result for diagnostics; readback is authoritative because
+   * a failed transfer status does not prove that a write missed hardware. */
+  AckTimeoutState set_ack_timeout_us(uint8_t microseconds);
   void stop();
   MacState read_mac_state();
 

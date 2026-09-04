@@ -1,5 +1,7 @@
 #include "Halmac8733bMac.h"
 
+#include "AckResponder.h" /* shared ACK-responder register recipe */
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -636,6 +638,12 @@ void Halmac8733bMac::init_wmac() {
   _device.rtw_write32(kRegMar, 0xffffffff);
   _device.rtw_write32(kRegMar + 4, 0xffffffff);
   _device.rtw_write8(kRegBbpsfCtrl + 2, 0x84);
+  /* Vendor HALMAC values. Rtl8733bDevice overwrites REG_ACKTO from
+   * DeviceConfig::tx::ack_timeout_us right after bring-up
+   * (set_ack_timeout_us) — the same shape Jaguar3 uses against halmac's
+   * per-bandwidth defaults. The vendor write stays here because this MAC plane
+   * is shared verbatim with rtl8733bprobe, which wants the vendor recipe and
+   * carries no DeviceConfig. */
   _device.rtw_write8(kRegAckTimeout, 0x21);
   _device.rtw_write8(kRegAckTimeoutCck, 0x6a);
   _device.rtw_write16(kRegEifs, 0x0040);
@@ -671,6 +679,16 @@ void Halmac8733bMac::init_wmac() {
       static_cast<uint8_t>(_device.rtw_read8(kRegSndPtclCtrl) | (1u << 6)));
   _device.rtw_write32(kRegWmacOption2, 0xb1810041);
   _device.rtw_write8(kRegWmacOption1, 0x18); // 0x98 with early-drop disabled
+}
+
+AckTimeoutState Halmac8733bMac::set_ack_timeout_us(uint8_t microseconds) {
+  const bool non_cck_ok = _device.rtw_write8(kRegAckTimeout, microseconds);
+  const bool cck_ok = _device.rtw_write8(kRegAckTimeoutCck, microseconds);
+  /* Read back both rate families. A successful control transfer alone does
+   * not prove that either register accepted the requested value. */
+  return {.non_cck = _device.rtw_read8(kRegAckTimeout),
+          .cck = _device.rtw_read8(kRegAckTimeoutCck),
+          .writes_ok = non_cck_ok && cck_ok};
 }
 
 void Halmac8733bMac::init_usb() {
@@ -791,6 +809,14 @@ bool Halmac8733bMac::configure_monitor_rx(bool keep_corrupted) {
 }
 
 void Halmac8733bMac::stop() {
+  /* Clear net_type first. The CR write below covers 0x0100-0x0101 only, so the
+   * port-0 net_type field at 0x0102 survives it — and a nonzero net_type is the
+   * whole gate of the hardware ACK engine. Left set, the chip keeps answering
+   * unicast frames with SIFS-timed ACKs after the session that armed it is
+   * gone. Unconditional and sited here so no caller can reach _mac.stop()
+   * without it; a no-op on a session (or on rtl8733bprobe) that never armed. */
+  if (!devourer::ack::disable_verified(_device))
+    _logger->warn("RTL8733B: ACK responder disarm did not latch during stop");
   _device.rtw_write32(kRegRcr, 0);
   _device.rtw_write8(
       kRegTxdmaPqMap,

@@ -955,6 +955,31 @@ static void packetProcessor(const Packet &packet) {
     }
   }
 
+  /* DEVOURER_RX_CONTROL=1 — emit addressed BlockAck frames for
+   * air-side responder qualification. This is deliberately a narrow event,
+   * not DEVOURER_STREAM_OUT=1: the latter mirrors every data body and would
+   * make a saturated A-MPDU witness log unnecessarily huge. BlockAck control
+   * frames have FC subtype 0x94, RA at 4, TA at 10, BA control/start-sequence
+   * at 16/18 and the first 64 bitmap bits at 20. The CRC flag remains in
+   * the event so a harness can refuse corrupt control observations. */
+  static const bool rx_control =
+      std::getenv("DEVOURER_RX_CONTROL") != nullptr;
+  if (rx_control && packet.Data.size() >= 28 &&
+      (packet.Data[0] & 0xfcu) == 0x94u) {
+    const uint16_t ba_ctrl = static_cast<uint16_t>(packet.Data[16]) |
+                             (static_cast<uint16_t>(packet.Data[17]) << 8);
+    const uint16_t start_seq = static_cast<uint16_t>(packet.Data[18]) |
+                               (static_cast<uint16_t>(packet.Data[19]) << 8);
+    devourer::Ev(*g_ev, "rx.blockack")
+        .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+        .f("rate", packet.RxAtrib.data_rate)
+        .f("ctrl", ba_ctrl)
+        .f("start_seq", start_seq)
+        .hex("ra", packet.Data.data() + 4, 6)
+        .hex("ta", packet.Data.data() + 10, 6)
+        .hex("bitmap", packet.Data.data() + 20, 8);
+  }
+
   if (g_rx_count == 1) {
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "demo.first_rx_frame")
