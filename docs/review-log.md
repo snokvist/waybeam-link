@@ -24,6 +24,45 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 200 — the responder's `supported` is a cached answer, not a lockout (2026-09-04)
+
+§15.5's `supported` was specified as "learned at the first arm attempt", and
+`air_radio.cpp` latched it accordingly: `ack_supported` started true and only
+ever fell. That was sound while `devourer::ack::enable()` returned `void` and
+`SetAckResponder` ended in an unconditional `return true` — a `false` could
+then only mean a die that refuses.
+
+The vendor bump to `f86f92d` (devourer #406/#407) changed what `false` means.
+`ack::enable()` is now `bool` and propagates the arm's TRANSPORT status, so a
+single failed USB control write — a 500 µs-to-500 ms window on a shared bus,
+`USB_TIMEOUT` — returns the same `false` as a die that cannot do it at all. It
+is NOT a register readback on the Jaguar dies; upstream declines that until
+each has a bench cell, so there is no second signal to disambiguate with.
+
+Under the old latch that made one bus hiccup permanent: `supported` fell to
+false for the life of the process, §15.5 reported the die as incapable, and
+the POST that exists precisely to re-arm could not clear it. Reachable on a
+deployed craft — `deploy/vehicle-192.168.2.232.json` arms `ack_responder` on
+an 8812EU that is device-verified capable.
+
+Ruled:
+
+1. §15.5 — `supported` is the answer CACHED from the last arm attempt. An
+   operator-commanded `POST {armed:true}` re-tests the die and updates it; the
+   409 reports that attempt's outcome, not a remembered one. The BOOT arm
+   keeps the old behaviour and does not reset anything, because nothing has
+   been learned yet at that point and there is no operator to have asked.
+2. The latch is still what §15.5 reports BETWEEN attempts, and a die that
+   genuinely refuses still reads `supported:false` after its refusal. What
+   changes is only that the state is reachable-out-of, by the one action that
+   already means "try again".
+
+Scope note: this does not make a transient distinguishable from a real
+refusal — it cannot be, from one bit. It makes the operator's retry the
+disambiguator, which is the cheapest thing that works without a devourer API
+change. `air_radio.cpp:310`'s comment already conceded the flag means "not
+known to be unsupported"; it now behaves that way.
+
 ## Pass 199 — a CSA campaign's failure posture is scoped to its INTENT (2026-08-31)
 
 Two operator-visible operations shared one campaign machine and one failure
