@@ -12,6 +12,57 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-04 — the RTL8733BU cannot receive LDPC, and no counter can say so
+
+Operator-flagged, then confirmed in the vendored devourer tree at pin
+`f86f92d`. The RTL8733BU is **BCC-only in both directions**:
+
+- `third_party/devourer/src/rtl8733b/Halmac8733bMac.cpp:752` — "RTL8733B
+  monitor injection is BCC-only", and bring-up **clears `REG_BF_TIMEOUT_EN[9:8]`**,
+  the VHT/HT LDPC global enables, because leaving those firmware-owned bits set
+  can suppress raw HT injection.
+- `.../Rtl8733bDevice.cpp:949` — "The vendor advertises TX-LDPC (but **not
+  RX-LDPC**)"; `GetTxCaps` keeps LDPC false.
+- `.../TxDescriptor8733b.h:48` — `ht_request_supported_8733b()` returns false
+  for `ldpc` or `stbc` outright.
+
+**Why this is a trap rather than a limitation.** The §3.0 Pass 157 guard in
+`io/src/air_radio.cpp` refuses `cfg.ldpc` only when the **TX** die cannot emit
+it (`tc.ldpc_ok`). There is no RX-side equivalent, and there cannot be a local
+one: a ground does not know the craft's coding from its own config. So turning
+`air.ldpc` on at a craft would make every 8733BU ear on every ground go deaf
+with no refusal anywhere in the system.
+
+**And the diagnostic counter is blind on exactly the die that has the problem.**
+`AdapterCaps.ldpc_rx_flag` is false on the 8733B, surfaced as
+`ldpc_flag_ok:false` (`air_radio.cpp:1372`), so its §15.3 `rx_ldpc` reads **0
+whether or not it is decoding LDPC**. The symptom would present as an ear that
+hears the channel at good RSSI and decodes nothing — indistinguishable, from
+the counters alone, from a dead adapter.
+
+**What was added.** `ldpc_deaf_adapter()` in
+`node/include/wblink/node/air_backend.h` uses the **reporting dies as an oracle
+for the blind one**: if any adapter with `ldpc_flag_ok=true` has counted LDPC
+frames, then LDPC is demonstrably on air, and a blind ear's silence is
+unexplained rather than healthy. One latched log line per node. Deliberately
+**not** a refusal and **not** a §15.3 field — it is an observation about what is
+on air, and a die is not proven deaf by a reporting gap (the 8733BU is, by the
+source above, but that is a fact about that die and not about the flag).
+
+**Measured state on 2026-09-04:** LDPC is **off** fleet-wide. `.181`'s
+`craft.json` has no `ldpc` key at all, and `rx_ldpc` is 0 on the 8812CU and
+8812AU — the two ears that can report it — so the warning does not fire today.
+That also means **the fire path is untested on hardware**: the predicate is
+covered by `tests/ldpc_deaf_test.cpp` including a mutation check, but nothing
+has yet observed it trip against a real LDPC craft.
+
+**Open:** whether the fleet ever wants `air.ldpc` on at all. If it does, the
+8733BU stops being a usable ear and that needs to be a deployment rule, not a
+log line — at which point this finding closes with a Pass and, probably, a
+config-time refusal keyed on a declared craft coding.
+
+---
+
 ## 2026-08-31 — the scout dropped a craft it could plainly hear (4/8 -> 8/8)
 
 Craft **19** (`.181`, -50 dBm, 5700 MHz at ~920 permille interference) appeared

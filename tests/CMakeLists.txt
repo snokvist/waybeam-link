@@ -54,6 +54,7 @@ add_wb_test(loopback_test)
 # the ranking is pure and driven from synthetic candidates, so the policy stays
 # covered in builds with no radio backend compiled in at all.
 add_wb_test(adapter_elect_test wblink_io)
+add_wb_test(ldpc_deaf_test wblink_io wblink_node)
 
 add_wb_test(calib_store_test wblink_io)
 add_wb_test(txwedge_test wblink_io)

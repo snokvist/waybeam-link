@@ -1349,39 +1349,58 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
                 "radio: adapter \"" + ad.name + "\": bad channel_mhz " +
                 std::to_string(cfg.adapters[i].channel_mhz));
         }
-        ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
-        // §15.3 (Pass 157): whether this die reports received coding at
-        // all — static per die, so read once here. §15.5 (Pass 172): the
-        // chip generation and fastretune answer are cached from the same
-        // read, so adapter_caps() serves them without touching USB.
-        const devourer::AdapterCaps dcaps = ad.dev->GetAdapterCaps();
-        ad.ldpc_flag_ok = dcaps.ldpc_rx_flag;
-        ad.chip = devourer::generation_name(dcaps.generation);
-        // §15.2 (Pass 195). Copied, not aliased: AdapterCaps hands out
-        // `const char*` into static storage today, but this struct outlives
-        // the caps object and a future per-unit string would dangle.
-        ad.part = dcaps.chip_name != nullptr ? dcaps.chip_name : "";
-        ad.aliases = dcaps.marketing_names != nullptr ? dcaps.marketing_names : "";
-        ad.fastretune_ok = dcaps.fastretune_ok;
-        // §10.5 (Pass 171): whether this die has a TX-power lever at all,
-        // read at the same moment and for the same reason. ANNOUNCED on a
-        // role:"tx" adapter, because the node keeps flying without one (the
-        // 2026-08-14 ruling) and the operator's only other clue would be a
-        // §15.5 field nobody thought to read.
-        ad.power_actuator_ok = ad.dev->GetTxPowerCaps().supported;
-        // The Pass 171 no-actuator ANNOUNCEMENT moved below the §15.2
-        // re-bind (2026-08-14 review): this loop's index is the provisional
-        // unit-to-stanza mapping, so gating on the stanza's role here could
-        // warn about an RX ear while staying silent about the real TX die.
-        // §10.6 (Pass 154): the per-unit identity, read while it is reliably
-        // readable (the accessor folds USB glitches into false — a unit with
-        // no answer has no identity, and callers fail closed on that).
-        uint8_t mac[6];
-        if (ad.dev->GetPermanentMacAddress(mac)) {
-            char buf[18];
-            std::snprintf(buf, sizeof buf, "%02x:%02x:%02x:%02x:%02x:%02x",
-                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-            ad.mac = buf;
+        // §3.0: every call below can THROW out of this frame. devourer's
+        // `UsbTransport::ctrl_read` raises std::ios_base::failure on any
+        // failed control read, so the three capability reads are throw
+        // sites too, not just InitWrite; and devourer #406 added
+        // register-readback gates that raise std::runtime_error — the
+        // RTL8733B ACK-window latch check
+        // (third_party/devourer/src/rtl8733b/Rtl8733bDevice.cpp) runs on
+        // EVERY bring-up here, because we set tx.ack_timeout_us on every
+        // adapter above. `create()` reports failure as a Result, so an
+        // escape past this frame is not a config error the caller can act
+        // on — it is a process abort inside whatever daemon embedded us,
+        // for a USB glitch. Convert it to the same named failure the
+        // bad-channel leg above already returns.
+        try {
+            ad.dev->InitWrite(SelectedChannel{chan, 0, CHANNEL_WIDTH_20});
+            // §15.3 (Pass 157): whether this die reports received coding at
+            // all — static per die, so read once here. §15.5 (Pass 172): the
+            // chip generation and fastretune answer are cached from the same
+            // read, so adapter_caps() serves them without touching USB.
+            const devourer::AdapterCaps dcaps = ad.dev->GetAdapterCaps();
+            ad.ldpc_flag_ok = dcaps.ldpc_rx_flag;
+            ad.chip = devourer::generation_name(dcaps.generation);
+            // §15.2 (Pass 195). Copied, not aliased: AdapterCaps hands out
+            // `const char*` into static storage today, but this struct outlives
+            // the caps object and a future per-unit string would dangle.
+            ad.part = dcaps.chip_name != nullptr ? dcaps.chip_name : "";
+            ad.aliases = dcaps.marketing_names != nullptr ? dcaps.marketing_names : "";
+            ad.fastretune_ok = dcaps.fastretune_ok;
+            // §10.5 (Pass 171): whether this die has a TX-power lever at all,
+            // read at the same moment and for the same reason. ANNOUNCED on a
+            // role:"tx" adapter, because the node keeps flying without one (the
+            // 2026-08-14 ruling) and the operator's only other clue would be a
+            // §15.5 field nobody thought to read.
+            ad.power_actuator_ok = ad.dev->GetTxPowerCaps().supported;
+            // The Pass 171 no-actuator ANNOUNCEMENT moved below the §15.2
+            // re-bind (2026-08-14 review): this loop's index is the provisional
+            // unit-to-stanza mapping, so gating on the stanza's role here could
+            // warn about an RX ear while staying silent about the real TX die.
+            // §10.6 (Pass 154): the per-unit identity, read while it is reliably
+            // readable (the accessor folds USB glitches into false — a unit with
+            // no answer has no identity, and callers fail closed on that).
+            uint8_t mac[6];
+            if (ad.dev->GetPermanentMacAddress(mac)) {
+                char buf[18];
+                std::snprintf(buf, sizeof buf, "%02x:%02x:%02x:%02x:%02x:%02x",
+                              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                ad.mac = buf;
+            }
+        } catch (const std::exception& e) {
+            return Result<RadioAir>::fail(
+                "radio: adapter \"" + ad.name + "\": bring-up failed: " +
+                e.what());
         }
     }
 
