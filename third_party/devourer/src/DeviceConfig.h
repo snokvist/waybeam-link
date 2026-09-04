@@ -216,7 +216,8 @@ struct DeviceConfig {
     /* env: DEVOURER_TX_RETRY_LIMIT — per-frame hardware retry limit (0..63;
      * Kestrel ceiling 62 — its attempts-counting WD field folds +1). Maps to
      * the TX descriptor DATA_RETRY_LIMIT / RTS_DATA_RTY_LMT field on the
-     * 11ac generations and wd_info DATA_TXCNT_LMT on Kestrel. 0 = no retries
+     * 11ac generations and the RTL8733B, and wd_info DATA_TXCNT_LMT on
+     * Kestrel. 0 = no retries
      * (WFB default: FEC provides reliability, not MAC retries). On a busy
      * half-duplex link retries flood the air and blind the receiver.
      * Hardware-ARQ (SetAckResponder + unicast TA, docs/scheduled-mac.md)
@@ -234,16 +235,19 @@ struct DeviceConfig {
      * per-bandwidth vendor value is 117 µs), so it also replaces the
      * per-chip / per-bandwidth vendor defaults (which ranged 33..128 µs
      * and made hardware-ARQ range silently die-dependent). The register:
-     * REG_ACKTO 0x640 on the 11ac generations, R_AX_RSP_CHK_SIG 0xCC00
-     * byte0 on Kestrel; the CTS window (REG_CTS2TO 0x641) is separate and
-     * untouched. Sizing: ~6.7 µs x round-trip km + ~50 µs ACK flight and
-     * detection margin; a longer window is NOT free — every retry of a
-     * LOST frame waits the full window, measured (dead RA, retry 8, max
+     * REG_ACKTO 0x640 on the 11ac generations; RTL8733B programs both 0x640
+     * (OFDM/HT) and its CCK companion 0x639. Kestrel uses
+     * R_AX_RSP_CHK_SIG 0xCC00 byte0. The CTS window (REG_CTS2TO 0x641) is
+     * separate and untouched. Sizing: ~6.7 µs x round-trip km plus ~50 µs
+     * ACK flight/detection margin; a longer window is NOT free — every retry
+     * of a LOST frame waits the full window, measured (dead RA, retry 8, max
      * duty): 2719 write-offs/8 s at 33 µs vs 2015 at 128 vs 1507 at 255.
      * Bench proof the register gates the ARQ verdict: at 8 µs (below the
      * ACK's flight time) retries pin at the limit with 0% ok against a
      * live responder; at 128/255 the responder cell runs 100% ok,
-     * retries ~0. */
+     * retries ~0. RTL8733B CCK direction check (11M, dead RA, retry 8,
+     * max duty, 8 s): 1513 submissions at 33 µs versus 1129 at 200 µs;
+     * this establishes that the CCK window is live, not precise timing. */
     int ack_timeout_us = 128;
     /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
      * fallback ladder with its own floor (the current behaviour, descriptors
@@ -265,7 +269,9 @@ struct DeviceConfig {
      * `tx.report` events. The TX-side link sensor. On the HalMAC chips the
      * descriptor SW_DEFINE also carries a rotating 8-bit tag the report
      * echoes (per-frame correlation). Default off (descriptors
-     * byte-identical). Needs an RX loop to deliver the C2H reports.
+     * byte-identical). Needs an RX loop to deliver the C2H reports. RTL8733B
+     * is an explicit exception: its backend has no H2C/MEDIA_STATUS_RPT path,
+     * warns that the request is unsupported, and emits no `tx.report` events.
      *
      * Value = sampling divisor N: 1 requests a report on EVERY frame, N > 1
      * on every Nth (0..255). The CCX emission path saturates at ~1.3–1.4 k
@@ -386,11 +392,13 @@ struct DeviceConfig {
     /* env: DEVOURER_NB_DAC — 5/10 MHz divider-mapping experiments only.
      * Jaguar3: force the 3-bit DAC-divider code (0x9b4[10:8]). Jaguar2:
      * force the 0x8ac DAC clock field — bits [1:0] -> 0x8ac[21:20],
-     * bit 2 -> 0x8ac[28]. */
+     * bit 2 -> 0x8ac[28]. RTL8733B: force the 0x9b4[10:8] code the
+     * experimental narrowband path writes (stub default 1/2). */
     std::optional<uint8_t> nb_dac;
-    /* env: DEVOURER_NB_ADC — Jaguar2 5/10 MHz: force the 0x8ac ADC clock
-     * field — bits [1:0] -> 0x8ac[9:8], bit 2 -> 0x8ac[16] (divider-mapping
-     * experiments only). */
+    /* env: DEVOURER_NB_ADC — 5/10 MHz divider-mapping experiments only.
+     * Jaguar2: force the 0x8ac ADC clock field — bits [1:0] -> 0x8ac[9:8],
+     * bit 2 -> 0x8ac[16]. RTL8733B: force the 0x9f0[3:0] ADC-clock code
+     * (stub default 0xa/0xb). */
     std::optional<uint8_t> nb_adc;
     /* env: DEVOURER_XTAL_CAP — crystal-cap trim code applied at the end of
      * bring-up (IRtlDevice::SetXtalCap). The CFO lever for narrowband at the

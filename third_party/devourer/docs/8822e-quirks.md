@@ -62,15 +62,15 @@ at ch36 — MCS0/MCS4/MCS7/54M ≈ 5k frames / 12 s at EVM −26/−32/−48/−
 ## TX+RX mode and the path-B TXAGC reference (0x41e8)
 
 Path-B OFDM TXAGC (`0x41e8`) is written unconditionally in every mode,
-including TX+RX. (An earlier structural skip existed because any nonzero write
-appeared to near-deafen the EU's RX. The register is exonerated — a direct A/B
-with per-chain RSSI shows no RX effect from the write — but the historical
-observation was pointing at something real: the static DPDT route disconnects
-RX path B's antenna outright (see the pin-mux section above), and every
-recheck counted TOTAL frames, which chain A dominates —
+including TX+RX. (A nonzero write here can look like it near-deafens the
+EU's RX, which would argue for a structural skip. The register is
+exonerated — a direct A/B with per-chain RSSI shows no RX effect from the
+write — but the observation points at something real: the static DPDT route
+disconnects RX path B's antenna outright (see the pin-mux section above),
+and checks that count TOTAL frames, which chain A dominates —
 `tests/eu_41e8_desense_recheck.sh`'s −2% "noise" verdict and the 24k-frame
-full-duplex proof (`tests/eu_fullduplex_pathb_check.sh`) were both blind to a
-dead chain B. Per-chain RSSI is the only honest RX-health metric on a 2T2R
+full-duplex proof (`tests/eu_fullduplex_pathb_check.sh`) — are both blind to
+a dead chain B. Per-chain RSSI is the only honest RX-health metric on a 2T2R
 part.) Full-duplex holds under the eFEM pin-mux with path-B power applied.
 
 `DEVOURER_TX_WITH_RX=thread` must still be set **before** `InitWrite`

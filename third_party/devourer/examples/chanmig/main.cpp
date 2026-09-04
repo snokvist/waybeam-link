@@ -573,7 +573,11 @@ int main(int argc, char **argv) {
     /* link-derived unicast for the ACK responder */
     devourer::MacAddr am{{0x57, 0x42, 0x75, static_cast<uint8_t>(g_link >> 8),
                           static_cast<uint8_t>(g_link), 0x01}};
-    dev->SetAckResponder(am);
+    if (!dev->SetAckResponder(am)) {
+      logger->error("chanmig: ACK responder arm was refused; aborting drone "
+                    "bring-up instead of running with a silent responder");
+      return 1;
+    }
 
     std::thread rx([&] { dev->StartRxLoop(drone_rx); });
     /* synthetic video pump */

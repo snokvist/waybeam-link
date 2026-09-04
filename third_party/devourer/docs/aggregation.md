@@ -202,7 +202,8 @@ CCX reports: responder ON = 100% delivered at mean 0.4 retries (67%
 first-try); OFF = 0% delivered, every frame pinned at the 12-retry limit. The
 retry distribution is the per-frame TX-side link-quality sensor.
 
-The same responder is a hardware **BlockAck** responder: the MAC's
+On the adapter combinations measured by `tests/ampdu_ba_check.sh`, the same
+responder is a hardware **BlockAck** responder: the MAC's
 immediate-response engine generates a SIFS-timed BlockAck for a received
 A-MPDU addressed to its MACID, on the same MACID + net_type gate. So
 reliable-unicast **ACKed A-MPDU** works end to end — the TX runs `SetAmpduMode`
@@ -212,7 +213,15 @@ aggregates deliver at 100% / mean 0.1 retries and ~27× the throughput of the
 responder-off case (where every aggregate re-airs to the retry limit). The
 `no_ack = true` default is the broadcast/FEC flavor (OpenIPC wfb — no
 responder, no re-air storm); `false` is the reliable-unicast flavor against a
-BA responder.
+BA responder. RTL8733B is also established as the **responder** by the
+CCX-independent `tests/rtl8733b_blockack_onair.sh`: Jaguar2 `0bda:b812` TX,
+RTL8733B `0bda:f72b` responder, and Jaguar1 `0bda:8812` passive witness at
+ch36/MCS3. Armed, 128,702 unique aggregated payloads measured 1.001 witnessed
+copies/frame and the witness decoded 14,402 addressed `0x94` BlockAck frames,
+all with nonzero bitmaps. Active but unarmed, 1,605 payloads measured 12.720
+copies/frame at retry limit 12 and zero matching BlockAcks. Both arms had
+`paggr >= 0.665` and aggregate bursts of 9. RTL8733B's own A-MPDU **TX** path
+remains unported.
 
 Every MAC address in the loop must be **unicast** (I/G bit clear): the
 responder `mac` (an ACK/BlockAck cannot target a group address) and the TX

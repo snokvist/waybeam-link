@@ -56,6 +56,8 @@ public:
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
   SelectedChannel GetSelectedChannel() override;
+  bool SetAckResponder(const devourer::MacAddr &mac) override;
+  void ClearAckResponder() override;
   void SetCcaMode(bool disabled) override;
   void Stop() override;
 

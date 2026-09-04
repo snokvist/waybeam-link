@@ -134,8 +134,10 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
-  if (_cfg.rx.ack_responder)
-    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
+  if (_cfg.rx.ack_responder &&
+      !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
+    throw std::runtime_error(
+        "Jaguar3: configured ACK responder could not be armed");
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ — end of both bring-ups,
                         * like Jaguar2's. */
   if (_cfg.debug.bb_dump) {
@@ -906,8 +908,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                     _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
   }
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
-  if (_cfg.rx.ack_responder)
-    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
+  if (_cfg.rx.ack_responder &&
+      !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
+    throw std::runtime_error(
+        "Jaguar3: configured ACK responder could not be armed");
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
   _logger->info("Jaguar3: ready for TX (monitor inject)");
@@ -2150,12 +2154,32 @@ void RtlJaguar3Device::WriteTsf(uint64_t tsf) {
 }
 
 bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {
+  if (!devourer::ack::is_unicast(mac.data())) {
+    /* A station cannot ACK-target a group address, so this arm could never
+     * fire. Refusing beats returning true for a responder that will read as
+     * silently dead — the shape AdapterCaps.h records from the 8821AU
+     * episode. Only the precondition is enforced here: adopting the shared
+     * readback verify() too wants a bench cell per die, since a family whose
+     * 0x0102 does not read back would start refusing healthy arms. */
+    _logger->error("{}: ACK responder needs a UNICAST MAC (I/G set in "
+                   "{:02x}) — not armed",
+                   "Jaguar3", mac.bytes[0]);
+    return false;
+  }
   /* Hardware ACK responder (src/AckResponder.h): port identity + net_type so
    * the MAC auto-ACKs unicast frames to `mac`. Same registers the proven
    * StartBeacon/AP path programs, minus the beacon machinery. Serialized on
    * _reg_mu like every other register-touching control call. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  devourer::ack::enable(_device, mac.data());
+  if (!devourer::ack::enable(_device, mac.data())) {
+    if (!devourer::ack::disable_verified(_device)) {
+      _logger->error("Jaguar3: ACK responder arm failed and rollback did "
+                     "not latch; hardware state is unknown");
+    } else {
+      _logger->error("Jaguar3: ACK responder arm register write failed");
+    }
+    return false;
+  }
   _logger->info("Jaguar3: hardware ACK responder armed for "
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac.bytes[0], mac.bytes[1], mac.bytes[2], mac.bytes[3],
@@ -2165,7 +2189,10 @@ bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {
 
 void RtlJaguar3Device::ClearAckResponder() {
   std::lock_guard<std::mutex> lk(_reg_mu);
-  devourer::ack::disable(_device);
+  if (!devourer::ack::disable_verified(_device)) {
+    _logger->error("Jaguar3: ACK responder disarm did not latch");
+    return;
+  }
   _logger->info("Jaguar3: hardware ACK responder disarmed (net_type=NoLink)");
 }
 

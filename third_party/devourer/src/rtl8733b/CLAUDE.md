@@ -29,7 +29,7 @@ output.
 Chip-id first: `SYS_CFG2` must read `0x16`. The PID table exists for discovery
 and for one safety property — a device whose PID is a known 8733B identity but
 whose chip-id read fails is **refused**, not allowed to fall through to the
-historical Jaguar1 default. A wrong-HAL bring-up on this part writes an
+Jaguar1 default. A wrong-HAL bring-up on this part writes an
 unrelated register map.
 
 ## Chip facts
@@ -159,21 +159,20 @@ unrelated register map.
   transmitting above its settled level until the loop converges; pacing the
   same stream to tens of ms per frame lands on the settled value. Pace
   single-rate and let it settle before reading any power figure — otherwise
-  the tracking loop is what is being measured. No SDR has been on this part,
-  so the magnitude of the overshoot is not characterized; that is
-  SDR-gated work, not a number to quote.
+  the tracking loop is what is being measured. The magnitude of the
+  overshoot has not been characterized (the SDR campaigns so far ran
+  single-rate, per this very rule); it is not a number to quote.
 - **Thermal is telemetry, like everywhere else.** `InitWrite` logs one
   bring-up snapshot and `GetThermalStatus` serves the caller's own cadence.
   Nothing in the send path reads it: measured at 2.51 ms of a 2.71 ms
   per-frame budget on USB high speed, for a meter that tracks PA bias rather
   than junction temperature.
 
-The timing figures above (84 ms, ~11 fps, 2.51/2.71 ms) come from the single
-validation unit described below and have no in-repo oracle. They are
-register-sequence and USB-transfer costs, which is why they are quotable at
-all — nothing here asserts an RF-domain quantity, because no SDR has been on
-this part. Treat them as the order of magnitude to design against, not as
-constants.
+The timing figures above (84 ms, ~11 fps, 2.51/2.71 ms) come from the original
+`f72b` validation unit and have no in-repo oracle. They are register-sequence
+and USB-transfer costs. Treat them as the order of magnitude to design
+against, not as constants. (RF-domain quantities are measured on the
+`b733` sample — see Validation status.)
 - **EFUSE**: physical packed map walked into a logical map. Running off the end
   of the readable span is address-space exhaustion, not corruption — a fully
   written map has no `0xff` terminator left to find, so that case returns
@@ -241,7 +240,7 @@ untouched) and fall back to the full path.
 
 ## Not ported
 
-`ReadTsf`/beacons, hardware ACK/BlockAck, A-MPDU,
+`ReadTsf`/beacons, A-MPDU, CCX / `tx.report` per-frame TX outcomes,
 `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
 relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
@@ -277,19 +276,137 @@ request the setter refuses loudly instead vanishes without a word. The warning
 sits in `bring_up_to_phy`, not `InitWrite`, so an RX-only session that set the
 knob is told too, and so it fires exactly once per bring-up.
 
+## Hardware ARQ
+
+Two of the three hardware-ARQ knobs are measured true on this die; the third is
+refused loudly because the backend lacks the control path needed to complete
+its diagnosis safely.
+
+The counterparts for everything measured below: **one physical RTL8733B
+unit**, the `f72b` RTL8731BU, an RTL8812AU peer, and an RTL8812CU passive
+witness. The second `b733` sample has not run these cells, no second responder
+die has been cross-checked, and no vendor-driver A/B exists. These are strong
+single-bench results, not population qualification. Witness copy counts are
+conservative observations because a passive monitor can miss airings.
+
+`DeviceConfig::tx::ack_timeout_us` is honoured. The field's contract — range,
+clamp, default, registers and range budget — is doc-commented at its
+declaration in `src/DeviceConfig.h`. What is specific to this backend:
+`init_wmac()` writes vendor defaults first, then `bring_up_to_phy` overwrites
+and verifies both REG_ACKTO 0x0640 (OFDM/HT) and REG_ACKTO_CCK 0x0639. A
+failure or mismatched readback aborts bring-up instead of reporting a partly
+applied range knob. Both registers read back 33 and 200 in direct runs. At 11M
+CCK to a dead RA, retry 8 and maximum duty, an 8-second run submitted 1513
+frames at 33 µs versus 1129 at 200 µs. That establishes the expected timing
+direction; it is not a precise calibration of the register's timebase.
+
+**`SetAckResponder` is ported and measured.** The `src/AckResponder.h` recipe
+applies unchanged — not an assumption, the vendor's own port-0 descriptor names
+these three registers (`hal/rtl8733b/rtl8733b_ops.c` `port_cfg[0]`:
+net_type `REG_CR_8733B + 2` = 0x0102 shift 0, macaddr 0x0610, bssid 0x0618).
+MAC bring-up leaves net_type at No Link because `init_mac` writes only REG_CR's
+low half, which is why a monitor radio here does not ACK.
+
+Three properties of the port worth knowing, none of them local inventions: the
+arm refuses a group MAC and is read back before it is reported, both through
+the shared `ack::is_unicast` / `ack::verify` beside `enable()` — the register
+map lives in one file, so no backend carries a copy that can drift from it. A
+config-driven arm that fails **fails the bring-up** rather than handing back a
+session that quietly answers nothing. And the disarm is unconditional inside
+`Halmac8733bMac::stop()`, not a flag-guarded special case at the device layer:
+`stop()` clears only REG_CR's low half, so net_type at 0x0102 survives it, and
+siting the clear there means no future path can reach `stop()` and leave an
+unowned SIFS-timed transmitter on the air. Verified on air — after an armed
+session ends with `teardown_power_down` off, the peer reads ack_rate 0.00 with
+retries pinned at 12.
+
+Measured against an RTL8812AU soliciting TX (`tests/ack_txreport_matrix.sh`,
+8733B as RESPONDER): armed 1725/1725 reports ACKed at retries_mean 0.00;
+re-armed on a **different** MAC, 1728/1728 again (the address is arbitrary, not
+baked in); disarmed, 0/1723 successful reports with retries pinned at 12.
+
+Soliciting-TX ACK recognition is measured independently.
+`tests/rtl8733b_arq_tx_onair.sh` puts the RTL8733B in the soliciting-TX role,
+the RTL8812AU in the responder role, and uses an RTL8812CU only as a passive
+payload-counter witness. At MCS3, responder on/off produced 1.032/12.948
+copies per observed frame with 99.7/100% coverage. At 11M CCK the result was
+1.002/11.908 with 95.8/92.3% coverage. This proves that the RTL8733B recognizes
+a real ACK and stops autonomous retry in these normal-ACK cells; it does not
+substitute for the unavailable per-frame delivery report.
+
+**BlockAck response is measured without CCX.** Per-frame CCX accounting is not
+a valid retry oracle under A-MPDU (`docs/aggregation.md`), so
+`tests/rtl8733b_blockack_onair.sh` uses a Jaguar2 `0bda:b812` TX, this RTL8733B
+as responder, and a Jaguar1 `0bda:8812` passive witness. At ch36/MCS3 with
+retry limit 12, the fully initialized but unarmed control produced 1,605 unique
+payloads at 12.720 copies/payload and zero matching BlockAck frames; armed
+produced 128,702 at 1.001 plus 14,402 addressed `0x94` BlockAcks, every one
+carrying a nonzero bitmap. Both arms were real A-MPDUs (`paggr` 0.665/1.000,
+max burst 9). The control-frame event checks RA=the Jaguar2 TA and TA=the
+configured RTL8733B MAC, so ambient BlockAcks do not count. This establishes
+the RTL8733B responder on that measured combination only. RTL8733B A-MPDU
+**TX** remains unported and unmeasured.
+
+**`tx.retry_limit` drives real autonomous retransmission** — `tx_retry_limit_ok`
+is true. `tests/rtl8733b_retry_limit_onair.sh` judges from the air because this
+die has no TX-side CCX reports: unicast to an unowned RA ensures no ACK ever
+returns, while a passive monitor counts clean airings per submitted frame. A
+dose-response rather than an on/off pair gives multi-level evidence. The
+harness uses a run-specific unicast SA, counts every clean payload-counter
+event, refuses fewer than three distinct levels or a missing zero baseline,
+and rejects partial runs. Measured 0 -> 1.00, 3 -> 4.00, 12 -> 12.32–12.33
+copies/frame against expected 1 + N, repeatable across a 0/3/12/0/12 ladder.
+The retry-12 shortfall from the ideal 13 may be passive-monitor loss or
+genuinely fewer airings, so the ratio is reported as an observation, not an
+exact hardware count.
+
+**CCX / `tx.report` is NOT ported, and its root cause is unresolved.** The
+descriptor and receive-side investigation narrows the problem but does not
+prove a firmware defect: SPE_RPT is dword2[19] and SW_DEFINE dword6[11:0] via
+the generic halmac
+NIC macros the 8733B maps straight onto (`hal/halmac/halmac_tx_desc_chip.h`
+maps `SET_TX_DESC_{SPE_RPT,SW_DEFINE}_8733B` onto the non-V2 pair, not the
+0x20/0x24 V2 placement), and a probe build confirmed the bit set in a live
+descriptor; the RX side already decodes C2H at the vendor's own dword2[28]
+(`GET_RX_DESC_C2H_8733B`); the delivery path is bulk-IN, which is what the
+vendor uses (its USB interrupt handler is an empty stub behind an undefined
+config); and the vendor's C2H dispatch confirms this firmware speaks the
+fw-offload format `parse_ccx_halmac` already decodes (`C2H_EXTEND` 0xFF +
+sub_cmd 0x0F, `hal/rtl8733b/rtl8733b_cmd.c`). With an RX loop live and 3160
+frames received, the firmware returned **zero** C2H packets in any format —
+with and without a net_type armed, and with the peer both ACKing and silent.
+The leading missing prerequisite is the halmac H2C queue plus a
+MEDIA_STATUS_RPT registering the descriptor MACID with the firmware; this
+backend has no H2C transport. Until that path is implemented and tested, the
+absence of reports cannot be assigned to firmware. The knob warns at bring-up
+rather than stamping descriptors that are not known to produce anything —
+`tx.report` requested on this die is refused out loud, not silently dropped.
+
+Consequence a consumer should plan around: the measured 8733BU can be **either
+end** of a normal-ACK hardware-ARQ link, but it cannot see per-frame delivery.
+`TxReport.state == 1`
+— the retry write-off that says a peer stopped ACKing — is unavailable here, so
+detecting a departed peer needs an application-level timeout.
+
 ## Validation status
 
-Every on-air claim rests on **one** physical unit: a bare unbranded 1T1R
-RTL8731BU module, `0bda:f72b`, cut D, USB high speed, witnessed by an
-RTL8812AU. No SDR was available, so occupied bandwidth, spectral mask, EVM and
-absolute power are unmeasured — which is also why `narrowband_ok` stays false
-despite the 5/10 MHz register sequence reading back. The code is more
-permissive than the cap: `build_tx_block` accepts a 5/10 MHz session width, so
-narrowband is reachable while unadvertised. No `0bda:b733` combo
-module has been seen, no vendor-driver A/B control was obtained, and the bench
-hub could not switch VBUS, so only warm re-init and physical replug were
-tested. The full tested/deferred matrix, the provenance pins and the second
-unit that overheated and was excluded: `docs/rtl8733b.md`.
+On-air claims rest on **two** physical units: the original bare unbranded 1T1R
+RTL8731BU module (`0bda:f72b`, cut D, USB high speed, RTL8812AU witness) and a
+second sample, the LB-LINK BL-M8733BU2-L combo module (`0bda:b733`, also
+cut D), which re-ran the core evidence set — including true VBUS cold boots —
+and agreed everywhere. SDR characterization exists for the b733 unit (on-air
+throughput, occupied bandwidth at 10/20/40 MHz, stitched spectral mask to
+±25 MHz, witness EVM, per-rate level flatness, TSSI-stability soak); absolute
+power remains unmeasured — the bench has no calibrated instrument. **Narrowband is 10 MHz only** (caps
+contract at its declarations in `src/AdapterCaps.h`): SDR OBW plus two-way
+cross-decode with an RTL8812CU narrowband peer on both bands, legacy and HT;
+`WIDTH_5` is refused at `channel_plan` because the 5 MHz BB mode airs no
+packets across the whole DAC/ADC divider code space, with a
+continuous-carrier failure mode observed warm
+(`DEVOURER_NB_DAC`/`DEVOURER_NB_ADC` map the codes for any future attempt).
+No vendor-driver A/B control was obtained (its module does not build on
+modern kernels). The full tested/deferred matrix, the provenance pins and the
+second `f72b` unit that overheated and was excluded: `docs/rtl8733b.md`.
 
 Headless coverage: `tests/rtl8733b_{efuse,phy_table,rx_parse,tx_desc}_selftest.cpp`
 in `ctest`. Hardware: `tests/rtl8733b_lifecycle_soak.sh` (bounded warm

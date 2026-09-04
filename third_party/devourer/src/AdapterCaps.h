@@ -80,7 +80,10 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
    * bw_sup declares BW_CAP_5M|10M); 160 MHz is 8852C-only (rtl8852c_halinit.c
    * bw_sup has BW_CAP_160M, rtl8852b_halinit.c tops at 80) and is OR'd in by
    * the device layer per variant. */
-  return g == ChipGeneration::Rtl8733b ? (kBw20 | kBw40)
+  /* RTL8733B: 10 MHz qualified (SDR OBW + two-way cross-decode with a
+   * Jaguar3 peer, both bands); 5 MHz is refused — its BB small-BW mode airs
+   * no packets on this die (docs/rtl8733b.md "Narrowband status"). */
+  return g == ChipGeneration::Rtl8733b ? (kBw10 | kBw20 | kBw40)
          : g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
@@ -172,12 +175,17 @@ struct AdapterCaps {
    * an earlier "broken" verdict was a harness artifact: the responder's arm
    * was never verified, so a silently dead responder read as on=0/off=0),
    * 8822B, 8812C/8822C, 8812E/8822E (the 8811A rides the 8812 die path and
-   * inherits its row). False-as-unmeasured (the
+   * inherits its row), 8733B (1725/1725 frames ACKed at retries_mean 0.00,
+   * retarget-proof and disarm-proof — tests/ack_txreport_matrix.sh run with
+   * the 8733B as the responder). False-as-unmeasured (the
    * vht_2g4_ok reading: unmeasured, not incapable): the 8821C — it shares
    * the recipe but no 8821CU/CE cell has run. FALSE on Kestrel:
    * SetAckResponder is not implemented on the AX generation.
    * tx_retry_limit_ok: DEVOURER_TX_RETRY_LIMIT drives hardware autonomous
-   * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; Kestrel
+   * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; the 8733B
+   * by airtime dose-response instead, 0/3/12 -> 1.00/4.00/12.32–12.33 airings per
+   * frame, because that die has no CCX path to judge its own frames
+   * (tests/rtl8733b_retry_limit_onair.sh); Kestrel
    * 8832CU witness-measured — the AX WD DATA_TXCNT_LMT field counts
    * ATTEMPTS, folded +1 to the N-retries contract, limits {0,2,8} -> modal
    * on-air copies {1,3,8-9}). FALSE on the 8814A die (the vendor
@@ -210,7 +218,9 @@ struct AdapterCaps {
   int16_t per_pkt_txpwr_min_qdb = 0;  /* most negative per-packet trim */
   int16_t per_pkt_txpwr_max_qdb = 0;  /* most positive per-packet trim */
   bool per_pkt_txpwr_measured = false; /* on-air-confirmed for this family */
-  bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */
+  bool narrowband_ok = false;      /* narrowband BB re-clock exists; which
+                                    * widths via bw_mask kBw5/kBw10 (the
+                                    * RTL8733B is 10 MHz only) */
   uint8_t xtal_cap_max = 0;        /* crystal-cap trim range top (0 = no trim;
                                     * 0x3f on Jaguar1/2, 0x7f on Jaguar3) */
   uint8_t xtal_cap_default = 0;    /* efuse/default crystal-cap code */
