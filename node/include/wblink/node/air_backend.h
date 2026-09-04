@@ -188,6 +188,25 @@ inline bool mcs_trace_enabled() {
     return on;
 }
 
+// §15.3 (Pass 157): the adapter whose silence about received coding is
+// UNEXPLAINED — one that cannot report coding (`ldpc_flag_ok=false`, so its
+// rx_ldpc is 0 by construction) while some adapter that CAN report has
+// actually counted LDPC frames. The reporting dies are the oracle for the
+// blind one: without one of them seeing LDPC there is no evidence LDPC is on
+// air at all, and a blind ear's 0 means nothing either way. Returns nullptr
+// when there is nothing to say. First blind adapter wins — the line names an
+// example, not an inventory.
+inline const AdapterStats* ldpc_deaf_adapter(
+    const std::vector<AdapterStats>& adapters) {
+    bool ldpc_on_air = false;
+    const AdapterStats* blind = nullptr;
+    for (const auto& a : adapters) {
+        if (a.ldpc_flag_ok && a.rx_ldpc > 0) ldpc_on_air = true;
+        if (!a.ldpc_flag_ok && blind == nullptr) blind = &a;
+    }
+    return ldpc_on_air ? blind : nullptr;
+}
+
 struct AirBackend {
     // One owner, held by the contract. Typed views alongside it are NON-owning
     // and exist only for the §15.3 stats fills, which read each backend's own
@@ -712,6 +731,9 @@ struct AirBackend {
     }
     // §9.10: the watchdog runs in the mode loop (it owns the clock); its
     // verdict is grafted onto the TX adapter's stats entry here.
+    // Latch for the §15.3 Pass 157 coding-deafness line below.
+    mutable bool ldpc_deaf_warned = false;
+
     void fill_adapter_stats(StatsSnapshot& snap, uint64_t tsf_fallbacks,
                             bool tx_wedged) const {
         if (udp) {
@@ -798,6 +820,32 @@ struct AirBackend {
             as.tx_wedged = c.tx && tx_wedged;
             as.rx_dead = c.rx_dead;  // §15.3 Pass 101 (RadioAir only)
             snap.adapters.push_back(std::move(as));
+        }
+
+        // §15.3 (Pass 157) coding-deafness warning. `ldpc_flag_ok=false`
+        // means the die cannot REPORT received coding, so its rx_ldpc reads
+        // 0 whether or not it is decoding LDPC — the one counter that would
+        // name the fault is structurally blind on exactly the die that has
+        // it. The dies that CAN report are the oracle for the one that
+        // cannot: if any of them is seeing LDPC-coded frames, then LDPC is
+        // on air, and a blind ear's silence is unexplained rather than
+        // healthy. Stated as an observation, not a verdict — a die is not
+        // proven deaf by a reporting gap, though the RTL8733BU is BCC-only
+        // by construction (devourer clears the HT/VHT LDPC enables at
+        // bring-up) and will not decode it. Latched: one line per node, not
+        // one per stats tick.
+        if (!ldpc_deaf_warned) {
+            const AdapterStats* blind = ldpc_deaf_adapter(snap.adapters);
+            if (blind != nullptr) {
+                ldpc_deaf_warned = true;
+                wb_logf("air: LDPC-coded frames are on air (a reporting "
+                        "adapter counted them), but adapter \"%s\" cannot "
+                        "report received coding — its rx_ldpc=0 is NOT "
+                        "evidence it is decoding them. On the RTL8733BU it "
+                        "is not: that die is BCC-only and will hear nothing "
+                        "while the craft codes LDPC.\n",
+                        blind->name.c_str());
+            }
         }
 #else
         (void)snap;
