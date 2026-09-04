@@ -308,11 +308,19 @@ struct RadioAir::Impl {
     size_t tx_idx = 0;
     bool has_tx = false;  // §3.11 Pass 162: false on the RX-only bring-up
     // §3.0/§15.5 (Pass 198) live responder state. `ack_supported` starts
-    // true and only ever falls: devourer publishes no capability flag for
-    // the responder — `SetAckResponder` answering false at arm time is the
-    // only signal there is — so this reports "not known to be unsupported",
-    // never a static die truth. Main thread only, like every other §15.5
-    // write path (the control server runs inside the event loop).
+    // true and falls on a refused arm: devourer publishes no capability
+    // flag for the responder — `SetAckResponder` answering false at arm
+    // time is the only signal there is — so this reports "not known to be
+    // unsupported", never a static die truth.
+    //
+    // Pass 200: it is a CACHED answer, not a lockout. It no longer only
+    // ever falls — `RadioAir::set_ack_responder(true)`, the §15.5 POST,
+    // resets it before re-testing the die. Since the f86f92d vendor bump
+    // that false also covers a failed USB control write, which on the
+    // Jaguar dies is indistinguishable from a refusal (no readback), so a
+    // latch would have made one bus hiccup a session-long capability loss.
+    // The BOOT arm does not reset it. Main thread only, like every other
+    // §15.5 write path (the control server runs inside the event loop).
     bool ack_armed = false;
     bool ack_supported = true;
     std::string ack_mac;
@@ -1815,6 +1823,17 @@ size_t RadioAir::inject_return(uint16_t dest_originator, const uint8_t* frame,
 }
 
 bool RadioAir::set_ack_responder(bool armed) {
+    // §15.5 (Pass 200): an operator-commanded arm RE-TESTS the die.
+    // `ack_supported` is a cached answer, not a lockout. Since the
+    // f86f92d vendor bump `SetAckResponder` returns false for a failed
+    // USB control write as well as for a die that refuses, and on the
+    // Jaguar dies there is no readback to tell them apart — so without
+    // this reset one bus hiccup would report a capable die as incapable
+    // for the life of the process, with this very call unable to clear
+    // it. Scoped to the §15.5 entry point deliberately: the BOOT arm
+    // (Impl::arm_ack_responder direct, in create()) must NOT reset,
+    // because nothing has been learned yet there and no operator asked.
+    if (armed) impl_->ack_supported = true;
     return impl_->arm_ack_responder(armed);
 }
 
