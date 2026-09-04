@@ -88,9 +88,24 @@ supersession and deadline drops. Repointing `.181` at the common table:
 |---|---|---|
 | `table_version` | 164 | **242** |
 | BEST-EFFORT log lines per latch | 2 | **0** |
-| stream 0 loss | **394 permille** | **6 permille** |
+| stream 0 loss (see caveat) | 394 permille | 6 permille |
 | scout frames per dwell | 242 | **1417** |
 | `announced` in the picker | false (4/8 sweeps listed it) | **true** |
+
+**CAVEAT on that loss row, corrected 2026-08-31 after re-measuring:**
+`/api/v1/health`'s `loss_milli` is CUMULATIVE SINCE LATCH, not instantaneous.
+Both numbers are averages over different windows and are NOT comparable: the
+394 included a long pre-fix period, and the 6 was a short clean window right
+after a fresh latch. Re-measured later with all three crafts airing it read
+373 and then decayed monotonically — 205, 167, 118, 101, 89, 79 — as good
+samples accumulated, which is the signature of a cumulative field, not a
+recovery. Do not quote 394 -> 6 as a steady-state improvement.
+
+The evidence for the fix that does NOT depend on this field, and which stands:
+BEST-EFFORT log lines per latch 2 -> 0 (binary), ARQ/supersession/deadline
+drops re-enabled as a direct consequence, scout frames per FIXED dwell
+242 -> 1417, and `announced` false -> true. See
+[[hub_air_osd_bar_is_a_lifetime_average]] for the same trap in the OSD bars.
 
 So the announce was never a cadence or 8733B-specific defect: at 394 permille
 the craft simply could not get enough frames through for one to land inside a
