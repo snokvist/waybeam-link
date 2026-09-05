@@ -184,7 +184,7 @@ void ControlServer::service(uint64_t now_ms) {
     for (const Conn& c : conns_) {
         fds.push_back(pollfd{c.fd, POLLIN, 0});
     }
-    if (::poll(fds.data(), fds.size(), 0) < 0) {
+    if (::poll(fds.data(), static_cast<nfds_t>(fds.size()), 0) < 0) {
         if (errno != EINTR) {
             return;
         }

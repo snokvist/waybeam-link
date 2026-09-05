@@ -186,7 +186,7 @@ eu | all): `x86-ground` and `rk3566` (aarch64 ground cross) build with
 ~5.7 MB overlay). The default `fleet` trio is 8812AU + 8812CU + 8812EU.
 
 `cmake --build --preset android-arm64` is the **bionic** compile-only gate
-(libraries only — no app, no tests). Two of its cache variables are
+(libraries only — no app, no tests). Three of its cache variables are
 load-bearing, not tidiness: `WBLINK_RADIO=ON` because `io/src/air_radio.cpp`
 is the only TU that hands devourer a cookie stream, so turning the radio off
 stops exercising what the shim exists *for* (since #146 `io/src/log.cpp`
@@ -194,7 +194,23 @@ includes `cookie_stream.h` unconditionally, so the shim itself compiles in
 every config — the radio is what proves it against a real consumer); and
 `WBLINK_WERROR=ON` because without it the preset merely *prints* a portability
 diagnostic into a log dominated by vendored devourer/libusb warnings — a
-human-attention gate, not a build gate. It needs an NDK:
+human-attention gate, not a build gate; and `WBLINK_CONTROL_SERVER=ON`
+because with it OFF the gate skipped `io/src/control_server.cpp` and the
+`#if WBLINK_CONTROL_SERVER` route block in `node/src/rx_node.cpp` entirely.
+That is not hypothetical: `control_server.cpp` was the **only** `poll()` site
+in the tree missing `static_cast<nfds_t>` — the other three carry it — and the
+narrowing sat there uncaught precisely because this preset, the one gate that
+would see it, did not compile the file. **ON is not a superset of OFF** — they
+are mutually exclusive `#if` arms in `node/src/rx_node.cpp`, so the preset
+alone covers one and blinds the other, and OFF is the arm an Android consumer
+actually ships (`examples/node-linkcheck` calls it "the configuration a phone
+builds", and exercises it on glibc only, where an `nfds_t`-class bug cannot
+appear). `scripts/gates.sh` therefore builds this preset **twice**, the second
+time with `-DWBLINK_CONTROL_SERVER=OFF` — the same both-directions rule the
+`reduced` arm follows, and ~28 s for the extra compile-only pass.
+`FRAME_SHM` and `VENC` stay OFF in both because those two plus the control
+server are what gate the TX half of `node/` (`WBLINK_NODE_TX`), which no
+Android consumer links. It needs an NDK:
 `-DWBLINK_ANDROID_NDK=<root>` or env `WBLINK_ANDROID_NDK` /
 `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT`; API 26 + arm64-v8a match
 Waybeam-android's `:wifi`. It exists because `ssc338q` proves ARMv7 and

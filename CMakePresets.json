@@ -99,7 +99,7 @@
     },
     {
       "name": "android-arm64",
-      "displayName": "Android arm64 / bionic (compile-only verify; radio ON and -Werror are load-bearing, see CLAUDE.md)",
+      "displayName": "Android arm64 / bionic (compile-only verify; radio ON, control server ON and -Werror are load-bearing, see CLAUDE.md)",
       "binaryDir": "${sourceDir}/build/android-arm64",
       "toolchainFile": "${sourceDir}/cmake/toolchain-android-arm64.cmake",
       "cacheVariables": {
@@ -109,7 +109,7 @@
         "WBLINK_BUILD_APP": "OFF",
         "WBLINK_BUILD_TESTS": "OFF",
         "WBLINK_FRAME_SHM": "OFF",
-        "WBLINK_CONTROL_SERVER": "OFF",
+        "WBLINK_CONTROL_SERVER": "ON",
         "WBLINK_VENC": "OFF",
         "DEVOURER_LOG_MAX_LEVEL": "WARN"
       }
