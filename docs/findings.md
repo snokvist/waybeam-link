@@ -12,6 +12,64 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-05 — the bionic gate was blind to the control server, and flipping it moved the blind spot
+
+`io/src/control_server.cpp:187` passed `size_t` to `::poll()`, which takes
+`nfds_t` — `unsigned long` on glibc, **`unsigned int` on bionic**. It was the
+only `::poll()` site in the tree without `static_cast<nfds_t>`; `air_udp.cpp:208`
+and `udp.cpp:320`/`362` all carry it. Under `WBLINK_WERROR=ON` it is a hard
+`-Wshorten-64-to-32` error, so a `WBLINK_CONTROL_SERVER=ON` bionic build could
+not complete at all.
+
+**What kept it hidden is the finding, not the cast.** `android-arm64` exists to
+catch exactly this class — `CLAUDE.md` names `nfds_t` narrowing as one of the
+three things it is for — and it set `WBLINK_CONTROL_SERVER=OFF`, so the one
+gate that would have seen the file never compiled it. The cast had been wrong
+for as long as the file has existed.
+
+**The obvious fix moves the blind spot rather than closing it.** Flipping the
+preset to ON covers `control_server.cpp` and the ~600-line `#if
+WBLINK_CONTROL_SERVER` route block in `node/src/rx_node.cpp` for the first
+time — but ON and OFF are **mutually exclusive `#if` arms**, not a superset and
+a subset. Before the flip, `android-arm64` was the only preset anywhere setting
+this variable OFF; after it, nothing built the `#if !WBLINK_CONTROL_SERVER`
+fail-closed arm under bionic, and that arm is the one an Android consumer
+ships (`examples/node-linkcheck` calls OFF "the configuration a phone builds",
+and covers it on glibc only — where an `nfds_t`-class bug cannot occur by
+construction).
+
+Resolved by building the preset **twice** in `scripts/gates.sh`, the second
+pass with `-DWBLINK_CONTROL_SERVER=OFF`. That is the same both-directions rule
+the `reduced` arm already follows for the five feature flags, and for the same
+stated reason: a gate that only ever exercises one direction of a flag cannot
+distinguish a working flag from a typo'd one.
+
+| | measured |
+|---|---|
+| clean `android-arm64` configure+build, bench host | **28 s** |
+| added cost of the second (OFF) arm | one more of the same, compile-only |
+| `#if !WBLINK_CONTROL_SERVER` arm size | 4 lines (`wb_logf` + `return 1`) |
+
+**Open:** the residual risk this closes is small in absolute terms — the OFF
+arm is four lines with no integer conversion in it — so the entry is here for
+the *rule* rather than the bug.
+
+A sweep of all ten presets was done before writing this and found no second
+instance, but the way it nearly produced a false alarm is worth recording.
+Counting explicit `cacheVariables` alone reports every feature flag as
+"one-directional": `CONTROL_SERVER` ON-only, `FRAME_SHM`/`VENC`/`BUILD_APP`
+OFF-only. That reading is wrong, because the four library feature options
+**default ON**, so a preset that omits one is an ON vote that the count cannot
+see, and `gates.sh`'s `reduced` arm already exercises all four in the OFF
+direction. The real gap was narrower than the naive count suggests and than
+this entry's first draft claimed: not "a flag is never built OFF", but **a
+flag is never built OFF *on bionic*** — `reduced` is a host build, so it
+cannot speak for the one target whose type widths differ. The rule to carry
+forward is therefore about the cross of flag direction and *toolchain*, not
+flag direction alone: bionic is the only target here with a distinct `nfds_t`,
+no `fopencookie` and no `shm_open`, so it is the only one where a
+per-configuration blind spot has a class of bug waiting in it.
+
 ## 2026-09-04 — the RTL8733BU cannot receive LDPC, and no counter can say so
 
 Operator-flagged, then confirmed in the vendored devourer tree at pin

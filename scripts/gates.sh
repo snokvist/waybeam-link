@@ -146,8 +146,32 @@ if [ "$QUICK" -eq 0 ]; then
 
     if [ -n "${WBLINK_ANDROID_NDK:-}${ANDROID_NDK_HOME:-}${ANDROID_NDK_ROOT:-}" ]; then
         build_preset android-arm64
+        # BOTH ARMS, for the same reason "reduced" exists above: the two
+        # WBLINK_CONTROL_SERVER states are mutually exclusive `#if` arms in
+        # node/src/rx_node.cpp, not a superset and a subset, so building one
+        # of them is not coverage of the other.
+        #
+        # The preset carries ON because that is the arm with the code in it —
+        # io/src/control_server.cpp plus the ~600-line route block — and
+        # because a narrowing there was invisible until it was compiled
+        # (control_server.cpp passed size_t to poll(), which only bionic
+        # narrows; the preset had ON's opposite and never saw the file). But
+        # OFF is what the Android consumer SHIPS: examples/node-linkcheck
+        # calls it "the configuration a phone builds", and node-linkcheck
+        # exercises it on glibc only, where an nfds_t-class bug cannot appear.
+        # Leaving the preset flipped and stopping there would have moved the
+        # blind spot rather than closed it.
+        #
+        # Cheap enough not to argue about: measured 28 s for a clean
+        # configure+build of this preset on the bench host, and this arm is
+        # compile-only like its twin.
+        run "configure android-arm64 no-control-server" \
+            cmake --preset android-arm64 -B build/android-arm64-nocs \
+            -DWBLINK_CONTROL_SERVER=OFF
+        run "build android-arm64 no-control-server" \
+            cmake --build build/android-arm64-nocs -j "$WBLINK_GATE_JOBS"
     else
-        skip "android-arm64" "set WBLINK_ANDROID_NDK or ANDROID_NDK_HOME"
+        skip "android-arm64{,-nocs}" "set WBLINK_ANDROID_NDK or ANDROID_NDK_HOME"
     fi
 
     # B7 embeddability. Its assertions are configure-time, so configuring IS
