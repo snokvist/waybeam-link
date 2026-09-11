@@ -19,6 +19,9 @@
 #include <thread>
 
 #include "IRadio.h"
+#ifdef DEVOURER_HAVE_MT7612U
+#include "mt7612u/Mt7612uUsbIds.h"
+#endif
 #include "RxPacket.h"
 #include "RxQuality.h"  // §15.3 Pass 158: the vendored fold conventions
 #include "LinkHealth.h"  // §3.16 Pass 159: the vendored verdict thresholds
@@ -82,10 +85,36 @@ uint64_t steady_ms() {
 //
 // A device whose descriptor cannot be read is NOT a candidate: unreadable is
 // not "probably fine" when the next step detaches its kernel driver.
+//
+// The VENDOR gate is where a non-Realtek backend enters. MT7612U is matched by
+// exact VID:PID against devourer's own table (mt7612u::is_usb_id,
+// src/mt7612u/Mt7612uUsbIds.h) rather than by vendor id, and that is NOT a
+// contradiction of the paragraph above: the objection to a PID allowlist was
+// that OUR list would rot as new dongles ship. This list is devourer's, it is
+// the same set its factory dispatches on, and upstream CI diffs it against
+// mt76's (tests/mt7612u_usb_ids_vs_mt76.py) — so a device it does not name is
+// one CreateRadio would refuse anyway.
+//
+// A blanket idVendor == 0x0e8d would be actively wrong here: MediaTek's vendor
+// id also covers the internal combo radios found in laptops (0e8d:0616 on this
+// bench), and making one a candidate points the claim path — which detaches
+// kernel drivers — at the host's own WiFi. The table is disjoint from those,
+// and the interface test below rejects them a second time (they are class 224
+// Wireless, not 0xFF vendor-specific).
+//
+// Compiled in only where the backend is. A build without DEVOURER_MT7612U must
+// not enumerate a radio it cannot drive: the candidate would be claimed, then
+// refused at bring-up, having already taken the device off its kernel driver.
 bool is_radio_candidate(libusb_device* dev) {
     libusb_device_descriptor dd;
-    if (libusb_get_device_descriptor(dev, &dd) != 0 ||
-        dd.idVendor != kRealtekVid) {
+    if (libusb_get_device_descriptor(dev, &dd) != 0) {
+        return false;
+    }
+    bool vendor_ok = dd.idVendor == kRealtekVid;
+#ifdef DEVOURER_HAVE_MT7612U
+    vendor_ok = vendor_ok || mt7612u::is_usb_id(dd.idVendor, dd.idProduct);
+#endif
+    if (!vendor_ok) {
         return false;
     }
     // EVERY configuration, not just the active one. A device that no kernel

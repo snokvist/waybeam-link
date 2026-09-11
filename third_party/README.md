@@ -21,7 +21,9 @@ Build integration (top-level `CMakeLists.txt`, `WBLINK_RADIO=ON`):
 - Chip options match the fleet exactly, selected by `WBLINK_DEVOURER_CHIPS`:
   `fleet` (default) = JAGUAR1 (8812AU) + JAGUAR3_8822C (8812CU) +
   JAGUAR3_8822E (8812EU); `au` / `eu` / `8733b` pin one family for a craft
-  build; `all` adds RTL8733BU to the fleet trio for a ground that may meet any
-  craft. 8814/Jaguar2/Kestrel/PCIe are off in every combination, and the
+  build; `all` adds RTL8733BU **and the MediaTek MT7612U** to the fleet trio
+  for a ground that may meet any craft. MT7612U is reachable only from `all`,
+  so it is compiled for `x86-ground` and `rk3566` and for nothing else — no
+  craft carries one, and it is the only non-Realtek family in the tree. 8814/Jaguar2/Kestrel/PCIe are off in every combination, and the
   top-level CMake **fails** if the vendored tree builds a family that was not
-  asked for.
+  asked for — MT7612U included, which is what keeps it out of the craft images.
