@@ -1,9 +1,9 @@
 #pragma once
 
 /* DeviceConfig — construction-time configuration, passed to
- * WiFiDriver::CreateRtlDevice (defaulted: CreateRtlDevice(handle) gives stock
+ * WiFiDriver::CreateRadio (defaulted: CreateRadio(handle) gives stock
  * behaviour). Fields are fixed for the device's lifetime; knobs that change
- * mid-session are runtime setters on IRtlDevice / the concrete device classes
+ * mid-session are runtime setters on IRadio / the concrete device classes
  * (SetTxMode, SetTxPowerOffsetQdb, SetRxPathMask, SetCcaMode, ...).
  *
  * The example binaries populate this from DEVOURER_* environment variables via
@@ -186,7 +186,9 @@ struct DeviceConfig {
      * responder at the end of bring-up (src/AckResponder.h): the MAC
      * auto-ACKs unicast frames addressed to this MAC while monitor RX and
      * injection continue unchanged. Runtime equivalent: SetAckResponder /
-     * ClearAckResponder. OPT-IN: makes a passive monitor transmit. */
+     * ClearAckResponder. Retargeting hardware responses to a caller-supplied
+     * address is opt-in; some dies, notably RTL8733B, may already answer for
+     * the initialization MAC before this option is set. */
     std::optional<MacAddr> ack_responder;
   } rx;
 
@@ -401,7 +403,7 @@ struct DeviceConfig {
      * (stub default 0xa/0xb). */
     std::optional<uint8_t> nb_adc;
     /* env: DEVOURER_XTAL_CAP — crystal-cap trim code applied at the end of
-     * bring-up (IRtlDevice::SetXtalCap). The CFO lever for narrowband at the
+     * bring-up (IRtlRadio::SetXtalCap). The CFO lever for narrowband at the
      * edge of its budget; unset = efuse/default. Raw code, 0..0x3f (Jaguar1/2)
      * or 0..0x7f (Jaguar3). */
     std::optional<uint8_t> xtal_cap;
@@ -534,6 +536,29 @@ struct DeviceConfig {
      * (DEVOURER_PCIE_BDF) is likewise demo-local, like USB device selection. */
     std::optional<int> rx_poll_us;
   } pcie;
+
+  /* ---- MediaTek MT7612U (DEVOURER_MT7612U builds) ---------------------- */
+  struct Mt7612u {
+    /* env: DEVOURER_MT7612U_FW_DIR — directory holding mt7662_rom_patch.bin
+     * and mt7662.bin. Unset = search /lib/firmware/mediatek then ./firmware.
+     *
+     * A path rather than an embedded blob, unlike every Realtek backend: this
+     * firmware ships in linux-firmware under its own licence rather than being
+     * generated into hal/, and it is zstd-compressed on most distributions, so
+     * it can be neither vendored here nor assumed ready at a fixed path.
+     * Decompress both and point this at the directory.
+     *
+     * Here rather than a getenv inside the backend so the library and the
+     * device class both stay free of ambient process state; the demos fold the
+     * variable in, the way they do for every other knob in this file. */
+    std::optional<std::string> firmware_dir;
+    /* No adapter selector here on purpose. devourer chooses the adapter before
+     * a backend exists (DEVOURER_USB_BUS / _PORT / _VID / _PID) and hands the
+     * backend an already-claimed handle, so a MediaTek-specific selector would
+     * be read by nothing. The C library's own mt7612u_open_selected() is for a
+     * consumer that opens the device itself; MT7612U_DEV drives the bring-up
+     * tool, not devourer. */
+  } mt7612u;
 };
 
 } // namespace devourer

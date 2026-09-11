@@ -46,7 +46,7 @@
 // Locally-administered unicast BSSID (a station cannot unicast-auth to a
 // multicast address — see ap_responder.cpp).
 static const uint8_t kBssid[6] = {0x02, 0x42, 0x75, 0x05, 0xd6, 0x00};
-static IRtlDevice* g_dev = nullptr;
+static IRadio* g_dev = nullptr;
 static std::vector<uint8_t> g_rt;
 static uint8_t g_chan = 36;
 static std::atomic<uint64_t> g_probe{0}, g_auth{0}, g_assoc{0}, g_sent{0}, g_data{0};
@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<devourer::UsbDeviceLock> lk;
   if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lk, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
   g_dev = dev.get();
   if (!g_dev) return 1;
   if (!g_dev->GetAdapterCaps().trigger_ul_ok) {
@@ -446,5 +446,17 @@ int main(int argc, char** argv) {
           (unsigned long long)g_ul.load(),
           (unsigned long long)g_ul_tb.load(), (unsigned long long)g_data.load(),
           (unsigned long long)g_sent.load());
+  /* Retried, and the failure reported. StopBeacon can now genuinely fail (an
+   * EP0 stall during teardown), IRadio.h says such a failure "must be retried
+   * ... before its shared port is reused", and `_exit(0)` below means there is
+   * no destructor coming to try again. A beacon that survives here survives
+   * the process. */
+  if (g_dev) {
+    bool silenced = false;
+    for (int i = 0; i < 3 && !silenced; ++i) silenced = g_dev->StopBeacon();
+    if (!silenced)
+      fprintf(stderr, "WARNING: the beacon could not be stopped - it is still "
+                      "airing; power-cycle the adapter\n");
+  }
   _exit(0);
 }

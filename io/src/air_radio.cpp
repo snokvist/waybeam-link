@@ -18,7 +18,7 @@
 #include <optional>
 #include <thread>
 
-#include "IRtlDevice.h"
+#include "IRadio.h"
 #include "RxPacket.h"
 #include "RxQuality.h"  // §15.3 Pass 158: the vendored fold conventions
 #include "LinkHealth.h"  // §3.16 Pass 159: the vendored verdict thresholds
@@ -179,7 +179,7 @@ struct RadioAir::Impl {
         libusb_context* ctx = nullptr;
         libusb_device_handle* handle = nullptr;
         std::shared_ptr<devourer::UsbDeviceLock> lock;
-        std::unique_ptr<IRtlDevice> dev;
+        std::unique_ptr<IRadio> dev;
         // §10.5 (Pass 169): the actuator's account of the last power write,
         // latched at the apply because that is the moment devourer's rail
         // flags describe. Main-thread-owned — every power write and the §15.5
@@ -1302,7 +1302,7 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
         // bring-up posture stays uniform across the node.
         dc.tuning.disable_cca = cfg.disable_cca;
         WiFiDriver wd(im.logger);
-        ad->dev = wd.CreateRtlDevice(ad->handle, ad->ctx, ad->lock, dc);
+        ad->dev = wd.CreateRadio(ad->handle, ad->ctx, ad->lock, dc);
         if (!ad->dev) {
             const std::string why = "radio: adapter \"" + ad->name + "\" at " +
                                     ad->path + ": unsupported chip";
@@ -2053,7 +2053,7 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
     if (chan == 0) {
         return false;
     }
-    IRtlDevice& dev = *impl_->adapters[adapter]->dev;
+    IRadio& dev = *impl_->adapters[adapter]->dev;
     if (fast && bw == 0) {
         // §11.2 class 0: same-width hop, ~0.5–2.5 ms. FastRetune skips the
         // TXAGC re-apply, so the caller follows up with reapply_tx_power().
@@ -2101,7 +2101,7 @@ bool RadioAir::recover(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz) {
     //   (jaguar3 RtlJaguar3Device.cpp:207), so calling it a second time
     //   destroys a joinable thread and std::terminate()s the process — which
     //   is exactly what the first cut of this function did on the bench. The
-    //   restartable surface devourer documents is StartRxLoop (IRtlDevice.h:58)
+    //   restartable surface devourer documents is StartRxLoop (IRadio.h:64)
     //   plus SetMonitorChannel, and that is what this uses. So this is an
     //   RX-path restart, not the full MAC/PHY bring-up an `ip link down/up`
     //   would give; it is weaker on purpose rather than by omission.

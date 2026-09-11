@@ -94,7 +94,7 @@ class AirIface {
     // pointers would have cost one.
     //
     // Both default to the unbatched behaviour, exactly as devourer defaults
-    // IRtlDevice::send_packets (third_party/devourer/src/IRtlDevice.h) and for
+    // IRadio::send_packets (third_party/devourer/src/IRadio.h) and for
     // the same reason: udp-air and every test double keep working untouched.
     // inject_staged returns 1 if the frame was accepted for submission (a
     // staged frame is not yet on the air); flush_staged returns the number

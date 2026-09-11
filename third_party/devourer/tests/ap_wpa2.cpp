@@ -56,7 +56,7 @@
 
 static const uint8_t kBssid[6] = {0x02, 0x42, 0x75, 0x05, 0xd6, 0x00};
 static const char* kSsid = "devourerAP";
-static IRtlDevice* g_dev = nullptr;
+static IRadio* g_dev = nullptr;
 static std::vector<uint8_t> g_rt;
 static uint8_t g_chan = 6;
 static const char* g_psk = "devourer123";
@@ -400,7 +400,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<devourer::UsbDeviceLock> lk;
   if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lk, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
   g_dev = dev.get(); if (!g_dev) return 1;
   g_rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
   g_dev->InitWrite(SelectedChannel{g_chan, 0, CHANNEL_WIDTH_20});
@@ -423,5 +423,17 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   fprintf(stderr, "sent=%llu 4way_state=%d\n", (unsigned long long)g_sent.load(), g_state);
+  /* Retried, and the failure reported. StopBeacon can now genuinely fail (an
+   * EP0 stall during teardown), IRadio.h says such a failure "must be retried
+   * ... before its shared port is reused", and `_exit(0)` below means there is
+   * no destructor coming to try again. A beacon that survives here survives
+   * the process. */
+  if (g_dev) {
+    bool silenced = false;
+    for (int i = 0; i < 3 && !silenced; ++i) silenced = g_dev->StopBeacon();
+    if (!silenced)
+      fprintf(stderr, "WARNING: the beacon could not be stopped - it is still "
+                      "airing; power-cycle the adapter\n");
+  }
   _exit(0);
 }

@@ -11,7 +11,7 @@ them. Do not reach for a Jaguar file expecting a shared mechanism.
 
 ## HAL layout
 
-`Rtl8733bDevice` (the `IRtlDevice` boundary), `Rtl8733bBringup` (card
+`Rtl8733bDevice` (the `IRadio` boundary), `Rtl8733bBringup` (card
 enable/disable power sequence, system-cfg), `Halmac8733bMac` (MAC init,
 firmware download, EFUSE read + packed-map decode, monitor RX config),
 `Phy8733b` (BB/RF table apply, channel plan, TXAGC, TSSI), plus the header-only
@@ -244,7 +244,7 @@ untouched) and fall back to the full path.
 `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
 relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
-and CCA disable. These inherit `IRtlDevice`'s not-ported defaults (`false`,
+and CCA disable. These inherit `IRadio`'s not-ported defaults (`false`,
 `0`, or a full-path fallback) rather than being faked. `SetCcaMode` is the one
 exception to the silent-default rule: it is pure virtual, so `true` throws
 loudly — without tearing the session down, since an unported optional knob is
@@ -264,7 +264,7 @@ The TX-power knobs are the other exceptions, in the same spirit:
   register carries. (That path has no hardware coverage — every unit seen so
   far is TSSI-offset PG — but it writes no registers, only a log and a reset.)
 - `SetTxPowerIndexOverride` is overridden **solely to log a refusal**. The
-  `IRtlDevice` default returns `void` and ignores the value, so silence would
+  `IRadio` default returns `void` and ignores the value, so silence would
   be the caller's only answer on the one backend where the flat index really is
   unported — a knob that looks granted, in the PR that exists to abolish them.
   `SetTxPowerRateDiffs` needs no such override: its `false` return already says
@@ -282,12 +282,13 @@ Two of the three hardware-ARQ knobs are measured true on this die; the third is
 refused loudly because the backend lacks the control path needed to complete
 its diagnosis safely.
 
-The counterparts for everything measured below: **one physical RTL8733B
-unit**, the `f72b` RTL8731BU, an RTL8812AU peer, and an RTL8812CU passive
-witness. The second `b733` sample has not run these cells, no second responder
-die has been cross-checked, and no vendor-driver A/B exists. These are strong
-single-bench results, not population qualification. Witness copy counts are
-conservative observations because a passive monitor can miss airings.
+The detailed ARQ characterization below used the original `f72b` RTL8731BU,
+an RTL8812AU peer, and an RTL8812CU passive witness. The live responder-disarm
+cell was independently repeated on the `b733` sample by the maintainer and on
+a second vehicle-mounted `f72b`; both agreed. No vendor-driver A/B exists, and
+the other ARQ rows remain single-bench results rather than population
+qualification. Witness copy counts are conservative observations because a
+passive monitor can miss airings.
 
 `DeviceConfig::tx::ack_timeout_us` is honoured. The field's contract — range,
 clamp, default, registers and range budget — is doc-commented at its
@@ -300,12 +301,14 @@ CCK to a dead RA, retry 8 and maximum duty, an 8-second run submitted 1513
 frames at 33 µs versus 1129 at 200 µs. That establishes the expected timing
 direction; it is not a precise calibration of the register's timebase.
 
-**`SetAckResponder` is ported and measured.** The `src/AckResponder.h` recipe
-applies unchanged — not an assumption, the vendor's own port-0 descriptor names
-these three registers (`hal/rtl8733b/rtl8733b_ops.c` `port_cfg[0]`:
+**`SetAckResponder` is ported and measured.** It writes the shared recipe's
+three registers — not an assumed map, since the vendor's own port-0 descriptor
+names them (`hal/rtl8733b/rtl8733b_ops.c` `port_cfg[0]`:
 net_type `REG_CR_8733B + 2` = 0x0102 shift 0, macaddr 0x0610, bssid 0x0618).
-MAC bring-up leaves net_type at No Link because `init_mac` writes only REG_CR's
-low half, which is why a monitor radio here does not ACK.
+Its behavior is deliberately not described as the generic gate story: MAC
+bring-up leaves net_type at NoLink and programs the EFUSE MAC into MACID, and
+NoLink does not make this die passive. The authoritative behavior and numbers
+live in `src/AckResponder.h` and `src/AdapterCaps.h`.
 
 Three properties of the port worth knowing, none of them local inventions: the
 arm refuses a group MAC and is read back before it is reported, both through
@@ -316,14 +319,20 @@ session that quietly answers nothing. And the disarm is unconditional inside
 `Halmac8733bMac::stop()`, not a flag-guarded special case at the device layer:
 `stop()` clears only REG_CR's low half, so net_type at 0x0102 survives it, and
 siting the clear there means no future path can reach `stop()` and leave an
-unowned SIFS-timed transmitter on the air. Verified on air — after an armed
-session ends with `teardown_power_down` off, the peer reads ack_rate 0.00 with
-retries pinned at 12.
+unowned SIFS-timed transmitter on the air. After an armed session ends with
+`teardown_power_down` off, the peer reads ack_rate 0.00 with retries pinned at
+12 — that silence comes from `stop()`'s RCR and CR writes taking the MAC down,
+not from the net_type clear, which is inert on this die (`src/AckResponder.h`
+retarget(), `Rtl8733bDevice::disarm_ack_responder`).
 
-Measured against an RTL8812AU soliciting TX (`tests/ack_txreport_matrix.sh`,
-8733B as RESPONDER): armed 1725/1725 reports ACKed at retries_mean 0.00;
-re-armed on a **different** MAC, 1728/1728 again (the address is arbitrary, not
-baked in); disarmed, 0/1723 successful reports with retries pinned at 12.
+Responder capability and its measured limits live in `src/AdapterCaps.h`
+(`ack_responder_ok`); the arm/disarm recipe and why this die needs a retarget
+live in `src/AckResponder.h` and `Rtl8733bDevice::ClearAckResponder`. Read
+those rather than a copy here. The harness is
+`tests/ack_txreport_matrix.sh` with the 8733B as RESPONDER; its `disarmed`
+phase is the only cell that measures a DISARM (it arms, then disarms mid-run
+via the RTL8733B-only `DEVOURER_ACK_DISARM_AFTER_MS` hook after completed
+bring-up), because its `off` cell never arms at all.
 
 Soliciting-TX ACK recognition is measured independently.
 `tests/rtl8733b_arq_tx_onair.sh` puts the RTL8733B in the soliciting-TX role,

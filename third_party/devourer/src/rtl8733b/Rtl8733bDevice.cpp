@@ -1,9 +1,11 @@
 #include "Rtl8733bDevice.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -179,6 +181,35 @@ void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
       _rx_configured_bw = channel.ChannelWidth == CHANNEL_WIDTH_40 ? 1 : 0;
       if (!_mac.configure_monitor_rx(_cfg.rx.keep_corrupted))
         throw std::runtime_error("RTL8733B monitor RX configuration failed");
+    }
+    /* Measurement-only live disarm. Constructed only after bring-up has
+     * completed under _reg_mu, so even a zero delay cannot clear a cold port
+     * and then be undone by SetAckResponder later in Init. jthread's stop
+     * request bounds normal/exceptional shutdown even for a very long delay. */
+    std::jthread ack_disarm_thread;
+    if (_ack_disarm_after_ms) {
+      const uint32_t delay_ms = *_ack_disarm_after_ms;
+      _ack_disarm_after_ms.reset();
+      ack_disarm_thread = std::jthread(
+          [this, delay_ms](std::stop_token stop) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(delay_ms);
+            while (!stop.stop_requested() &&
+                   std::chrono::steady_clock::now() < deadline) {
+              const auto left = deadline - std::chrono::steady_clock::now();
+              const auto quantum =
+                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                      std::chrono::milliseconds(25));
+              std::this_thread::sleep_for(left < quantum ? left : quantum);
+            }
+            if (stop.stop_requested())
+              return;
+            _logger->info(
+                "DEVOURER_ACK_DISARM_AFTER_MS: disarming RTL8733B ACK "
+                "responder {} ms after completed bring-up",
+                delay_ms);
+            ClearAckResponder();
+          });
     }
     StartRxLoop(std::move(packetProcessor));
   } catch (...) {
@@ -559,7 +590,7 @@ SelectedChannel Rtl8733bDevice::GetSelectedChannel() {
 size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
   const unsigned agg = _cfg.tx.usb_agg_max;
   if (agg <= 1 || !_device.is_usb() || count == 0)
-    return IRtlDevice::send_packets(pkts, count);
+    return IRadio::send_packets(pkts, count);
 
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_phy_ready || !_mac_ready || !_tx_ready) {
@@ -590,7 +621,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
     std::vector<size_t> lens;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       /* A null view is treated exactly like a malformed one: it ends the run
-       * and, if it led, is skipped per the IRtlDevice::send_packets
+       * and, if it led, is skipped per the IRadio::send_packets
        * contract. */
       const uint16_t rlen =
           pkts[i].data == nullptr
@@ -836,9 +867,10 @@ bool Rtl8733bDevice::SetAckResponder(const devourer::MacAddr &mac) {
    * 0), macaddr = REG_MACID_8733B (0x0610), bssid = REG_BSSID_8733B (0x0618)
    * (hal/rtl8733b/rtl8733b_ops.c port_cfg[0], hal/halmac/halmac_reg_8733b.h).
    *
-   * MAC bring-up leaves net_type at 0 (No Link) because init_mac writes only
-   * REG_CR's low half (0x0100-0x0101) — which is why a monitor radio on this
-   * die does not ACK. Flipping the field is the whole gate. */
+   * MAC bring-up leaves net_type at 0 (No Link) but programs the adapter MAC
+   * into MACID. NoLink does not silence this die: the port already answers for
+   * that identity. SetAckResponder applies the shared register recipe while
+   * retargeting MACID; ClearAckResponder must move MACID back. */
   if (!devourer::ack::is_unicast(mac.data())) {
     _logger->error("RTL8733B: ACK responder needs a UNICAST MAC (I/G set in "
                    "{:02x}) — not armed",
@@ -846,7 +878,10 @@ bool Rtl8733bDevice::SetAckResponder(const devourer::MacAddr &mac) {
     return false;
   }
   if (!devourer::ack::enable(_device, mac.data())) {
-    if (!devourer::ack::disable_verified(_device)) {
+    /* enable() writes MACID before its final gate write, so a failure here can
+     * leave the identity ON the responder address — a live responder on this
+     * die. Roll back through the same disarm ClearAckResponder uses. */
+    if (!disarm_ack_responder()) {
       _logger->error(
           "RTL8733B: ACK responder arm failed with hardware state UNKNOWN");
     } else {
@@ -859,7 +894,7 @@ bool Rtl8733bDevice::SetAckResponder(const devourer::MacAddr &mac) {
    * this backend does not report a write it cannot confirm. A failed arm is
    * rolled back and the NoLink gate is read back before false is returned. */
   if (!devourer::ack::verify(_device, mac.data())) {
-    if (!devourer::ack::disable_verified(_device)) {
+    if (!disarm_ack_responder()) {
       _logger->error(
           "RTL8733B: ACK responder verify failed with hardware state UNKNOWN");
     } else {
@@ -877,15 +912,61 @@ bool Rtl8733bDevice::SetAckResponder(const devourer::MacAddr &mac) {
   return true;
 }
 
+/* The disarm, shared by ClearAckResponder and SetAckResponder's rollback.
+ *
+ * BOTH halves are attempted and neither gates the other. The gate write is
+ * kept for the generations where it means something and because leaving
+ * net_type set would be untidy, but on this die it changes nothing: measured,
+ * a never-armed port answers on its own MAC at 85.2 % / 82.5 % against 0.0 %
+ * for an address nobody holds, and an armed one at 83.3 % — so the engine
+ * matches MACID and 0x0102[1:0] is inert. The identity half is therefore the
+ * one that decides anything, and it must not be skipped because a transport
+ * read for the half that decides nothing happened to throw.
+ *
+ * Restores the adapter's own MAC — what initialize()'s program_mac wrote — not
+ * zero: many Realtek MAC TX paths refuse to schedule a frame when the MAC ID
+ * is zero (the T1 canary bug REG_MACID programming exists to fix,
+ * src/jaguar1/HalModule.cpp), and a radio being disarmed live may still be
+ * injecting. _efuse.mac is always valid here: initialize() refuses to bring the
+ * MAC up without mac_valid(), and _mac_ready is set only after that succeeded.
+ *
+ * This returns the port to the state a never-armed session ships in. It does
+ * NOT make it silent — on this die nothing can, short of taking the MAC down —
+ * and the log says so. */
+bool Rtl8733bDevice::disarm_ack_responder() {
+  const bool gate = devourer::ack::disable_verified(_device);
+  if (!gate)
+    _logger->error("RTL8733B: ACK responder gate did not latch closed — "
+                   "continuing to the identity, which is what this die "
+                   "actually matches on");
+  const bool transfer = devourer::ack::retarget(_device, _efuse.mac.data());
+  /* A failed transfer status does not prove the write had no effect. Always
+   * perform the authoritative identity readback rather than short-circuiting
+   * it on `transfer`. */
+  const bool id = devourer::ack::macid_is(_device, _efuse.mac.data());
+  if (!id) {
+    _logger->error("RTL8733B: ACK responder MACID could not be restored — the "
+                   "port may still answer for the responder address");
+    return false;
+  }
+  if (!transfer)
+    _logger->warn("RTL8733B: ACK responder MACID write reported a transport "
+                  "failure, but identity readback confirms the adapter's "
+                  "own address");
+  _logger->info("RTL8733B: hardware ACK responder disarmed (MACID back to the "
+                "adapter's own address; this port answers for that address "
+                "either way on this die)");
+  /* Identity is the measured disarm result on this die. A failed/inert gate
+   * readback is diagnosed above but must not turn a verified identity move
+   * into the contradictory caller result "hardware state UNKNOWN". */
+  return true;
+}
+
 void Rtl8733bDevice::ClearAckResponder() {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_mac_ready)
     return;
-  if (!devourer::ack::disable_verified(_device)) {
-    _logger->error("RTL8733B: ACK responder disarm did not latch");
-    return;
-  }
-  _logger->info("RTL8733B: hardware ACK responder disarmed (net_type=NoLink)");
+  (void)disarm_ack_responder();
 }
 
 void Rtl8733bDevice::SetCcaMode(bool disabled) {
@@ -900,7 +981,7 @@ void Rtl8733bDevice::SetCcaMode(bool disabled) {
   /* `true` (DEVOURER_DIS_CCA) is not ported. The HALMAC 87xx carrier-sense
    * gate has not been located and measured on this part, and this backend
    * does not guess at PHY/MAC writes it cannot read back. Refuse loudly, per
-   * the pure-virtual contract in IRtlDevice — but do NOT tear the session
+   * the pure-virtual contract in IRadio — but do NOT tear the session
    * down: an unsupported optional knob is not a hardware-safety event, and
    * card-disabling here would leave the caller with a dead chip for asking a
    * question. The session stays up with standard carrier-sense. */

@@ -810,11 +810,20 @@ bool Halmac8733bMac::configure_monitor_rx(bool keep_corrupted) {
 
 void Halmac8733bMac::stop() {
   /* Clear net_type first. The CR write below covers 0x0100-0x0101 only, so the
-   * port-0 net_type field at 0x0102 survives it — and a nonzero net_type is the
-   * whole gate of the hardware ACK engine. Left set, the chip keeps answering
-   * unicast frames with SIFS-timed ACKs after the session that armed it is
-   * gone. Unconditional and sited here so no caller can reach _mac.stop()
-   * without it; a no-op on a session (or on rtl8733bprobe) that never armed. */
+   * port-0 net_type field at 0x0102 survives it, and a port left armed would
+   * keep answering unicast frames with SIFS-timed ACKs after the session that
+   * armed it is gone. Unconditional and sited here so no caller can reach
+   * _mac.stop() without it; a no-op on a session (or on rtl8733bprobe) that
+   * never armed.
+   *
+   * The gate is not the whole story on this die — a port whose MACID is still
+   * programmed answers with net_type read back at 0 (see
+   * Rtl8733bDevice::ClearAckResponder for the measurement). This teardown does
+   * not need the identity half that the live disarm adds: the RCR and CR writes
+   * immediately below take the MAC down outright, so nothing is answering
+   * afterwards either way. Left alone deliberately rather than made
+   * symmetric — it would cost every teardown two register writes, including
+   * sessions that never armed, to fix a path that was never broken. */
   if (!devourer::ack::disable_verified(_device))
     _logger->warn("RTL8733B: ACK responder disarm did not latch during stop");
   _device.rtw_write32(kRegRcr, 0);

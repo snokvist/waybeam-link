@@ -12,7 +12,7 @@
 // WHY THE CALLER MUST BRING UP FIRST. The two highest-priority parts,
 // RTL8812EU and RTL8812AU, share USB PID 0x8812 (see
 // third_party/devourer/src/WiFiDriver.cpp): the family is only knowable from
-// SYS_CFG2, read inside CreateRtlDevice, and the EFUSE MAC only during
+// SYS_CFG2, read inside CreateRadio, and the EFUSE MAC only during
 // InitWrite. So an AdapterCandidate can only be filled in AFTER the unit is
 // up — which is why auto rides the Pass 154 claim/bring-up/identify/re-bind
 // sequence rather than adding one of its own.
