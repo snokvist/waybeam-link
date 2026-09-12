@@ -12,6 +12,50 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — the final-jump device run FAILED, and it made "confirmed" a weaker word
+
+Increments 1–3 built and gated clean (39/0/0, 87/87, mutation-tested) and then
+did not survive the bench. Recorded before any of it is believed.
+
+**1. final-jump ground + final-jump craft: the craft accepted NOTHING.**
+Three class-0 campaigns, and `csa_accepted` stayed **0** with every refusal
+counter also 0 — the signature that means the copies never reached `on_csa` at
+all, not that they were declined. The craft was hearing the ground throughout
+(ear rx climbing 87 → 368, `report_latch_holder = 9`). `git diff` over
+`core/src/csa.cpp` shows the change touches ONLY the two kVerify deadline
+branches; the accept path is untouched. **So this is a real regression I have
+not diagnosed**, and the increments are NOT ready.
+
+**2. Bisect: the previous craft build accepted immediately** — `campaign
+confirmed -> 5560`, `csa_accepted 1`, same ground, same channel. So the
+regression is craft-side and arrived with the final-jump build.
+
+**3. But that bisect was ALSO invalid, and the reason matters more than the
+result.** Ground on 5560, craft on 5540: **stranded**. A final-jump ground
+paired with an old craft is exactly the asymmetric case `plan.md` warned about
+— "deleting only the ground's revert would leave a craft that still backs out
+underneath a ground that now holds". Reproduced on hardware. The spec's
+insistence that the two increments deploy together is now evidence-backed
+rather than reasoning.
+
+**4. The trap this exposed, which the spec did not anticipate: removing the
+revert makes `campaign confirmed` a WEAKER claim.** The issuer now reports
+success whether or not the craft followed — that is the intended behaviour, but
+it means the ground's own verdict can no longer be used as the pass criterion
+for any CSA test. `validation.md` asked for "no `selection reverted`", and that
+check would have passed on a stranded pair. **The criterion must be
+CONVERGENCE: read the channel from both control planes and require them equal.**
+Updated there.
+
+**Not invalidated:** the earlier "MT7612U diversity ears break class-0 0/2 vs
+3/3" result used the OLD ground build, which still reverted, so `landed=0` was
+still load-bearing there. That finding stands.
+
+**Bench left clean:** craft rolled back to the counters build (stable,
+instrumented), re-latched, on 5540, transmitting, radios released.
+
+---
+
 ## 2026-09-13 — the 0/4 was STALE CRAFT STATE; with a working baseline, MT7612U ears break CSA 0/2 vs 3/3
 
 The refusal counters (§11.4, this branch) were deployed to craft `.232` and

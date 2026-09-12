@@ -53,6 +53,33 @@ set, or four cross gates skip silently and a skip is not a pass.
 | `retune_all`, 3-ear ground | 1643 ms (41 + 815 + 787, serial) | unchanged in inc 1–4 |
 | Re-acquire after missed jump | full sweep 10.9 s / 33.6 s | ~1 s |
 
+## The pass criterion is CONVERGENCE, not the ground's verdict
+
+Removing the revert means the issuer reports `campaign confirmed` whether or
+not the craft followed. That is intended — but it makes the ground's own
+verdict useless as a test oracle, and the original version of this file got
+that wrong: it asked for "no `selection reverted` in any run", which passes on
+a **stranded pair**. Observed 2026-09-13: ground reported confirmed while
+sitting on 5560 with the craft on 5540.
+
+So every CSA check below reads the channel from BOTH control planes and
+requires them equal:
+
+```
+ground: curl -s :8092/api/v1/stats            | jq .link.channel
+craft:  ssh <craft> curl -s 127.0.0.1:8091/api/v1/stats | jq .link.channel
+```
+
+Plus `csa_accepted` on the craft, which separates "followed" from "never heard
+it". A campaign is a PASS only when both channels match the target AND
+`csa_accepted` advanced.
+
+## Deploy both ends together — now evidence, not reasoning
+
+A final-jump ground against an old craft strands the pair: the ground holds the
+target, the craft backs out to prev. Reproduced on hardware 2026-09-13 while
+bisecting. Never bench a mixed pair and read anything into the result.
+
 ## Traps already paid for
 
 - **Post-diversity loss and picture quality are not evidence** that diversity
