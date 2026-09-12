@@ -509,10 +509,23 @@ struct RadioAir::Impl {
     // §3.0/§15.5 (Pass 198): the ONE place the responder MACID is derived,
     // so the boot arm and a live re-arm cannot drift — §15.5 promises they
     // are byte-identical and this is what makes that true rather than a
-    // claim. Disarm is net_type back to No Link, leaving the MACID standing
-    // (devourer's own recipe, src/AckResponder.h). Returns false only when
-    // arming was REFUSED; a disarm on a die that never armed is a no-op and
-    // still true, because "it is not responding" is the requested state.
+    // claim. Returns false only when arming was REFUSED; a disarm on a die
+    // that never armed is a no-op and still true, because "it is not
+    // responding" is the requested state.
+    //
+    // DISARM IS A REQUEST, NOT A CONFIRMATION, and the 30d248e bump is why.
+    // This used to be "net_type back to No Link, leaving the MACID standing"
+    // — devourer's own pre-#411 recipe. #410/#411 replaced it: the Jaguar
+    // path now restores the captured pre-arm MACID/BSSID and READBACK-VERIFIES
+    // it, refusing an unverifiable clear (RtlJaguarDevice.cpp
+    // disarm_ack_responder). But `IRadio::ClearAckResponder()` is still
+    // `void` and swallows that verdict with `(void)`, so a refused clear is
+    // invisible here: the port can keep SIFS-ACKing the wblink SA while
+    // §15.5 reports ack_armed=false. That is the silently-live-responder
+    // class #410/#411 exist to close, re-opened one interface up — we can
+    // only stop ASSERTING the disarm, not observe it. Raised upstream; the
+    // fix is for ClearAckResponder to return bool.
+    // See also the `false` log line below, which says "requested".
     bool arm_ack_responder(bool armed) {
         if (!has_tx || adapters.empty() || tx_idx >= adapters.size()) {
             return false;
@@ -523,7 +536,11 @@ struct RadioAir::Impl {
             tx.dev->ClearAckResponder();
             ack_armed = false;
             ack_mac.clear();
-            wb_logf("radio: ack responder disarmed on \"%s\"\n",
+            // "requested", not "disarmed": ClearAckResponder is void, so a
+            // readback-refused clear (#411) cannot reach us. Claiming the
+            // stronger word in the log is what would mislead an operator
+            // reading it as proof the port stopped ACKing.
+            wb_logf("radio: ack responder disarm requested on \"%s\"\n",
                     tx.name.c_str());
             return true;
         }
@@ -681,8 +698,14 @@ struct RadioAir::Impl {
             latch_sa(*d);
         }
         // §15.3 Pass 158: fold path-A raw quality (the accumulator skips
-        // rssi_raw<=0 itself; EVM is presence-guarded, SNR is not — §15.3
-        // pins the asymmetry). The −128 EVM rail is a no-stream sentinel,
+        // rssi_raw<=0 itself; EVM and SNR are BOTH presence-guarded as of the
+        // 30d248e bump — `if (snr_raw != 0)`, RxQuality.h — which retires the
+        // asymmetry §15.3 used to pin, and moves snr_mean_raw's denominator
+        // from every frame to SNR-bearing frames only. A die that mixes
+        // reporting and non-reporting frames therefore reads a HIGHER mean
+        // across this bump; on HT-only wblink traffic every frame reports, so
+        // the two denominators coincide and the published value does not
+        // move). The −128 EVM rail is a no-stream sentinel,
         // not a measurement (RxPathActivityAccumulator filters it too) —
         // one railed sample would drag the mean impossibly clean; 0 is the
         // accumulator's own "no EVM" convention. Same acceptance point as
