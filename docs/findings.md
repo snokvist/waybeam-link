@@ -12,6 +12,60 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — `retune_all` is SERIAL: an MT7612U diversity ear breaks CSA node-wide
+
+**Pass 201 scoped the §11.2 constraint to "a ground where MT7612U is the only
+radio", reasoning that a mixed ground puts a Realtek die in both the uplink and
+scout roles. That reasoning is wrong, and this is the correction.**
+
+`AirBackend::retune_all` (`node/include/wblink/node/air_backend.h:605`) is a
+plain sequential `for` over **every** adapter. A campaign's retune cost is
+therefore the **sum across ears, not the uplink's own cost**. Measured on the
+mixed ground, one class-0 campaign:
+
+```
+auto0-8812au   retune -> 5560 took  41 ms (fast path)
+auto1-mt7612u  retune -> 5560 took 815 ms (full path)
+auto2-mt7612u  retune -> 5560 took 787 ms (full path)
+csa: commit -> 5560 MHz
+```
+
+**1643 ms against a 300 ms class-0 budget — 5.5× over**, on a ground whose
+uplink retunes in 41 ms. An MT7612U used purely as a diversity RX ear, which is
+the configuration this branch is actually for, costs the node ~800 ms per
+campaign.
+
+**The consequence is now ISOLATED, which it was not before.** A single-adapter
+8812AU ground (no MediaTek in the node at all) versus the mixed ground, same
+craft, same campaign:
+
+| ground | retune_all | armed | **landed** | video | acquire |
+|---|---|---|---|---|---|
+| 8812AU + 2× MT7612U | ~1643 ms | 1 | **0** | 0 | parks |
+| 8812AU alone | 41 ms | 1 | **1** | 0 | **campaign confirmed** |
+
+`landed` flips 0 → 1 purely by removing the MediaTek ears. That is Pass 201's
+predicted effect, observed. The acquire campaign likewise *confirms* on the
+clean ground where every contaminated one parked — so the earlier reading that
+"`acquire ABORTED (no CSA_ARMED)` is expected for an acquire" was also wrong.
+
+**Why this took three attempts to see: every previous "8812AU control" was
+contaminated.** They all used the auto config, which brings up all three
+radios — so the control node still contained the two MT7612U ears dragging
+`retune_all` to 1.6 s. A control has to remove the variable from the NODE, not
+just from the uplink role. See
+[[feedback_a_probe_whose_negative_arm_passes_is_a_broken_probe]].
+
+**Still unexplained, and NOT MT7612U-related: `video=0`.** Even the clean
+8812AU ground reverts, because no video arrives on the new channel
+(`armed=1 landed=1 video=0`). The craft is healthy throughout (rssi −55,
+19 Mbps, 0 % loss, mode wblink). Not observable from the ground: the craft logs
+no CSA events to `/tmp/waybeam.log` and its `:8091` is not listening, so
+whether it follows the CSA cannot be confirmed from here. That is the next
+thing to instrument, and it is what still blocks any `dt_to_switch_ms` work.
+
+---
+
 ## 2026-09-12 — MT7612U retune MEASURED at 789 ms; the class-0 overrun is real, its consequence is not isolated
 
 Pass 201 asserted the §11.2 class-0 overrun from devourer's documented 526 ms.

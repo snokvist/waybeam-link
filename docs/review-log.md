@@ -50,11 +50,16 @@ and the spec must say so rather than let a campaign be issued that cannot land
 — the failure presents as a reverted CSA with the craft already committed, not
 as an error.
 
-Scope of the consequence. The scout roams the **uplink adapter only**
-(`scout_idx = tx_index()`), and the §15.2 election ranks an unlisted part last,
-so on a mixed ground the scout and the class-0 issuer are both Realtek and
-neither is affected. The constraint binds a ground where MT7612U is the
-**only** radio.
+Scope of the consequence — **broader than the uplink role**. The scout roams
+the uplink adapter only (`scout_idx = tx_index()`) and the §15.2 election ranks
+an unlisted part last, so SCOUTING on a mixed ground is unaffected. **CSA is
+not**: `AirBackend::retune_all` is a sequential loop over every adapter, so a
+campaign's retune cost is the SUM across ears, not the uplink's own. Measured
+2026-09-13 on a mixed ground — 8812AU 41 ms + MT7612U 815 ms + MT7612U 787 ms =
+**1643 ms against a 300 ms class-0 budget, 5.5× over, with a 41 ms uplink**.
+An MT7612U used purely as a diversity RX ear — the configuration this branch
+exists for — therefore puts every §11.2 campaign on the node out of contract.
+An earlier draft of this Pass claimed a mixed ground was unaffected; it is not.
 
 Device-verified 2026-09-12, both configurations (findings.md same date). As a
 diversity ear: three ears, `diversity/uniq` 2.00, 0‰ post-diversity loss over
@@ -84,9 +89,17 @@ control reverts too: an 8812AU uplink retuning in **41 ms**, an order of
 magnitude inside the budget, produced the identical signature 0/2. So the
 revert has another cause and masks the timing effect.
 
-The rule above therefore stands on the ARITHMETIC — a 789 ms blocking retune
-cannot land inside a 300 ms deadline — and explicitly not on an observed
-campaign failure. Separately: class-0 campaigns currently land 0/4 across two
+**The effect is now OBSERVED and isolated** (2026-09-13). Against a
+single-adapter 8812AU ground with no MediaTek in the node at all, same craft and
+campaign: `landed` flips **0 → 1** purely by removing the MT7612U ears, and the
+acquire campaign *confirms* where every mixed ground parked. Earlier controls
+all used the auto config and so still contained those ears — the variable has to
+leave the NODE, not just the uplink role.
+
+A separate failure survives on the clean ground (`armed=1 landed=1 video=0`):
+no video arrives on the new channel, the craft is healthy throughout, and it is
+not MT7612U-related. That one is unexplained and is what still blocks any
+`dt_to_switch_ms` work. Separately: class-0 campaigns currently land 0/4 across two
 dies and two crafts on this bench against 26/26 historically, which is a
 regression or a bench change independent of this branch, and which blocks
 validating any `dt_to_switch_ms` widening (a timing fix cannot be verified

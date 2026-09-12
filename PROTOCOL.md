@@ -3914,9 +3914,13 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   the class-1 budget — it exceeds both. It is
   therefore supported as a diversity RX ear — where it never issues or follows
   a campaign on its own clock — and a node on which it is the **only** radio
-  cannot meet class-0 timing. The §15.2 election ranks an unlisted part last
-  and the scout roams the uplink adapter only, so a mixed ground puts a Realtek
-  die in both roles and is unaffected. Device-verified 2026-09-12: an
+  cannot meet class-0 timing. The §15.2 election ranks an unlisted part last and the
+  scout roams the uplink adapter only, so SCOUTING on a mixed ground is
+  unaffected — but **CSA is not**: `retune_all` walks every adapter in sequence,
+  so a campaign's retune cost is the SUM across ears. A ground with one 41 ms
+  Realtek uplink and two 800 ms MT7612U diversity ears measured **1643 ms**, 5.5×
+  the class-0 budget. A slow die anywhere in the node puts every campaign on that
+  node out of contract, not merely a slow uplink. Device-verified 2026-09-12: an
   MT7612U-only ground does scout, latch and receive (`diversity/uniq` 1.00,
   1‰ post-diversity loss); the measured penalty is a 25-channel sweep of
   33.6 s against 10.9 s on a Realtek uplink. The cross-channel class-0 overrun
