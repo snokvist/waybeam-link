@@ -70,8 +70,17 @@ endif()
 # ANDROID_NDK_HOME can otherwise silently build against a different NDK than
 # Waybeam-android pins. Lives here, not in the toolchain file: that file is
 # re-processed by every try_compile, which emitted the warning 18 times.
+#
+# The pin moved 26.3.11579264 -> 27.3.13750724 with the 30d248e devourer
+# re-vendor, and this one is a FLOOR, not a preference: devourer #410/#411 use
+# std::jthread, and NDK 26.3's libc++ ships no <stop_token> header at all, so
+# r26 cannot build the vendored tree by any flag. Waybeam-android's :wifi has
+# to make the same move before it bumps its devourer — and sooner than this
+# gate suggests, because :wifi builds WBLINK_DEVOURER_CHIPS=all, which compiles
+# the RTL8733B backend that #410 touched; the default `fleet` used here does
+# not. See third_party/README.md and OpenIPC/devourer for the upstream report.
 if(ANDROID)
-    set(WBLINK_ANDROID_NDK_PIN "26.3.11579264")
+    set(WBLINK_ANDROID_NDK_PIN "27.3.13750724")
     if(EXISTS "${WBLINK_ANDROID_NDK}/source.properties")
         file(STRINGS "${WBLINK_ANDROID_NDK}/source.properties" _wblink_ndk_rev
              REGEX "^Pkg\\.Revision *=")
@@ -80,7 +89,8 @@ if(ANDROID)
                 "NDK at '${WBLINK_ANDROID_NDK}' is ${_wblink_ndk_rev}, not the "
                 "${WBLINK_ANDROID_NDK_PIN} that Waybeam-android's :wifi pins. "
                 "The bionic gate still runs, but parity with the consumer is "
-                "not guaranteed.")
+                "not guaranteed. Below r27 it will not build at all — see the "
+                "std::jthread note above.")
         endif()
     endif()
 endif()
@@ -214,6 +224,26 @@ if(WBLINK_RADIO)
     set(DEVOURER_PCIE          OFF)
     add_subdirectory(third_party/devourer
                      ${CMAKE_CURRENT_BINARY_DIR}/devourer EXCLUDE_FROM_ALL)
+
+    # bionic needs libc++'s experimental bucket to see std::jthread.
+    #
+    # devourer's RTL8733B (#410) and Jaguar1 (#411) ACK-disarm paths use
+    # std::jthread / std::stop_token. Those are C++20 and devourer asks for
+    # cxx_std_20 — but libc++ ships them as INCOMPLETE: __config defines
+    # _LIBCPP_HAS_NO_EXPERIMENTAL_STOP_TOKEN unless _LIBCPP_ENABLE_EXPERIMENTAL
+    # is set, and __thread/jthread.h is guarded on it, so <thread> declares no
+    # jthread at all. The standard level is not the lever here; the bucket is.
+    #
+    # NDK 26.3 cannot be fixed this way — it has no <stop_token> header at all,
+    # which is why the bionic gate now needs r27+. libstdc++ has had jthread
+    # since GCC 10, so every other target is unaffected and this stays scoped
+    # to ANDROID.
+    #
+    # From our CMakeLists and target-scoped, per third_party/README.md: the
+    # vendored tree is never patched; portability is handled by how we build it.
+    if(ANDROID)
+        target_compile_options(devourer PRIVATE -fexperimental-library)
+    endif()
 
     # Prove the normal variables above were actually honoured. They rely on
     # CMP0077 being NEW inside the vendored tree, which is true only while its

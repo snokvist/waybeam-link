@@ -48,6 +48,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "caps_event.h"
 #include "chanmig/ChannelDef.h"
 #include "chanmig/ChannelEvents.h"
@@ -94,9 +95,13 @@ static void packetProcessor(const Packet &packet) {
     return;
   g_rx_count.fetch_add(1, std::memory_order_relaxed);
   const auto &a = packet.RxAtrib;
-  const uint32_t air = cm::frame_airtime_us(
-      a.data_rate, static_cast<uint32_t>(packet.Data.size()), a.bw,
-      a.sgi != 0);
+  /* Airtime is what occupied the channel, and the FCS was transmitted even
+   * where the MAC strips it before DMA - so add it back when the buffer does
+   * not carry it, or occupancy reads 4 bytes light on every frame. */
+  const uint32_t on_air_len =
+      static_cast<uint32_t>(packet.Data.size()) + (a.fcs_present ? 0u : 4u);
+  const uint32_t air =
+      cm::frame_airtime_us(a.data_rate, on_air_len, a.bw, a.sgi != 0);
   const bool ours = packet.Data.size() >= 16 &&
                     std::memcmp(packet.Data.data() + 10, kDvrSa, 6) == 0;
   std::lock_guard<std::mutex> lk(g_agg_mu);
@@ -273,7 +278,7 @@ int main() {
   session.adopt_lock(usb_lock);
 
   WiFiDriver driver(logger);
-  auto owned_device = driver.CreateRtlDevice(handle, ctx, usb_lock,
+  auto owned_device = driver.CreateRadio(handle, ctx, usb_lock,
                                              devourer_config_from_env());
   if (!owned_device) {
     logger->error("No driver for this chip in this build — exiting");
@@ -282,7 +287,7 @@ int main() {
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
   devourer::emit_adapter_caps(*g_ev, dev);
   const devourer::AdapterCaps caps = dev->GetAdapterCaps();
 
@@ -360,9 +365,13 @@ int main() {
   cm::ScanScheduler sched(cfg);
 
   /* --- RX loop on a worker thread (rxdemo sweep pattern) --- */
-  IRtlDevice *devp = dev;
+  IRadio *devp = dev;
+  IRtlRadio *const rtl = dynamic_cast<IRtlRadio *>(dev);
+  if (!rtl)
+    logger->warn("chanscout: frame-free FA/CCA/NHM is Realtek-only (IRtlRadio) "
+                 "— dwells carry frame stats only on this radio");
   const cm::ScanScheduler::DwellPlan first = sched.next(steady_ms());
-  std::thread rx([devp, first, &logger]() {
+  std::thread rx([devp, rtl, first, &logger]() {
     try {
       devp->Init(packetProcessor, first.def.to_selected());
     } catch (const std::exception &e) {
@@ -506,7 +515,8 @@ int main() {
      * frames that raced in from the previous channel. */
     if (!nap_ms(cfg.settle_ms))
       d.flags |= cm::kFlagTruncated;
-    (void)devp->GetRxEnergy(/*with_nhm=*/false);
+    if (rtl)
+      (void)rtl->GetRxEnergy(/*with_nhm=*/false);
     {
       std::lock_guard<std::mutex> lk(g_agg_mu);
       g_agg = ScoutAgg{};
@@ -516,7 +526,7 @@ int main() {
     if (!nap_ms(cfg.dwell_ms))
       d.flags |= cm::kFlagTruncated;
 
-    RxEnergy e = devp->GetRxEnergy(/*with_nhm=*/true);
+    RxEnergy e = rtl ? rtl->GetRxEnergy(/*with_nhm=*/true) : RxEnergy{};
     ScoutAgg agg;
     {
       std::lock_guard<std::mutex> lk(g_agg_mu);

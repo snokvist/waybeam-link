@@ -352,7 +352,7 @@ class RadioAir : public AirIface {
         // flushes: a HAL that clamps descriptors per bulk window (Jaguar1
         // takes 1) splits one flush across several URBs, and a flush counter
         // would report packing that never happened. 0 on a backend whose
-        // device reports no TxStats (IRtlDevice's default) — read a zero as
+        // device reports no TxStats (IRadio's default) — read a zero as
         // "not reported", never as "no transfers".
         uint64_t tx_bulk = 0;
         uint64_t tx_bulk_failed = 0;

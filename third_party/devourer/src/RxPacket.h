@@ -19,9 +19,32 @@ enum class RX_PACKET_TYPE
     C2H_PACKET
 };
 
+/* How much of an rx_pkt_attrib's signal block a PHY-status report actually
+ * filled. Reports are paged/typed per generation — a CCK page carries only
+ * path-A power, while the per-stream EVM/SNR and the CFO tail live on one OFDM
+ * page only — so a plain bool cannot tell a caller which of the fields below
+ * are a measurement and which are still zero. Feeding an unfilled field into a
+ * running average is not a null operation: it drags the mean toward zero. */
+enum class PhyStsFill : uint8_t
+{
+    None,  /* nothing filled: no report, too short, or a layout not decoded */
+    Power, /* per-path RSSI, plus ldpc/stbc/bw on an OFDM page */
+    Full   /* Power, plus per-stream EVM/SNR and the path-A CFO tail */
+};
+
 struct rx_pkt_attrib
 {
     uint16_t pkt_len;
+    /* RX-descriptor PHY-status bit: the PHY wrote a status report into THIS
+     * frame's drvinfo area. It is the RAW descriptor bit on every generation
+     * that decodes it (Jaguar1, Jaguar2, Jaguar3, RTL8733B) — deliberately NOT
+     * "the report parsed" and NOT "the signal fields below are valid", since a
+     * parser can still decline an unrecognised page (that is PhyStsFill's job,
+     * kept in a local at the parse site). The drvinfo area is reserved on every
+     * frame (RX_DRVINFO_SZ is a global register), so this bit is the only thing
+     * separating a written report from stale bytes left by an earlier frame —
+     * notably on all-but-one subframe of an A-MPDU. Never set on Kestrel, whose
+     * PHY status arrives as its own PPDU-status frame rather than in drvinfo. */
     bool physt;
     uint8_t drvinfo_sz;
     uint8_t shift_sz;
@@ -67,7 +90,7 @@ struct rx_pkt_attrib
     /* Path-A CFO tail from the OFDM phy-status (signed HW units; kHz = raw *
      * 2.5, phydm CFO_HW_RPT_2_KHZ). The carrier-frequency offset between this
      * receiver's crystal and the transmitter's — the closed-loop CFO tracker's
-     * input (see IRtlDevice::SetXtalCap). 0 when the phy-status carries none. */
+     * input (see IRtlRadio::SetXtalCap). 0 when the phy-status carries none. */
     int8_t cfo_tail = 0;
     /* A-MPDU RX markers. paggr: this MPDU arrived inside an aggregated PPDU
      * (rx-desc PAGGR — 8812 dword1[15], same position in the halmac layout).
@@ -83,18 +106,39 @@ struct rx_pkt_attrib
      * format. 0xff on pre-AX generations (their descriptors carry no such
      * field). */
     uint8_t ppdu_type = 0xff;
+    /* Whether Data still carries the trailing 4-byte FCS.
+     *
+     * True on every Realtek generation, because each sets the MAC's append-FCS
+     * bit at init (RCR_APPFCS on Jaguar1/2, bit 31 of RCR on Jaguar3 and
+     * 8733B, B_AX_APPEND_FCS on Kestrel), so the RX descriptor's PKT_LEN
+     * already counts those four bytes and the parser slices them in.
+     *
+     * False on MediaTek MT7612U: that MAC strips the FCS, and the four bytes
+     * following the MPDU are the FCE info trailer, not a checksum (CRC-32
+     * matched them on 0 of 4263 measured frames — docs/mt7612u.md). A consumer
+     * that removes four bytes there deletes real payload.
+     *
+     * Defaulted true so a parser that does not set it keeps the historical
+     * contract; adding this therefore changes nothing for existing backends.
+     * It is per-frame rather than an AdapterCaps entry because the consumers
+     * that need it — devourer::bf::parse_report() above all — are free
+     * functions handed a pointer and a length, with no device in reach. */
+    bool fcs_present = true;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 
 struct Packet
 {
     rx_pkt_attrib RxAtrib;
-    /* Full 802.11 frame including the trailing FCS. Every Realtek RX parser
-     * follows this contract; consumers remove the FCS at their protocol
-     * boundary rather than making the frame length chip-specific. Retaining it
-     * also lets DEVOURER_RX_KEEP_CORRUPTED and fused-FEC salvage inspect a
-     * failed frame, while tools/bf_report_decode.py trims the trailing four
-     * bytes when decoding beamforming reports. */
+    /* The 802.11 frame. It carries the trailing FCS when
+     * RxAtrib.fcs_present is set, which is the case on every Realtek
+     * generation; a consumer that strips four bytes MUST check that flag
+     * rather than assume, because the MediaTek backend delivers no FCS.
+     * Keeping the FCS where the hardware supplies it lets
+     * DEVOURER_RX_KEEP_CORRUPTED and fused-FEC salvage inspect a failed frame,
+     * and tools/bf_report_decode.py trims those four bytes when decoding
+     * beamforming reports (it reads the `fcs` field of the bf.report_raw
+     * event to know whether to). */
     std::span<uint8_t> Data;
 
     /* The transmitter's hardware TX-egress TSF, when the frame carries one.

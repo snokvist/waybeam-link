@@ -2780,7 +2780,7 @@ stock Realtek `PHY_REG_PG.txt` power-by-rate format (`docs/groundwork.md §14`).
   `SetTxPowerOffsetQdb()` / `SetTxPowerIndexOverride()` at the MCS-change commit
   (§9.5), never per frame.
 - **Per-adapter, NOT fleet-global.** Each physical adapter is a separate devourer
-  `IRtlDevice` with its own efuse calibration / antenna / role; power is set on
+  `IRadio` with its own efuse calibration / antenna / role; power is set on
   each device individually and the correct value differs per adapter. The power
   dimension is indexed by **(adapter × MCS)**. (This matters only where a node has
   multiple TX adapters — i.e. ground; the craft has one.)
@@ -3321,7 +3321,7 @@ EFUSE shows both values in the same map: the 6-byte MAC at logical offset
 what the kernel driver writes to the netdev, and what gives Linux its stable
 `wlx<mac>` interface name — while the USB serial string descriptor at `0x174`
 is the constant `"123456"` above. Upstream devourer #383 exposes it
-(`IRtlDevice::GetPermanentMacAddress`, validity = neither all-0xFF nor
+(`IRadio::GetPermanentMacAddress`, validity = neither all-0xFF nor
 all-zero) and #384 fixes the Jaguar3 logical-map walk that decoded
 append-ordered 8822C maps as 0xFF. `docs/devourer-mac-identity.md`'s upstream
 request is fulfilled; tier 1 above is the derived identity it anticipated,
@@ -6835,7 +6835,7 @@ local-ingress polling interval.
 
 **Bench gates (must pass before the dependent design is trusted):**
 
-1. **One injecting `IRtlDevice` + N monitoring siblings in one process**
+1. **One injecting `IRadio` + N monitoring siblings in one process**
    (per-adapter `libusb_context` + thread). *Multi-adapter RX is already proven at
    N=3 (RX-only) in Waybeam-android `:wifi`; the residual unknown is the injector +
    monitors mix* — ground's designated-NACK-TX among RX siblings, and the craft's

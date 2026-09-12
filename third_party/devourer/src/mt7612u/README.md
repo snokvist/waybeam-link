@@ -1,0 +1,177 @@
+# src/mt7612u — MediaTek MT7612U
+
+**Compiled by `CMakeLists.txt` under `DEVOURER_MT7612U` (default OFF), and
+wired in behind `IRadio`.** This subtree is a complete, self-contained library
+for the part — a public C ABI, its own transport, no dependency on `RtlAdapter`
+— plus the bring-up harness that produced every measurement in
+`docs/mt7612u.md`. `Mt7612uRadio` is the backend `WiFiDriver::CreateRadio`
+constructs for a MediaTek adapter; `Mt7612uMapping.h` holds the pure
+translations between this part's descriptor vocabulary and devourer's.
+
+The sources are C++ (`.cpp`), not C: MSVC has no `<pthread.h>` and devourer
+builds Windows first-class, so the sync and timing primitives are `std::` types.
+The *exported* surface is still C — `include/mt7612u/mt7612u.h` carries an
+`extern "C"` guard, and `tests/api_link.c` is deliberately still compiled as C
+so that stays true.
+
+It also builds and tests on its own:
+
+```sh
+make -C src/mt7612u            # -> src/mt7612u/bringup
+make -C src/mt7612u check      # offline tests: no hardware, no privileges
+sudo ./src/mt7612u/bringup regs
+```
+
+Measurements, methods and limits: [`../../docs/mt7612u.md`](../../docs/mt7612u.md).
+
+## Layout
+
+| file | what |
+|---|---|
+| `usb.cpp` | libusb transport: EP0 vendor register access, sync bulk, open/claim/reset |
+| `async.cpp` | event thread, 16-deep RX ring, 32-slot TX pool |
+| `mcu.cpp` | in-band MCU command framing (EP 8 out, EP 5 in, 4-bit sequence) |
+| `fw.cpp` | ROM patch + ILM/DLM firmware upload |
+| `eeprom.cpp` | 512-byte EEPROM: identity, TX power tables, RX gain |
+| `init.cpp` | power-on, MAC initvals, mac_start/stop, EP-4 flush |
+| `phy.cpp` | band/bandwidth/TX power registers, channel + calibration sequence |
+| `tx.cpp` | TXWI + TXINFO construction |
+| `rx.cpp` | RXWI parse, per-chain RSSI, rate decode |
+| `radiotap.cpp` | `send_packet` / `send_packets` (USB chaining via `NEXT_VLD`) |
+| `caps.cpp` | TSF, capability descriptor, ACK responder |
+| `tools/bringup.cpp` | one subcommand per verified gate |
+| `tests/` | offline tests (`make check`): public-API link (C), frame shapes, field macros, log sink |
+| `Mt7612uRadio.{h,cpp}` | the `IRadio` backend: bring-up, RX/TX, the 1 Hz tick, caps |
+| `Mt7612uMapping.h` | pure translations (RSSI bias, per-chain signal, rate codes, TID) — pinned by `tests/mt7612u_mapping_selftest.cpp` |
+| `Mt7612uUsbIds.h` | the vid:pid gate `WiFiDriver::CreateRadio` consults |
+| `initvals.h` | **generated** — see Provenance |
+
+## The receiver must never run undrained
+
+Enabling MAC RX with nothing reading the bulk-IN endpoint wedges this part
+*below* the USB level: `libusb_reset_device`, the sysfs `authorized` toggle
+and rebinding the kernel driver all fail to recover it, and only a physical
+replug does. So `mt_mac_start()` takes the receiver as an explicit argument,
+`mt7612u_start()` enables RX only when `mt7612u_rx_start()` is already
+running, and every gate that turns RX on starts the ring *first*.
+
+## Portability
+
+Done here, because these are correctness issues regardless of compiler:
+
+- `FIELD_PREP`/`FIELD_GET` no longer use `__builtin_ctz`. MSVC has no such
+  builtin, and its `_BitScanForward` takes an out-parameter, so it cannot
+  appear in a constant expression - which these must be, since `FIELD_PREP`
+  initialises static tables. `MT_CTZ` is a constant expression everywhere and
+  folds to one instruction. `tests/field_macros` checks it against the
+  builtin over all 32 single-bit and all 528 contiguous masks, and fails to
+  compile if it ever stops being constant-foldable.
+- The shift macro was named `_SHIFT`. Leading underscore plus a capital is
+  reserved to the implementation in every scope.
+- `<libusb.h>` (this project's spelling) is tried first, with the
+  distribution's `<libusb-1.0/libusb.h>` as the fallback.
+
+Done at integration, as that paragraph used to promise: the sources are C++
+and the POSIX threading and timing primitives are gone.
+
+- `pthread_mutex_t` -> `std::mutex`, and the device's recursive `io_lock` ->
+  `std::recursive_mutex`. As a constructed member it also retires the old
+  `io_lock_ready` flag: a zeroed `pthread_mutex_t` was a valid NON-recursive
+  lock, so an open path that skipped the explicit init self-deadlocked the PHY
+  tick. That state is now unrepresentable.
+- `pthread_cond_t` -> `std::condition_variable_any`. `_any` rather than the
+  plain one so it waits on the bare `std::mutex`, which let every lock site
+  keep its original shape instead of being restructured around `unique_lock` -
+  a smaller diff through code whose teardown ordering is a use-after-free
+  hazard. These waits are teardown and TX back-pressure, not a hot path.
+- `pthread_t` -> `std::thread`; `pthread_create`'s error return becomes a
+  caught `std::system_error`, so the `goto fail` teardown is unchanged.
+- `nanosleep` -> `std::this_thread::sleep_for`; `clock_gettime(CLOCK_MONOTONIC)`
+  -> `std::chrono::steady_clock`. The teardown's `pthread_cond_timedwait`
+  deadline arithmetic became one `wait_for`, which also drops its dependence on
+  `CLOCK_REALTIME` - a wall-clock step could previously stretch or skip the 2 s
+  budget.
+- The two structs holding those members moved from `calloc`/`free` to
+  `new (std::nothrow) T{}` / `delete`: `calloc` never runs a constructor, and
+  `{}` still zeroes every scalar exactly as `calloc` did. `nothrow` keeps the
+  existing `if (!p) return -1;` checks meaningful.
+
+**Not** done here: the `flock` adapter lock in `usb.cpp` is POSIX-only and is
+`_WIN32`-guarded rather than ported. It works by contending for the *same* lock
+file `UsbDeviceLock` uses, but on Windows `UsbDeviceLock` is a named mutex
+instead - so a file lock there would exclude nobody, and mirroring the mutex
+would duplicate a mechanism the devourer path already owns. On Windows the lock
+is a no-op and exclusivity comes from `UsbDeviceLock`; what is genuinely
+unprotected is a direct `mt7612u_open()` with no devourer around it, which is
+the bench tool's case, and the bench is Linux.
+
+## Firmware
+
+Needs `mt7662_rom_patch.bin` and `mt7662.bin` from `linux-firmware`
+(`/lib/firmware/mediatek/`, zstd-compressed on most distributions). Not
+vendored here. Point `bringup` at a directory holding the decompressed pair:
+
+```sh
+zstd -d /lib/firmware/mediatek/mt7662{,_rom_patch}.bin.zst -o firmware/
+```
+
+## Gates
+
+Each subcommand is a hardware check that fails loudly, in dependency order:
+
+```
+regs   registers + EEPROM round-trip        chan   channel set, 20 MHz
+fw     ROM patch + firmware + MCU ack       tx     inject at a fixed rate
+init   full bring-up + register-stream log  rx     monitor receive
+caps   capabilities, TSF, 40 MHz            soak   sync vs async throughput
+pwr    TX power vs the kernel's values      ampdu  aggregation A/B
+gateg  per-frame rate control               ack    ACK responder (needs a stimulus)
+rtap   send_packet / send_packets           hop    channel-switch cost
+```
+
+`make` here builds it as `./bringup`, which is what the hardware notes use.
+CMake builds the same source as `mt7612uprobe` (with `DEVOURER_MT7612U=ON`), to
+sit beside `pcieprobe` / `kestrelprobe` / `rtl8733bprobe` — so the chip-specific
+tool is not the one part of this backend that only a second build system can
+produce, and so it picks up the sanitizer and compiler settings the rest of the
+tree is built with. It drives the C library directly rather than `Mt7612uRadio`:
+its purpose is to exercise the layer underneath the backend.
+
+`sweep`, `coding` and `vht` take a width as their fourth argument, in the
+`MT7612U_BW_*` numbering — `0` = 20, `1` = 40, `2` = 80 MHz:
+
+```sh
+./bringup sweep 149 120 2      # VHT ladder at 80 MHz, control channel 149
+```
+
+The witness has to listen at the same width (`DEVOURER_BW=40|80` for
+devourer's own `rxdemo`). A 20 MHz receiver decodes *none* of an 80 MHz
+frame — which makes it a good negative control and a misleading oracle.
+
+At 80 MHz the HT ladder is skipped: 802.11n has no 80 MHz, so a rate word
+naming `PHY=HT` with `BW=80` is not a wide HT frame, it is an unspecified one.
+
+## Provenance
+
+Register sequences and descriptor layouts are derived from `openwrt/mt76`
+(`mt76x2/`, `mt76x02*`, `usb.c`), BSD-3-Clause-Clear, Copyright (C) 2016 Felix
+Fietkau, (C) 2018 Lorenzo Bianconi / Stanislaw Gruszka. Files carrying ported
+sequences keep that notice. The tree is pinned as `reference/mt76` at commit
+`be5ce79`.
+
+`initvals.h` is **generated** from it, not transcribed:
+
+```sh
+tools/extract_mt7612u_tables.py            # regenerate
+tools/extract_mt7612u_tables.py --check    # byte-compare the checked-in file
+```
+
+The generator resolves the symbolic register names against `mt76x02_regs.h` and
+evaluates the four `DEFAULT_PROT_CFG_*` macros, so a mistyped address cannot
+survive as a plausible-looking number. It reproduces the previously hand-typed
+table byte for byte, all sixty rows.
+
+Two things here are **not** ports and were proven on air rather than copied:
+the `MT_TXD_INFO_NEXT_VLD` USB chaining in `radiotap.c`, and the ACK responder
+in `caps.c`. One thing copied from mt76 was **wrong** — see the TSF note in the
+docs.

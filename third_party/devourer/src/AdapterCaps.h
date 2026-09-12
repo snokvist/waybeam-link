@@ -11,7 +11,7 @@
  * there is one source of truth per fact. Like those, it is STATIC — resolved at
  * construction, safe from any thread, callable before Init/InitWrite. The live
  * "which antennas look connected" question is deliberately NOT here (it needs
- * traffic); see IRtlDevice::GetActiveRxPaths / ActiveRxPaths in RxQuality.h.
+ * traffic); see IRadio::GetActiveRxPaths / ActiveRxPaths in RxQuality.h.
  *
  * FREQUENCY COVERAGE. The 5 GHz synthesizer on these parts tunes well past the
  * regulatory UNII channels (the vendor rtl88x2bu "monitor_chan_override" hack:
@@ -39,7 +39,12 @@ enum class ChipGeneration : uint8_t {
   Jaguar2,
   Jaguar3,
   Rtl8733b, /* HALMAC 87xx 802.11n: RTL8731BU / RTL8733BU */
-  Kestrel /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
+  Kestrel,  /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
+  /* MediaTek MT7662 MAC (MT7612U / MT7662U, 2T2R 11ac USB) — the first
+   * non-Realtek generation. Register width, the vendor-request opcodes and the
+   * in-band MCU plane all differ; nothing that switches on this value may
+   * assume a Realtek register map. */
+  Mt7612u
 };
 
 inline const char *generation_name(ChipGeneration g) {
@@ -54,6 +59,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "rtl8733b";
   case ChipGeneration::Kestrel:
     return "kestrel";
+  case ChipGeneration::Mt7612u:
+    return "mt7612u";
   default:
     return "unknown";
   }
@@ -83,8 +90,15 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   /* RTL8733B: 10 MHz qualified (SDR OBW + two-way cross-decode with a
    * Jaguar3 peer, both bands); 5 MHz is refused — its BB small-BW mode airs
    * no packets on this die (docs/rtl8733b.md "Narrowband status"). */
+  /* MT7612U: 20/40/80 and nothing narrower. MT_RATE_BW encodes only
+   * 20/40/80/160, so there is no 5 or 10 MHz to select — unlike the Realtek
+   * BB small-BW modes the trailing arm below is describing. Named explicitly
+   * because that trailing arm is the permissive one: without this case a
+   * MediaTek adapter would inherit kBw5|kBw10 and advertise two bandwidths the
+   * part cannot represent. 160 MHz is likewise absent (docs/mt7612u.md). */
   return g == ChipGeneration::Rtl8733b ? (kBw10 | kBw20 | kBw40)
          : g == ChipGeneration::Jaguar1  ? ac
+         : g == ChipGeneration::Mt7612u  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }
@@ -171,13 +185,36 @@ struct AdapterCaps {
    * ack_responder_ok: SetAckResponder measurably closes a hardware-ARQ loop
    * as the RESPONDER (SIFS ACKs that a soliciting TX's CCX reports confirm).
    * Measured true: 8812A (works, degraded — intermittent SIFS ACKs), 8814A,
-   * 8821A (61–64% single-shot MCS3, 94% at retry 8, disarm-proof-verified —
-   * an earlier "broken" verdict was a harness artifact: the responder's arm
-   * was never verified, so a silently dead responder read as on=0/off=0),
+   * 8821A (61–64% single-shot MCS3, 94% at retry 8 — an earlier "broken"
+   * verdict was a harness artifact: the responder's arm was never verified,
+   * so a silently dead responder read as on=0/off=0),
    * 8822B, 8812C/8822C, 8812E/8822E (the 8811A rides the 8812 die path and
    * inherits its row), 8733B (1725/1725 frames ACKed at retries_mean 0.00,
-   * retarget-proof and disarm-proof — tests/ack_txreport_matrix.sh run with
-   * the 8733B as the responder). False-as-unmeasured (the
+   * and retarget-proof: re-armed on a different MAC, 1728/1728 —
+   * tests/ack_txreport_matrix.sh run with the 8733B as the responder).
+   *
+   * The `on`, `retarget`, and legacy `off` rows establish arming, retargeting,
+   * and a never-armed control. A backend-owned `disarmed` row supports only
+   * the live-disarm claim for the responder used in that run. On the reference
+   * RTL8812AU, the old gate-only clear left every soliciting report ACKed;
+   * restoring the captured pre-arm MACID produced no ACKs with retries pinned
+   * at the configured limit. The own-MAC adversary also showed why an arm equal
+   * to the captured MACID must be refused. docs/scheduled-mac.md owns the exact
+   * counts. The implementation additionally restores and readback-verifies
+   * BSSID as port-state hygiene; the ACK-rate result does not attribute the
+   * behavioral change to BSSID. The implementation covers the shared CHIP_8812
+   * path, but its 1T1R RTL8811AU cut was not separately measured; 8814A/8821A
+   * and the HalMAC generations do not inherit the result.
+   *
+   * On the 8733B the net_type gate is INERT and the engine matches MACID
+   * alone: at single-shot ACK rate a never-armed port answers on its own EFUSE
+   * MAC at 85.2%/82.5% against 0.0% for an address nobody holds, and 83.3%
+   * when deliberately armed. Two consequences: every never-armed monitor
+   * session on that die already auto-ACKs unicast to its own MAC, and a disarm
+   * there can only move the identity, never silence the port
+   * (Rtl8733bDevice::disarm_ack_responder). Not known to hold on any other
+   * generation — the AP-mode work proved the gate where it was measured.
+   * False-as-unmeasured (the
    * vht_2g4_ok reading: unmeasured, not incapable): the 8821C — it shares
    * the recipe but no 8821CU/CE cell has run. FALSE on Kestrel:
    * SetAckResponder is not implemented on the AX generation.

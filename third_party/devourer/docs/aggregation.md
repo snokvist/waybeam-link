@@ -18,7 +18,7 @@ and A-MPDU unicast into reliable (hardware-ARQ) links.
 
 ## USB TX aggregation (`send_packets`)
 
-`IRtlDevice::send_packets(TxPacketView*, n)` + `DeviceConfig tx.usb_agg_max`
+`IRadio::send_packets(TxPacketView*, n)` + `DeviceConfig tx.usb_agg_max`
 (env `DEVOURER_TX_USB_AGG`, default 0 = off → per-frame loop, byte-identical
 descriptors). Packing rules live in `src/TxAggPlan.h` (pure math, ctest'd):
 blocks 8-byte aligned, the FIRST descriptor carries the block count
@@ -90,7 +90,7 @@ coverage a reliability layer can count on — is in
 
 ## A-MPDU (`SetAmpduMode`)
 
-`IRtlDevice::SetAmpduMode(AmpduMode)` / `ClearAmpduMode()` / `GetAmpduMode()`
+`IRadio::SetAmpduMode(AmpduMode)` / `ClearAmpduMode()` / `GetAmpduMode()`
 (env `DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"`,
 `src/AmpduMode.h`, all generations) configure A-MPDU TX in one call: it marks
 every data frame aggregatable (data QSEL + AGG_EN + MAX_AGG_NUM +
@@ -187,12 +187,18 @@ numbers above came from.
 
 ## Hardware ACK/BlockAck responder — reliable unicast
 
-`IRtlDevice::SetAckResponder(mac)` / `ClearAckResponder()` (env
+`IRadio::SetAckResponder(mac)` / `ClearAckResponder()` (env
 `DEVOURER_ACK_RESPONDER=<unicast mac>`, all generations; `src/AckResponder.h`)
 arms the MAC's autonomous ACK engine while monitor RX/injection continue
 unchanged: port identity (MACID/BSSID 0x610/0x618 = `mac`) + net_type (0x102
-[1:0] = AP). The identity+net_type pair is the whole gate — no beacon
-machinery, no ADDBA session state, no CAM entry.
+[1:0] = AP). No beacon machinery, no ADDBA session state, no CAM entry.
+Which half of that pair ends live response behavior is per-die. net_type
+participates on the Jaguar generations covered by the AP-mode work, but a
+reference RTL8812AU still answered on the old MACID after NoLink read back and
+needed its pre-arm MACID restored (BSSID is restored too as defensive port
+state, not as a claimed response gate). On RTL8733B net_type is wholly inert
+and the engine matches MACID alone. See the per-die evidence in
+`src/AdapterCaps.h` and the shared mechanics in `src/AckResponder.h`.
 
 With a responder armed, a peer TXing unicast QoS-Data (normal ack-policy) to
 `mac` runs a full hardware ARQ loop — SIFS-timed ACKs from the responder,
@@ -230,6 +236,8 @@ canonical TX SA `57:42:75:05:d6:00` is a group address, so txdemo's QoS shape
 takes `DEVOURER_TX_SA` to override it — a group TA yields retry-limit-pinned
 reports even with the responder perfectly armed.
 
-Arming a responder turns a passive monitor into an active transmitter, so it
-is opt-in. The hardware ARQ (ACK, BlockAck, autonomous retransmission) is
-complete; devourer layers no software ARQ policy above the reports.
+Arming retargets hardware responses to a caller-supplied address, so it is
+opt-in. That does not prove the never-armed state is passive: notably,
+RTL8733B already answers for its initialization MAC. The hardware ARQ (ACK,
+BlockAck, autonomous retransmission) is complete; devourer layers no software
+ARQ policy above the reports.
