@@ -12,6 +12,50 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — craft-side CSA is observable after all, and every refusal is silent
+
+**Increment 0 of the CSA-final-jump spec, and it changes the diagnosis.**
+
+**The craft's link control plane IS listening — on `127.0.0.1:8091`.** Earlier
+notes recorded it as absent because a probe from the ground got no answer; it
+is bound to loopback, so it is reachable over SSH and nowhere else:
+`ssh root@<craft> curl -s http://127.0.0.1:8091/api/v1/stats`. That gives
+`link.csa_state`, `channel` and `report_latch_holder` — the craft-side view the
+whole CSA investigation had been missing. Nothing needed instrumenting.
+
+**Measured with it.** Ground and craft both reach `COMMITTED` on 5540 after a
+quickconnect (`report_latch_holder = 9`, i.e. our ground). A class-0 campaign
+to 5560 was then issued while sampling the craft every 150 ms for 9 s:
+**the craft stayed `COMMITTED` on 5540 for all 60 samples — it never armed and
+never moved**, while the ground reported `aborted (no CSA_ARMED)`.
+
+**It is not a "committed craft refuses" rule.** `CsaFollower::on_csa` has no
+state guard: it accepts from any state and sets `kArmed`. The refusal is one of
+four guards, in order — §11.4 authentication, nonce replay
+(`csa_nonce <= last_applied_[originator, session]`), the channel allowlist, and
+the `min_interval_ms` rate limit (5000 ms).
+
+**And that is the actual defect: all of them are a bare `return false`.**
+`core/src/csa.cpp` has 14 `return false` paths and **zero** refusal counters or
+log lines. A craft that declines every campaign is indistinguishable from a
+craft that never heard one, from the ground *and* from the craft. This is the
+same shape as the FCS bug — a failure with no counter anywhere — and it is why
+0/4 took three sessions and several wrong conclusions to chase.
+
+**Next, and it is cheap:** give each refusal path a counter (or one counter
+plus a reason enum) exposed in `/api/v1/stats`. That single change would have
+answered this in one campaign instead of three sessions, and it is a
+prerequisite for validating the final-jump rework — `validation.md` cannot
+distinguish "the rework works" from "the craft refused for an unrelated
+reason" without it.
+
+Ruled out along the way: craft channel allowlist (identical 25 channels,
+target included), craft not claimed (`claimed True by 9`), ground verify window
+too short (500 → 3000 ms, no change), and the nonce counter resetting across
+ground restarts (the key includes the ground's session, which is fresh per run).
+
+---
+
 ## 2026-09-13 — `retune_all` is SERIAL: an MT7612U diversity ear breaks CSA node-wide
 
 **Pass 201 scoped the §11.2 constraint to "a ground where MT7612U is the only
