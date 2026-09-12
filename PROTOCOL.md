@@ -3908,7 +3908,10 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   lands after T_switch with the peer already COMMITTED. That failure presents
   as a reverted CSA, not as an error, so it must be reasoned about here rather
   than discovered. MediaTek MT7612U is such a die: no `FastRetune` override,
-  **526 ms measured** full retune, exceeding class 0 *and* class 1. It is
+  and a full retune measured **on the node at 789 ms** (n=27, range 739–811;
+  the vendor documents 526 ms, so the real cost is worse) against an 8812AU's
+  129 ms in the same `retune_all`. That is 2.6× the class-0 budget and 1.6×
+  the class-1 budget — it exceeds both. It is
   therefore supported as a diversity RX ear — where it never issues or follows
   a campaign on its own clock — and a node on which it is the **only** radio
   cannot meet class-0 timing. The §15.2 election ranks an unlisted part last

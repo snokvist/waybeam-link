@@ -247,6 +247,8 @@ struct RadioAir::Impl {
         bool fastretune_ok = false;
         // §15.5: does this backend stamp RxAtrib.tsfl? False on MT7612U.
         bool hw_rx_timestamp = false;
+        // §11.2: worst blocking retune seen on this unit, ms.
+        uint64_t retune_max_ms = 0;
         std::thread rx_thread;
 
         // §15.2 (Pass 195): the per-unit teardown lives HERE, not only in
@@ -2189,6 +2191,13 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
     // retune was a 2.5 ms one, inside the §11.2 switch deadline. Route it to
     // the explicit branch so the cost sits where the caller can see it.
     const bool fast_ok = fast && impl_->adapters[adapter]->fastretune_ok;
+    // §11.2 is a TIMING contract and nothing measured it at runtime: the
+    // 300/500 ms class budgets were derived from a Realtek max-retune, and the
+    // only figure for any other die came from the vendor's own docs. Time the
+    // blocking actuator so the budget is CHECKABLE on the node rather than
+    // argued from a datasheet — an overrun here is the thing that makes a
+    // campaign land after T_switch, and it is otherwise invisible.
+    const uint64_t retune_t0 = steady_ms();
     if (fast_ok && bw == 0) {
         // §11.2 class 0: same-width hop, ~0.5–2.5 ms. FastRetune skips the
         // TXAGC re-apply, so the caller follows up with reapply_tx_power().
@@ -2212,6 +2221,18 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
     // That case is the §11.6 RX-liveness guard's, which is backend-agnostic
     // and now has a recover() under it. This is exactly the confidence
     // a kernel-path backend would get from `iw` reporting success.
+    const uint64_t retune_ms = steady_ms() - retune_t0;
+    {
+        Impl::Adapter& ra = *impl_->adapters[adapter];
+        if (retune_ms > ra.retune_max_ms) ra.retune_max_ms = retune_ms;
+        // One line per hop would drown a sweep; report only a NEW worst case,
+        // which is what a budget is compared against anyway.
+        wb_logf("radio: \"%s\" retune -> %u MHz took %llu ms (%s path)%s\n",
+                ra.name.c_str(), static_cast<unsigned>(chan_mhz),
+                static_cast<unsigned long long>(retune_ms),
+                fast_ok && bw == 0 ? "fast" : "full",
+                retune_ms == ra.retune_max_ms ? " NEW MAX" : "");
+    }
     const SelectedChannel got = dev.GetSelectedChannel();
     if (got.Channel != chan) {
         wb_logf("radio: retune \"%s\" to ch %u not applied "

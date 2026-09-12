@@ -12,6 +12,59 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-12 — MT7612U retune MEASURED at 789 ms; the class-0 overrun is real, its consequence is not isolated
+
+Pass 201 asserted the §11.2 class-0 overrun from devourer's documented 526 ms.
+`RadioAir::retune()` is now instrumented (per-hop duration, new-worst-case
+flagged), so the budget is checkable on the node instead of argued from a
+datasheet. Measured on the x86 ground, live craft.
+
+**MT7612U full retune: n=27, min 739, median 789, max 811 ms.** That is ~50 %
+WORSE than devourer's own 526 ms figure, and it is remarkably tight — this is
+a fixed cost, not a tail.
+
+**Same-instant A/B, one `retune_all`, three adapters, same channel change:**
+
+| adapter | full retune |
+|---|---|
+| `auto0-8812au` | **129 ms** |
+| `auto1-mt7612u` | **809 ms** |
+| `auto2-mt7612u` | **789 ms** |
+
+6.1–6.3×, in the same call, on the same host, at the same instant. The 8812AU's
+*fast* path (what the scout uses) is median **0 ms** over n=26, max 129.
+
+**Against §11.2:** class 0 is 300 ms — MT7612U is **2.6× over**; class 1 is
+500 ms — **1.6× over**. The premise of Pass 201 is now measured rather than
+derived, and is stronger than it was written.
+
+**This also closes the earlier sweep mystery.** The 2026-09-12 sweep finding
+recorded ~1.34 s/channel against a predicted ~0.48 s and called the gap
+unexplained. 789 ms retune + dwell ≈ 1.34 s: it was the retune all along, and
+the prediction was wrong because it used the vendor's 526 ms.
+
+**What is still NOT isolated: the CONSEQUENCE.** A cross-channel class-0 claim
+(ground 5700 → craft 17 on 5540) aborts with `csa: acquire ABORTED (no
+CSA_ARMED)` on MT7612U — but it aborts **identically on the 8812AU, whose
+retune was 129 ms, comfortably inside the budget**. So the abort is not caused
+by the overrun, and it masks any effect that is. Both nodes then latch via the
+parked-acquire path and receive normally. Isolating the timing consequence
+needs a campaign that SUCCEEDS on a fast die, which this craft does not
+currently provide; until then the overrun is a confirmed cause with an
+unobserved effect.
+
+**Method note, the expensive kind.** An earlier run of this same measurement
+produced 6–19 ms and `fastretune=True` — because the MT7612U parts had been
+unplugged and the config's bus pins landed on an RTL8733B and an RTL8822C.
+waybeam-link said so loudly (§10.6 D2, `configured mac ... NOT PRESENT`, twice)
+and the numbers were nearly published as MT7612U's. Pin a test adapter by
+**bus only** — with no mac the pin stays strict (`air_radio.cpp:1192`) and a
+mismatch fails instead of degrading — and read `part=` out of `/api/v1/info`
+before trusting any number. See
+[[feedback_validate_the_observation_channel_before_trusting_a_negative]].
+
+---
+
 ## 2026-09-12 — `SetTxMode` is unreachable by construction: no upstream ask is justified
 
 **Question.** MT7612U's backend declines `SetTxMode` and logs at ERROR, once

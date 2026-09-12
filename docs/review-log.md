@@ -66,12 +66,23 @@ because §3.0 Pass 118 makes each frame's radiotap authoritative. The measured
 penalty is the sweep: **33.6 s vs 10.9 s** for the same 25-channel list, only
 the uplink die swapped.
 
-**What this Pass does NOT claim to have measured.** The class-0 *cross-channel*
-overrun is a derivation from devourer's own 526 ms retune figure, not an
-end-to-end measurement: both verified quickconnects were same-channel
-(`5540->5540`), so neither exercised a retune inside a campaign. The rule
-above is stated as a capability constraint because the arithmetic is
-unambiguous, but the failure itself is unobserved and a test for it is open.
+**Retune cost MEASURED (2026-09-12, findings.md same date), replacing the
+derivation this Pass originally rested on.** `RadioAir::retune()` is
+instrumented, so §11.2's budget is now checkable on the node. MT7612U full
+retune: n=27, median **789 ms**, range 739–811 — ~50 % worse than devourer's
+documented 526 ms. Same-instant A/B inside one `retune_all`: 8812AU **129 ms**,
+the two MT7612U **809** and **789 ms**. Against class 0's 300 ms that is
+**2.6× over**; against class 1's 500 ms, 1.6×. The premise is stronger than
+written.
+
+**The CONSEQUENCE remains unobserved, and this Pass does not claim it.** A
+cross-channel class-0 claim aborts with `acquire ABORTED (no CSA_ARMED)` on
+MT7612U — and aborts identically on the 8812AU, whose retune was 129 ms and
+therefore inside budget. So that abort has some other cause and masks the
+timing effect; both nodes latch via parked-acquire and receive normally.
+Isolating it needs a campaign that succeeds on a fast die. The rule above
+stands on the arithmetic (a 789 ms blocking retune cannot land inside a 300 ms
+deadline), not on an observed failure.
 
 Not ruled here, deliberately: widening `dt_to_switch_ms` from a per-adapter
 retune cost. It is tractable for ground-issued campaigns (the field is a
