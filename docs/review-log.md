@@ -75,14 +75,22 @@ the two MT7612U **809** and **789 ms**. Against class 0's 300 ms that is
 **2.6× over**; against class 1's 500 ms, 1.6×. The premise is stronger than
 written.
 
-**The CONSEQUENCE remains unobserved, and this Pass does not claim it.** A
-cross-channel class-0 claim aborts with `acquire ABORTED (no CSA_ARMED)` on
-MT7612U — and aborts identically on the 8812AU, whose retune was 129 ms and
-therefore inside budget. So that abort has some other cause and masks the
-timing effect; both nodes latch via parked-acquire and receive normally.
-Isolating it needs a campaign that succeeds on a fast die. The rule above
-stands on the arithmetic (a 789 ms blocking retune cannot land inside a 300 ms
-deadline), not on an observed failure.
+**The CONSEQUENCE remains unobserved, and this Pass does not claim it.**
+Tested on both mechanisms. The acquire path (`quickconnect`) is not the right
+one — an acquire parks by design and a craft that is not yet ours never arms.
+The retune path (`/api/v1/csa`, class 0) IS the right one, and on MT7612U it
+reverted 0/2 with `armed=1 landed=0 video=0` at 795/788 ms retunes. But the
+control reverts too: an 8812AU uplink retuning in **41 ms**, an order of
+magnitude inside the budget, produced the identical signature 0/2. So the
+revert has another cause and masks the timing effect.
+
+The rule above therefore stands on the ARITHMETIC — a 789 ms blocking retune
+cannot land inside a 300 ms deadline — and explicitly not on an observed
+campaign failure. Separately: class-0 campaigns currently land 0/4 across two
+dies and two crafts on this bench against 26/26 historically, which is a
+regression or a bench change independent of this branch, and which blocks
+validating any `dt_to_switch_ms` widening (a timing fix cannot be verified
+while every campaign reverts regardless of timing).
 
 Not ruled here, deliberately: widening `dt_to_switch_ms` from a per-adapter
 retune cost. It is tractable for ground-issued campaigns (the field is a

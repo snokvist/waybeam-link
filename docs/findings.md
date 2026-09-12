@@ -43,15 +43,44 @@ recorded ~1.34 s/channel against a predicted ~0.48 s and called the gap
 unexplained. 789 ms retune + dwell ≈ 1.34 s: it was the retune all along, and
 the prediction was wrong because it used the vendor's 526 ms.
 
-**What is still NOT isolated: the CONSEQUENCE.** A cross-channel class-0 claim
-(ground 5700 → craft 17 on 5540) aborts with `csa: acquire ABORTED (no
-CSA_ARMED)` on MT7612U — but it aborts **identically on the 8812AU, whose
-retune was 129 ms, comfortably inside the budget**. So the abort is not caused
-by the overrun, and it masks any effect that is. Both nodes then latch via the
-parked-acquire path and receive normally. Isolating the timing consequence
-needs a campaign that SUCCEEDS on a fast die, which this craft does not
-currently provide; until then the overrun is a confirmed cause with an
-unobserved effect.
+**What is still NOT isolated: the CONSEQUENCE.** Tested twice, two different
+mechanisms, and the control refutes the causal claim both times.
+
+*Acquire path (`quickconnect`).* Wrong test, kept here as a correction: an
+acquire has the ground CSA **itself** onto the craft's channel, and a craft
+that is not yet ours never arms — so `acquire ABORTED (no CSA_ARMED)` →
+parked-acquire is EXPECTED on any die, and both dies did it.
+
+*Retune path (`POST /api/v1/csa {mhz, class:0}`), the mechanism the class-0
+contract actually binds.* On MT7612U, latched to craft 17 (−28 dBm) on 5540:
+**0 of 2 landed**, both `csa: selection reverted (armed=1 landed=0 video=0)`,
+retunes 795 and 788 ms. That looks exactly like the predicted overrun — and it
+is not, because the control does the same thing:
+
+| uplink | class-0 retune | landed | signature |
+|---|---|---|---|
+| MT7612U | 795 / 788 ms | **0 / 2** | armed=1 landed=0 video=0 |
+| RTL8812AU | **41 ms** (fast path) | **0 / 2** | armed=1 landed=0 video=0 |
+
+The 8812AU retunes in 41 ms — an order of magnitude inside the 300 ms budget —
+and reverts identically. So the revert has a cause other than retune duration,
+and it masks any timing effect. `armed=1` says the craft acknowledged;
+`video=0` says no video arrived on the new channel, which is equally consistent
+with the craft not actually following.
+
+**So the overrun stays a confirmed CAUSE with an unobserved EFFECT**, and the
+first attempt to observe it produced a false positive that only the control
+caught. See
+[[feedback_a_probe_whose_negative_arm_passes_is_a_broken_probe]].
+
+**New open question, bigger than MT7612U and not caused by this branch:**
+class-0 retune campaigns currently land **0/4 across two dies and two crafts**
+on this bench. `waybeam_link_csa_revert_discards_a_landed_channel` records
+class 0 at **26/26** historically. Either the bench/craft configuration has
+changed or something regressed in the campaign path; it is independent of the
+MT7612U work and needs its own investigation before any `dt_to_switch_ms`
+widening can be validated — a fix for timing cannot be verified while every
+campaign reverts regardless of timing.
 
 **Method note, the expensive kind.** An earlier run of this same measurement
 produced 6–19 ms and `fastretune=True` — because the MT7612U parts had been
