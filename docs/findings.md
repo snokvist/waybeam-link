@@ -12,6 +12,240 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — `retune_all` is SERIAL: an MT7612U diversity ear breaks CSA node-wide
+
+**Pass 201 scoped the §11.2 constraint to "a ground where MT7612U is the only
+radio", reasoning that a mixed ground puts a Realtek die in both the uplink and
+scout roles. That reasoning is wrong, and this is the correction.**
+
+`AirBackend::retune_all` (`node/include/wblink/node/air_backend.h:605`) is a
+plain sequential `for` over **every** adapter. A campaign's retune cost is
+therefore the **sum across ears, not the uplink's own cost**. Measured on the
+mixed ground, one class-0 campaign:
+
+```
+auto0-8812au   retune -> 5560 took  41 ms (fast path)
+auto1-mt7612u  retune -> 5560 took 815 ms (full path)
+auto2-mt7612u  retune -> 5560 took 787 ms (full path)
+csa: commit -> 5560 MHz
+```
+
+**1643 ms against a 300 ms class-0 budget — 5.5× over**, on a ground whose
+uplink retunes in 41 ms. An MT7612U used purely as a diversity RX ear, which is
+the configuration this branch is actually for, costs the node ~800 ms per
+campaign.
+
+**The consequence is now ISOLATED, which it was not before.** A single-adapter
+8812AU ground (no MediaTek in the node at all) versus the mixed ground, same
+craft, same campaign:
+
+| ground | retune_all | armed | **landed** | video | acquire |
+|---|---|---|---|---|---|
+| 8812AU + 2× MT7612U | ~1643 ms | 1 | **0** | 0 | parks |
+| 8812AU alone | 41 ms | 1 | **1** | 0 | **campaign confirmed** |
+
+`landed` flips 0 → 1 purely by removing the MediaTek ears. That is Pass 201's
+predicted effect, observed. The acquire campaign likewise *confirms* on the
+clean ground where every contaminated one parked — so the earlier reading that
+"`acquire ABORTED (no CSA_ARMED)` is expected for an acquire" was also wrong.
+
+**Why this took three attempts to see: every previous "8812AU control" was
+contaminated.** They all used the auto config, which brings up all three
+radios — so the control node still contained the two MT7612U ears dragging
+`retune_all` to 1.6 s. A control has to remove the variable from the NODE, not
+just from the uplink role. See
+[[feedback_a_probe_whose_negative_arm_passes_is_a_broken_probe]].
+
+**Still unexplained, and NOT MT7612U-related: `video=0`.** Even the clean
+8812AU ground reverts, because no video arrives on the new channel
+(`armed=1 landed=1 video=0`). The craft is healthy throughout (rssi −55,
+19 Mbps, 0 % loss, mode wblink). Not observable from the ground: the craft logs
+no CSA events to `/tmp/waybeam.log` and its `:8091` is not listening, so
+whether it follows the CSA cannot be confirmed from here. That is the next
+thing to instrument, and it is what still blocks any `dt_to_switch_ms` work.
+
+---
+
+## 2026-09-12 — MT7612U retune MEASURED at 789 ms; the class-0 overrun is real, its consequence is not isolated
+
+Pass 201 asserted the §11.2 class-0 overrun from devourer's documented 526 ms.
+`RadioAir::retune()` is now instrumented (per-hop duration, new-worst-case
+flagged), so the budget is checkable on the node instead of argued from a
+datasheet. Measured on the x86 ground, live craft.
+
+**MT7612U full retune: n=27, min 739, median 789, max 811 ms.** That is ~50 %
+WORSE than devourer's own 526 ms figure, and it is remarkably tight — this is
+a fixed cost, not a tail.
+
+**Same-instant A/B, one `retune_all`, three adapters, same channel change:**
+
+| adapter | full retune |
+|---|---|
+| `auto0-8812au` | **129 ms** |
+| `auto1-mt7612u` | **809 ms** |
+| `auto2-mt7612u` | **789 ms** |
+
+6.1–6.3×, in the same call, on the same host, at the same instant. The 8812AU's
+*fast* path (what the scout uses) is median **0 ms** over n=26, max 129.
+
+**Against §11.2:** class 0 is 300 ms — MT7612U is **2.6× over**; class 1 is
+500 ms — **1.6× over**. The premise of Pass 201 is now measured rather than
+derived, and is stronger than it was written.
+
+**This also closes the earlier sweep mystery.** The 2026-09-12 sweep finding
+recorded ~1.34 s/channel against a predicted ~0.48 s and called the gap
+unexplained. 789 ms retune + dwell ≈ 1.34 s: it was the retune all along, and
+the prediction was wrong because it used the vendor's 526 ms.
+
+**What is still NOT isolated: the CONSEQUENCE.** Tested twice, two different
+mechanisms, and the control refutes the causal claim both times.
+
+*Acquire path (`quickconnect`).* Wrong test, kept here as a correction: an
+acquire has the ground CSA **itself** onto the craft's channel, and a craft
+that is not yet ours never arms — so `acquire ABORTED (no CSA_ARMED)` →
+parked-acquire is EXPECTED on any die, and both dies did it.
+
+*Retune path (`POST /api/v1/csa {mhz, class:0}`), the mechanism the class-0
+contract actually binds.* On MT7612U, latched to craft 17 (−28 dBm) on 5540:
+**0 of 2 landed**, both `csa: selection reverted (armed=1 landed=0 video=0)`,
+retunes 795 and 788 ms. That looks exactly like the predicted overrun — and it
+is not, because the control does the same thing:
+
+| uplink | class-0 retune | landed | signature |
+|---|---|---|---|
+| MT7612U | 795 / 788 ms | **0 / 2** | armed=1 landed=0 video=0 |
+| RTL8812AU | **41 ms** (fast path) | **0 / 2** | armed=1 landed=0 video=0 |
+
+The 8812AU retunes in 41 ms — an order of magnitude inside the 300 ms budget —
+and reverts identically. So the revert has a cause other than retune duration,
+and it masks any timing effect. `armed=1` says the craft acknowledged;
+`video=0` says no video arrived on the new channel, which is equally consistent
+with the craft not actually following.
+
+**So the overrun stays a confirmed CAUSE with an unobserved EFFECT**, and the
+first attempt to observe it produced a false positive that only the control
+caught. See
+[[feedback_a_probe_whose_negative_arm_passes_is_a_broken_probe]].
+
+**New open question, bigger than MT7612U and not caused by this branch:**
+class-0 retune campaigns currently land **0/4 across two dies and two crafts**
+on this bench. `waybeam_link_csa_revert_discards_a_landed_channel` records
+class 0 at **26/26** historically. Either the bench/craft configuration has
+changed or something regressed in the campaign path; it is independent of the
+MT7612U work and needs its own investigation before any `dt_to_switch_ms`
+widening can be validated — a fix for timing cannot be verified while every
+campaign reverts regardless of timing.
+
+**Method note, the expensive kind.** An earlier run of this same measurement
+produced 6–19 ms and `fastretune=True` — because the MT7612U parts had been
+unplugged and the config's bus pins landed on an RTL8733B and an RTL8822C.
+waybeam-link said so loudly (§10.6 D2, `configured mac ... NOT PRESENT`, twice)
+and the numbers were nearly published as MT7612U's. Pin a test adapter by
+**bus only** — with no mac the pin stays strict (`air_radio.cpp:1192`) and a
+mismatch fails instead of degrading — and read `part=` out of `/api/v1/info`
+before trusting any number. See
+[[feedback_validate_the_observation_channel_before_trusting_a_negative]].
+
+---
+
+## 2026-09-12 — `SetTxMode` is unreachable by construction: no upstream ask is justified
+
+**Question.** MT7612U's backend declines `SetTxMode` and logs at ERROR, once
+per §9.5 rung commit. Does waybeam-link need it — i.e. is a `tx_mode_ok`
+capability (the shape `fastretune_ok` already has) worth asking devourer for?
+
+**No. Proven statically, and the proof is conclusive rather than suggestive.**
+devourer consults the session-default rate **only** for a frame whose radiotap
+carries no rate (`Mt7612uRadio.cpp` refusal text; the Realtek path stores it in
+`_tx_mode_default`). waybeam-link cannot emit such a frame:
+
+- all four TX paths (`inject`, `inject_return`, `inject_resend`, urgent) go
+  through `dot11_tx_prefix`, `_urgent` or `_unicast` (`io/src/air_radio.cpp`
+  :1836, :1871, :1921, :1955);
+- all three builders call `radiotap_tx_ht(out, rate.mcs, ...)`
+  **unconditionally** (`io/include/wblink/dot11.h:113, :129, :143`);
+- `radiotap_tx_ht`'s `kPresent` is a `constexpr` carrying the MCS bit with
+  **no branch** (`io/include/wblink/radiotap.h:35`).
+
+So every injected frame carries an HT MCS. `SetTxMode` can fire only if a
+constexpr-built prefix is corrupted after construction, or devourer fails to
+parse a well-formed one — bug scenarios, not operating conditions. Our own
+call-site comment already says as much ("it never fires on a healthy path").
+
+**And the hypothetical benefit does not survive inspection either.** What the
+fallback buys on a Realtek die is that a malformed prefix degrades to the
+committed MCS instead of the driver's legacy 6 Mbps. On MT7612U that bug would
+air at 6 Mbps — slower, but more robust AND more visible, which is the better
+failure mode for a defect you want found. The "loss" is a quieter bug.
+
+**Verdict: do not file it.** Asking upstream to add API surface so we can
+silence a call we do not need would be a change with no demonstrable value.
+The ERROR line per rung commit is cosmetic noise on a supported adapter and is
+recorded here so the question is not reopened. If a rate-less TX path is ever
+added, this finding is void and the ask becomes real — that is the trigger to
+watch for, not the log line.
+
+**What was NOT done:** removing our `SetTxMode` call as dead weight. It is
+free on a Realtek die, the call site documents the intent, and deleting it
+would change a Realtek path for no gain.
+
+---
+
+## 2026-09-12 — an MT7612U-only ground works; the cost is the sweep, not the link
+
+**Setup.** x86 ground `.242`, array-form config pinning both MT7612U by bus
+path (`2-1` tx, `5-1` rx), 8812AU deliberately excluded. Live craft 17 on
+5540 MHz. Standalone `waybeam-link rx`, no hub. A/B against the same binary
+and the same 25-channel 5 GHz allowlist with the auto config, where the §15.2
+election puts the 8812AU in the uplink role.
+
+**It works.** Both MediaTek parts enumerated and came up, MT7612U carried the
+TX role, the scout found craft 17 (1677 frames, −29 dBm, announced,
+psk_known), quickconnect latched, and the node received with
+`diversity/uniq = 25162/25190 ≈ 1.00` — exactly ears−1 for two ears — at
+2 ‰ pre / 1 ‰ post-diversity loss. `tx_submitted` advanced to 869, so the die
+**does** transmit despite `SetTxMode` being unimplemented: §3.0 Pass 118 puts
+the rate in every frame's radiotap and that always wins. What is lost is only
+the fallback for a rate-less frame (which would air at OFDM 6 Mbps); the link
+emits none.
+
+**The measured cost is the sweep.** Same code, same channel list, only the
+uplink die swapped:
+
+| uplink | 25-channel sweep | per channel |
+|---|---|---|
+| RTL8812AU | **10.9 s** | ~436 ms |
+| MT7612U | **33.6 s** | ~1.34 s |
+
+3.1× slower, +22.7 s absolute. The per-channel delta (~0.9 s) is LARGER than
+the 526−48 = 478 ms the die's retune figures predict, so something beyond one
+full retune per dwell is in the path — unexplained, and the first thing to
+look at if this is optimised.
+
+**A correction to an earlier attribution.** `csa: acquire ABORTED (no
+CSA_ARMED) — parked on 5540` is **not** MT7612U-specific: the 8812AU produces
+it identically. Both quickconnects were `5540->5540`, i.e. same-channel
+claims where no CSA is needed, so the craft never arms and the ground takes
+the parked-acquire path and latches. Correct behaviour behind an alarming log
+line. It had been carried as an open MT7612U item since 2026-09-11; it is not
+one.
+
+**What stays open.** The class-0 *cross-channel* retune overrun that Pass 201
+reasons about is still **derived, not measured here** — it rests on devourer's
+own 526 ms figure (`docs/mt7612u.md:246`). Both quickconnects in this run were
+same-channel, so neither exercised it. Forcing the ground off-channel with
+`POST /api/v1/channel` while latched is not the lever: it timed out and
+triggered latch recovery (the node recovered fully, three ears, no wedge).
+A proper test needs the ground parked before the claim.
+
+Also unexplained and worth a look: during the sweep the resting diversity ear
+read `rx=0 / rssi=−128` while the roaming uplink ear read `rx=5365 / snr=0` —
+the first is expected (it holds the resting channel, where nothing airs), the
+second is a real `snr_valid=false` window on a die that reports SNR fine when
+latched (54/55 dB).
+
+---
+
 ## 2026-09-05 — the bionic gate was blind to the control server, and flipping it moved the blind spot
 
 `io/src/control_server.cpp:187` passed `size_t` to `::poll()`, which takes

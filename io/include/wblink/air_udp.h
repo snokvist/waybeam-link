@@ -133,7 +133,7 @@ class UdpAir : public AirIface {
     // and a consumer must be able to tell "no die" from a die it does not
     // recognise.
     AdapterCapsView adapter_caps(size_t /*adapter*/) const override {
-        return AdapterCapsView{"udp", "", "", false, false, false};
+        return AdapterCapsView{"udp", "", "", false, false, false, false};
     }
     // No hardware, no per-unit identity (§10.6 Pass 154).
     std::string adapter_mac(size_t) const override { return {}; }

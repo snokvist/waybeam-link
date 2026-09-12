@@ -27,8 +27,13 @@ inline constexpr size_t kDot11TxUnicastPrefixLen =
 inline constexpr size_t kDot11TxUrgentPrefixLen =
     kRadiotapTxLen + kDot11QosHdrLen;
 inline constexpr uint8_t kUrgentTid = 6;  // 802.11e voice access category
-// §3.0: monitor RX hands up the MPDU with the chip-validated 4-byte FCS
-// appended; the radio backend strips this trailer before dot11_parse.
+// §3.0: the 802.11 frame check sequence, 4 bytes, always AIRED. Whether it is
+// also DELIVERED is a per-frame fact the backend reports, not a property of
+// monitor RX — see mpdu_len_without_fcs() in radio_decode.h, which takes that
+// flag as a required argument. Realtek MACs append it (so it must be stripped
+// before dot11_parse); MT7612U's strips it and puts an FCE info trailer there
+// instead, where removing four bytes deletes payload. Airtime accounting
+// counts it either way.
 inline constexpr size_t kFcsLen = 4;
 
 // The committed §9.5 operating point, stamped into every frame's radiotap.

@@ -249,7 +249,15 @@ class AirIface {
     // LDPC while reporting none (AdapterCaps.h: rxdesc offsets unparsed on
     // that die; the 8812A HAS the descriptor bit, measured 2026-08-14), so
     // false taints the stats field, not the link. `fastretune` says the
-    // lean retune override exists on this die.
+    // lean retune override exists on this die. `hw_rx_timestamp` says the
+    // backend stamps RxAtrib.tsfl on every received frame — true on every
+    // Realtek generation, FALSE on MT7612U (the RXWI TSF field is not
+    // parsed), which is the first such die we build. A consumer that anchors
+    // on a RECEIVED frame's TSF must consult it: the field reads 0, not
+    // "absent", so an unguarded `tsf_now - tsfl` is the whole TSF low word
+    // rather than a short elapsed time. Note the adapter's OWN TSF register
+    // still reads fine there — it is the per-frame stamp that is missing, so
+    // a successful read_tsf() is not evidence the anchor is valid.
     // No devourer types cross this boundary (the rx_sense rule).
     // §15.2 (Pass 195): `part` and `aliases` are ADDED beside `chip`, never
     // folded into it. `chip` is the GENERATION ("jaguar3") and consumers
@@ -265,6 +273,7 @@ class AirIface {
         bool power_actuator = false;
         bool ldpc_rx_flag = false;
         bool fastretune = false;
+        bool hw_rx_timestamp = false;
     };
     virtual AdapterCapsView adapter_caps(size_t adapter) const = 0;
 

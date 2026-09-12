@@ -166,8 +166,12 @@ if(WBLINK_RADIO)
     #                     variant.
     #   all            — every USB family devourer supports (adds 8814AU,
     #                     Jaguar2 8822BU/8821CU, RTL8733B 11n, Kestrel
-    #                     8852B/C 11ax) for ground-side adapter tests. PCIe
-    #                     stays off.
+    #                     8852B/C 11ax, and the MediaTek MT7612U) for a
+    #                     ground that may meet any craft. PCIe stays off.
+    #                     MT7612U is ground-only on purpose: it is the one
+    #                     non-Realtek family here, no craft carries it, and
+    #                     a ground is the node whose radio an operator swaps
+    #                     between sessions.
     set(WBLINK_DEVOURER_CHIPS "fleet" CACHE STRING
         "devourer chip families: fleet | au | eu | 8733b | all")
     if(WBLINK_DEVOURER_CHIPS STREQUAL "all")
@@ -176,30 +180,35 @@ if(WBLINK_RADIO)
         set(_wblink_j3e ON)
         set(_wblink_8733b ON)
         set(_wblink_extra ON)
+        set(_wblink_mt7612u ON)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "au")
         set(_wblink_j1 ON)
         set(_wblink_j3c OFF)
         set(_wblink_j3e OFF)
         set(_wblink_8733b OFF)
         set(_wblink_extra OFF)
+        set(_wblink_mt7612u OFF)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "eu")
         set(_wblink_j1 OFF)
         set(_wblink_j3c OFF)
         set(_wblink_j3e ON)
         set(_wblink_8733b OFF)
         set(_wblink_extra OFF)
+        set(_wblink_mt7612u OFF)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "8733b")
         set(_wblink_j1 OFF)
         set(_wblink_j3c OFF)
         set(_wblink_j3e OFF)
         set(_wblink_8733b ON)
         set(_wblink_extra OFF)
+        set(_wblink_mt7612u OFF)
     elseif(WBLINK_DEVOURER_CHIPS STREQUAL "fleet")
         set(_wblink_j1 ON)
         set(_wblink_j3c ON)
         set(_wblink_j3e ON)
         set(_wblink_8733b OFF)
         set(_wblink_extra OFF)
+        set(_wblink_mt7612u OFF)
     else()
         message(FATAL_ERROR
             "WBLINK_DEVOURER_CHIPS must be fleet, au, eu, 8733b, or all (got "
@@ -221,6 +230,11 @@ if(WBLINK_RADIO)
     set(DEVOURER_8733B         ${_wblink_8733b})
     set(DEVOURER_KESTREL_8852B ${_wblink_extra})
     set(DEVOURER_KESTREL_8852C ${_wblink_extra})
+    # MediaTek, not Realtek — so it is NOT covered by the Kestrel/8733B
+    # reasoning above about upstream defaults; DEVOURER_MT7612U defaults OFF
+    # upstream. Listed anyway, because an unlisted family is one silent
+    # default change away from being compiled into every vehicle build.
+    set(DEVOURER_MT7612U       ${_wblink_mt7612u})
     set(DEVOURER_PCIE          OFF)
     add_subdirectory(third_party/devourer
                      ${CMAKE_CURRENT_BINARY_DIR}/devourer EXCLUDE_FROM_ALL)
@@ -272,10 +286,56 @@ if(WBLINK_RADIO)
             "devourer built RTL8733B despite WBLINK_DEVOURER_CHIPS="
             "'${WBLINK_DEVOURER_CHIPS}' — see the Kestrel note above.")
     endif()
+    # And for MT7612U. This is the witness that keeps a MediaTek backend out of
+    # the SSC338Q/CV610 craft images: those presets pin a narrow set, and a
+    # craft has no MT7612U to drive. DEVOURER_MT7612U defaults OFF upstream, so
+    # today this can only fire on a wiring mistake of ours — which is exactly
+    # when it is worth having, since the failure it guards against is silent.
+    if(NOT _wblink_mt7612u AND "DEVOURER_HAVE_MT7612U=1" IN_LIST _wblink_dv_defs)
+        message(FATAL_ERROR
+            "devourer built MT7612U despite WBLINK_DEVOURER_CHIPS="
+            "'${WBLINK_DEVOURER_CHIPS}' — see the Kestrel note above.")
+    endif()
+    # The families `third_party/README.md` promises are "off in every
+    # combination" and that had no witness until now: 8814, both Jaguar2
+    # variants, and PCIe. The first three default ON upstream — the exact
+    # property the 8733B note above cites as the reason a missing line means
+    # "silently on in every vehicle build" — so the guarantee was prose for
+    # them while being enforced for Kestrel/8733B/MT7612U. Latent rather than
+    # live (we set all four from _wblink_extra/OFF and CMP0077 is NEW), which
+    # is precisely the shape that survives a re-vendor unnoticed.
+    foreach(_k 8814 JAGUAR2 JAGUAR2_8822B JAGUAR2_8821C)
+        if(NOT _wblink_extra AND "DEVOURER_HAVE_${_k}=1" IN_LIST _wblink_dv_defs)
+            message(FATAL_ERROR
+                "devourer built ${_k} despite WBLINK_DEVOURER_CHIPS="
+                "'${WBLINK_DEVOURER_CHIPS}' — see the Kestrel note above.")
+        endif()
+    endforeach()
+    if("DEVOURER_HAVE_PCIE=1" IN_LIST _wblink_dv_defs)
+        message(FATAL_ERROR
+            "devourer built the PCIe transport; waybeam-link pins it OFF "
+            "unconditionally (USB only) — see the Kestrel note above.")
+    endif()
+    # POSITIVE witness, the mirror of every negative one above. Those fire when
+    # a family we did NOT ask for got built; none of them notices a family we
+    # DID ask for going missing. That direction is the one this branch depends
+    # on: without DEVOURER_HAVE_MT7612U the `#ifdef` in air_radio.cpp compiles
+    # the MediaTek arm out, is_radio_candidate() silently reverts to
+    # Realtek-only, MT7612U dongles stop enumerating — and the STATUS line
+    # below still prints mt7612u=ON. A re-vendor that renames or drops the
+    # define would delete the feature behind a green build.
+    if(_wblink_mt7612u AND NOT "DEVOURER_HAVE_MT7612U=1" IN_LIST _wblink_dv_defs)
+        message(FATAL_ERROR
+            "WBLINK_DEVOURER_CHIPS='${WBLINK_DEVOURER_CHIPS}' asks for MT7612U "
+            "but the vendored tree did not define DEVOURER_HAVE_MT7612U — the "
+            "enumeration arm in io/src/air_radio.cpp would compile out and no "
+            "MT7612U would be claimed, silently. Check the option name and "
+            "target_compile_definitions after a re-vendor.")
+    endif()
     message(STATUS
         "devourer chips '${WBLINK_DEVOURER_CHIPS}': jaguar1=${_wblink_j1} "
         "8822c=${_wblink_j3c} 8822e=${_wblink_j3e} 8733b=${_wblink_8733b} "
-        "extra=${_wblink_extra}")
+        "mt7612u=${_wblink_mt7612u} extra=${_wblink_extra}")
 endif()
 
 # --- wblink_core: zero-dependency portable wire/session library (PROTOCOL.md

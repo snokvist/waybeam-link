@@ -22,6 +22,27 @@
 
 namespace wblink {
 
+// §3.0 enumeration, VID:PID half. Pure so it can be tested: the rest of
+// is_radio_candidate() (io/src/air_radio.cpp) needs a live libusb_device and
+// cannot be. Worth pinning precisely because a `true` here puts the device on
+// the claim path, which DETACHES its kernel driver — so the cost of matching
+// one id too many is taking the host's own WiFi off the air, not a failed
+// open. `mt7612u_ok` is the caller's DEVOURER_HAVE_MT7612U answer, passed in
+// rather than #ifdef'd here so a test can exercise both arms in one build.
+//
+// Match MediaTek by devourer's CI-checked VID:PID TABLE, never by the 0x0e8d
+// vendor id: that vendor also ships the internal combo radios in laptops
+// (0e8d:0616 sits on the dev host), which a vendor-wide test would claim.
+inline constexpr uint16_t kRealtekVid = 0x0bda;
+template <typename Mt7612uIdFn>
+inline bool radio_vendor_ok(uint16_t vid, uint16_t pid, bool mt7612u_ok,
+                            Mt7612uIdFn is_mt7612u_id) {
+    if (vid == kRealtekVid) {
+        return true;
+    }
+    return mt7612u_ok && is_mt7612u_id(vid, pid);
+}
+
 // Realtek RX descriptor rate code -> HT MCS index. hal_com.h pins
 // DESC_RATEMCS0 = 0x0c (0..3 CCK, 4..11 legacy OFDM, 12.. HT), so anything
 // below 12 or above the §9.3 ladder is reported unresolved (§15.3).
@@ -32,12 +53,24 @@ inline uint8_t desc_rate_to_mcs(uint16_t code) {
     return mcs < kRxMcsBuckets ? static_cast<uint8_t>(mcs) : kRxMcsUnknown;
 }
 
-// §3.0: monitor RX delivers the MPDU with the chip-validated 4-byte FCS still
-// appended. Strip it before the length-exact parse; a frame that is all
-// trailer (or shorter) is not a frame. nullopt = drop.
-inline std::optional<size_t> mpdu_len_without_fcs(size_t delivered) {
-    if (delivered <= kFcsLen) return std::nullopt;
-    return delivered - kFcsLen;
+// §3.0: strip the trailing FCS before the length-exact parse; a frame that is
+// all trailer (or shorter) is not a frame. nullopt = drop.
+//
+// Whether there IS a trailer is a PER-FRAME fact the backend reports
+// (devourer rx_pkt_attrib::fcs_present), not a property of monitor RX. Every
+// Realtek generation sets the MAC's append-FCS bit, so its PKT_LEN counts
+// those four bytes; MediaTek's MT7612U strips the FCS, and the four bytes
+// after the MPDU are an FCE info trailer. Removing them there deletes four
+// bytes of real payload, decode_data's length-exact check rejects the frame
+// as kLengthMismatch, and a decode failure has NO counter — so the ear reads
+// healthy (rx, RSSI, SNR, MCS histogram all advancing) while contributing
+// nothing to any stream. Required argument, not a defaulted one: a caller
+// must not be able to re-acquire the assumption by omission.
+inline std::optional<size_t> mpdu_len_without_fcs(size_t delivered,
+                                                  bool fcs_present) {
+    const size_t trailer = fcs_present ? kFcsLen : 0;
+    if (delivered <= trailer) return std::nullopt;
+    return delivered - trailer;
 }
 
 // Per-chain power bytes -> dBm for the best chain. The descriptor reports

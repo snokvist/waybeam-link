@@ -24,6 +24,95 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 201 — §3.0 enumeration is vendor-SET, and §11.2 class 0 is a die capability (2026-09-12)
+
+Two rulings, both forced by admitting the first non-Realtek family (MediaTek
+MT7612U) to the ground fleet.
+
+**§3.0 enumeration.** The candidate rule read "a Realtek-VID device exposing a
+vendor-specific (`0xFF`) interface with at least one bulk IN and one bulk OUT".
+It now reads *a device of a supported vendor* — the Realtek VID always, plus,
+**only in a build that compiled the MediaTek backend**, the exact VID:PID pairs
+in devourer's MT7612U table. MediaTek is matched by TABLE and never by its
+vendor id `0x0e8d`: that id also covers the internal combo radios in laptops,
+and a candidate has its kernel driver detached on the claim path, so a
+vendor-wide match would take the host's own WiFi off the air. A build without
+the backend must not accept those ids either — claiming a device no compiled
+backend can drive detaches a driver to reach nothing.
+
+**§11.2 class 0 is a capability, not a constant.** The class budgets
+(class 0 ⇒ 300 ms, class 1 ⇒ 500 ms) were derived from a max-retune assumption
+of ~0.5–2.5 ms fast / ~277 ms full, both Realtek figures. MT7612U has no lean
+retune override, so every retune is the full calibrating path: **526 ms
+measured**, which exceeds BOTH budgets. The ruling is that a die whose full
+retune exceeds the class budget cannot satisfy that class's timing contract,
+and the spec must say so rather than let a campaign be issued that cannot land
+— the failure presents as a reverted CSA with the craft already committed, not
+as an error.
+
+Scope of the consequence — **broader than the uplink role**. The scout roams
+the uplink adapter only (`scout_idx = tx_index()`) and the §15.2 election ranks
+an unlisted part last, so SCOUTING on a mixed ground is unaffected. **CSA is
+not**: `AirBackend::retune_all` is a sequential loop over every adapter, so a
+campaign's retune cost is the SUM across ears, not the uplink's own. Measured
+2026-09-13 on a mixed ground — 8812AU 41 ms + MT7612U 815 ms + MT7612U 787 ms =
+**1643 ms against a 300 ms class-0 budget, 5.5× over, with a 41 ms uplink**.
+An MT7612U used purely as a diversity RX ear — the configuration this branch
+exists for — therefore puts every §11.2 campaign on the node out of contract.
+An earlier draft of this Pass claimed a mixed ground was unaffected; it is not.
+
+Device-verified 2026-09-12, both configurations (findings.md same date). As a
+diversity ear: three ears, `diversity/uniq` 2.00, 0‰ post-diversity loss over
+a 119 s soak. As the **sole** radio: an MT7612U-only ground enumerates,
+elects, scouts, finds the craft, quickconnects, latches and receives at
+`diversity/uniq` 1.00 and 1‰ post-diversity loss — it **works**, and it
+transmits (`tx_submitted` 869) even though `SetTxMode` is unimplemented,
+because §3.0 Pass 118 makes each frame's radiotap authoritative. The measured
+penalty is the sweep: **33.6 s vs 10.9 s** for the same 25-channel list, only
+the uplink die swapped.
+
+**Retune cost MEASURED (2026-09-12, findings.md same date), replacing the
+derivation this Pass originally rested on.** `RadioAir::retune()` is
+instrumented, so §11.2's budget is now checkable on the node. MT7612U full
+retune: n=27, median **789 ms**, range 739–811 — ~50 % worse than devourer's
+documented 526 ms. Same-instant A/B inside one `retune_all`: 8812AU **129 ms**,
+the two MT7612U **809** and **789 ms**. Against class 0's 300 ms that is
+**2.6× over**; against class 1's 500 ms, 1.6×. The premise is stronger than
+written.
+
+**The CONSEQUENCE remains unobserved, and this Pass does not claim it.**
+Tested on both mechanisms. The acquire path (`quickconnect`) is not the right
+one — an acquire parks by design and a craft that is not yet ours never arms.
+The retune path (`/api/v1/csa`, class 0) IS the right one, and on MT7612U it
+reverted 0/2 with `armed=1 landed=0 video=0` at 795/788 ms retunes. But the
+control reverts too: an 8812AU uplink retuning in **41 ms**, an order of
+magnitude inside the budget, produced the identical signature 0/2. So the
+revert has another cause and masks the timing effect.
+
+**The effect is now OBSERVED and isolated** (2026-09-13). Against a
+single-adapter 8812AU ground with no MediaTek in the node at all, same craft and
+campaign: `landed` flips **0 → 1** purely by removing the MT7612U ears, and the
+acquire campaign *confirms* where every mixed ground parked. Earlier controls
+all used the auto config and so still contained those ears — the variable has to
+leave the NODE, not just the uplink role.
+
+A separate failure survives on the clean ground (`armed=1 landed=1 video=0`):
+no video arrives on the new channel, the craft is healthy throughout, and it is
+not MT7612U-related. That one is unexplained and is what still blocks any
+`dt_to_switch_ms` work. Separately: class-0 campaigns currently land 0/4 across two
+dies and two crafts on this bench against 26/26 historically, which is a
+regression or a bench change independent of this branch, and which blocks
+validating any `dt_to_switch_ms` widening (a timing fix cannot be verified
+while every campaign reverts regardless of timing).
+
+Not ruled here, deliberately: widening `dt_to_switch_ms` from a per-adapter
+retune cost. It is tractable for ground-issued campaigns (the field is a
+per-copy `uint16` the issuer stamps, and the class figures are floors, not
+caps) and needs a wire addition for craft-issued CSA, where the craft cannot
+know a following ground has a slow ear. Evidence: `feat/mt7612u-ground`,
+devourer `docs/mt7612u.md:246`, `Mt7612uRadio.cpp:1075`.
+
+
 ## Pass 200 — the responder's `supported` is a cached answer, not a lockout (2026-09-04)
 
 §15.5's `supported` was specified as "learned at the first arm attempt", and

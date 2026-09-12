@@ -3900,6 +3900,39 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   **class 0 (fast intra-band, `FastRetune`, ~0.5–2.5 ms) ⇒ 300 ms**; **class 1
   (cross-band, full `SetMonitorChannel`, up to ~277 ms on 8812AU) ⇒ 500 ms**.
 
+  **Both figures are FLOORS derived from a Realtek max-retune, so class 0 is a
+  DIE CAPABILITY, not a constant (Pass 201).** A die with no lean retune
+  override runs the full calibrating path for every hop, and if that exceeds
+  the class budget it cannot satisfy the class's timing contract at all — the
+  campaign is issued, the local retune overruns `dt_to_switch_ms`, and the node
+  lands after T_switch with the peer already COMMITTED. That failure presents
+  as a reverted CSA, not as an error, so it must be reasoned about here rather
+  than discovered. MediaTek MT7612U is such a die: no `FastRetune` override,
+  and a full retune measured **on the node at 789 ms** (n=27, range 739–811;
+  the vendor documents 526 ms, so the real cost is worse) against an 8812AU's
+  129 ms in the same `retune_all`. That is 2.6× the class-0 budget and 1.6×
+  the class-1 budget — it exceeds both. It is
+  therefore supported as a diversity RX ear — where it never issues or follows
+  a campaign on its own clock — and a node on which it is the **only** radio
+  cannot meet class-0 timing. The §15.2 election ranks an unlisted part last and the
+  scout roams the uplink adapter only, so SCOUTING on a mixed ground is
+  unaffected — but **CSA is not**: `retune_all` walks every adapter in sequence,
+  so a campaign's retune cost is the SUM across ears. A ground with one 41 ms
+  Realtek uplink and two 800 ms MT7612U diversity ears measured **1643 ms**, 5.5×
+  the class-0 budget. A slow die anywhere in the node puts every campaign on that
+  node out of contract, not merely a slow uplink. Device-verified 2026-09-12: an
+  MT7612U-only ground does scout, latch and receive (`diversity/uniq` 1.00,
+  1‰ post-diversity loss); the measured penalty is a 25-channel sweep of
+  33.6 s against 10.9 s on a Realtek uplink. The cross-channel class-0 overrun
+  itself is derived from the die's retune cost, not yet observed end to end.
+
+  `dt_to_switch_ms` is a per-copy `uint16` the ISSUER stamps, so widening it
+  from a per-adapter retune cost is available to a ground-issued campaign with
+  no wire change. It is NOT available to a craft-issued CSA that a ground
+  follows: the craft cannot know a following ground has a slow ear, so that
+  half needs the ground to advertise its retune cost. Neither is specified
+  here yet — see Pass 201.
+
   **Class 0 widened 150 → 300 ms (Pass 91, operator-ruled 2026-07-24).** The
   budget is no longer sized only by the retune it precedes: since Pass 90 it
   must simultaneously hold (a) a copy window long enough to deliver a campaign
@@ -5280,8 +5313,16 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   the array form does not apply.
 
   **Enumeration is filtered by interface descriptor**, not by PID: a candidate
-  is a Realtek-VID device exposing a **vendor-specific (`0xFF`) interface with
-  at least one bulk IN and one bulk OUT** endpoint. That admits every radio
+  is a device of a *supported vendor* exposing a **vendor-specific (`0xFF`)
+  interface with at least one bulk IN and one bulk OUT** endpoint. Supported
+  vendor means the Realtek VID (`0x0bda`) always, plus — only in a build that
+  actually compiled the MediaTek backend — the exact VID:PID pairs in
+  devourer's MT7612U table. MediaTek is matched by TABLE and never by its
+  vendor id `0x0e8d`, which also covers the internal combo radios in laptops:
+  a candidate has its kernel driver detached on the claim path, so a
+  vendor-wide match would take the host's own WiFi off the air. A build
+  without the backend must not accept those ids either — claiming a device no
+  compiled backend can drive detaches a driver to reach nothing. That admits every radio
   devourer supports and excludes the Realtek Bluetooth (`0xE0`), mass-storage
   (`0x08`, including the ZeroCD `0bda:1a2b` identity) and HID devices sharing
   the vendor id — which the unfiltered VID-only scan would otherwise open. The

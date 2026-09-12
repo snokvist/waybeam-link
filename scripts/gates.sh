@@ -100,6 +100,18 @@ if [ "$QUICK" -eq 0 ]; then
         -j "$WBLINK_GATE_JOBS"
     run "build_info reduced" ./build/reduced/tests/build_info_test
 
+    # The OTHER direction of the RADIO axis. The "reduced" arm above pins
+    # WBLINK_RADIO=ON deliberately (so the five fields disagree), which leaves
+    # RADIO=OFF — a configuration the docs reason about and that several tests
+    # are deliberately built in, outside the `if(WBLINK_RADIO)` gate — covered
+    # by nothing. A test that includes a devourer header unguarded compiles
+    # fine in every other arm and breaks only here, which is exactly how it
+    # reached review. Build the TESTS, not just a target: the gap was in one.
+    run "configure no-radio" cmake -S . -B build/noradio \
+        -DCMAKE_BUILD_TYPE=Release -DWBLINK_BUILD_APP=OFF -DWBLINK_RADIO=OFF
+    run "build no-radio" cmake --build build/noradio \
+        -j "$WBLINK_GATE_JOBS"
+
     for p in release x86-ground; do
         build_preset "$p"
     done
