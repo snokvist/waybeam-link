@@ -12,6 +12,49 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-12 — `SetTxMode` is unreachable by construction: no upstream ask is justified
+
+**Question.** MT7612U's backend declines `SetTxMode` and logs at ERROR, once
+per §9.5 rung commit. Does waybeam-link need it — i.e. is a `tx_mode_ok`
+capability (the shape `fastretune_ok` already has) worth asking devourer for?
+
+**No. Proven statically, and the proof is conclusive rather than suggestive.**
+devourer consults the session-default rate **only** for a frame whose radiotap
+carries no rate (`Mt7612uRadio.cpp` refusal text; the Realtek path stores it in
+`_tx_mode_default`). waybeam-link cannot emit such a frame:
+
+- all four TX paths (`inject`, `inject_return`, `inject_resend`, urgent) go
+  through `dot11_tx_prefix`, `_urgent` or `_unicast` (`io/src/air_radio.cpp`
+  :1836, :1871, :1921, :1955);
+- all three builders call `radiotap_tx_ht(out, rate.mcs, ...)`
+  **unconditionally** (`io/include/wblink/dot11.h:113, :129, :143`);
+- `radiotap_tx_ht`'s `kPresent` is a `constexpr` carrying the MCS bit with
+  **no branch** (`io/include/wblink/radiotap.h:35`).
+
+So every injected frame carries an HT MCS. `SetTxMode` can fire only if a
+constexpr-built prefix is corrupted after construction, or devourer fails to
+parse a well-formed one — bug scenarios, not operating conditions. Our own
+call-site comment already says as much ("it never fires on a healthy path").
+
+**And the hypothetical benefit does not survive inspection either.** What the
+fallback buys on a Realtek die is that a malformed prefix degrades to the
+committed MCS instead of the driver's legacy 6 Mbps. On MT7612U that bug would
+air at 6 Mbps — slower, but more robust AND more visible, which is the better
+failure mode for a defect you want found. The "loss" is a quieter bug.
+
+**Verdict: do not file it.** Asking upstream to add API surface so we can
+silence a call we do not need would be a change with no demonstrable value.
+The ERROR line per rung commit is cosmetic noise on a supported adapter and is
+recorded here so the question is not reopened. If a rate-less TX path is ever
+added, this finding is void and the ask becomes real — that is the trigger to
+watch for, not the log line.
+
+**What was NOT done:** removing our `SetTxMode` call as dead weight. It is
+free on a Realtek die, the call site documents the intent, and deleting it
+would change a Realtek path for no gain.
+
+---
+
 ## 2026-09-12 — an MT7612U-only ground works; the cost is the sweep, not the link
 
 **Setup.** x86 ground `.242`, array-form config pinning both MT7612U by bus
