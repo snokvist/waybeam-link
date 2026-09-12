@@ -50,13 +50,28 @@ and the spec must say so rather than let a campaign be issued that cannot land
 — the failure presents as a reverted CSA with the craft already committed, not
 as an error.
 
-Scope of the consequence, measured rather than assumed: the scout roams the
-**uplink adapter only** (`scout_idx = tx_index()`), and the §15.2 election
-ranks an unlisted part last, so on a mixed ground the scout and the class-0
-issuer are both Realtek and neither is affected. The constraint binds a ground
-where MT7612U is the **only** radio. As a diversity ear it is unaffected and
-device-verified: three ears on the x86 ground, `diversity/uniq` 2.00, 0‰
-post-diversity loss over a 119 s soak.
+Scope of the consequence. The scout roams the **uplink adapter only**
+(`scout_idx = tx_index()`), and the §15.2 election ranks an unlisted part last,
+so on a mixed ground the scout and the class-0 issuer are both Realtek and
+neither is affected. The constraint binds a ground where MT7612U is the
+**only** radio.
+
+Device-verified 2026-09-12, both configurations (findings.md same date). As a
+diversity ear: three ears, `diversity/uniq` 2.00, 0‰ post-diversity loss over
+a 119 s soak. As the **sole** radio: an MT7612U-only ground enumerates,
+elects, scouts, finds the craft, quickconnects, latches and receives at
+`diversity/uniq` 1.00 and 1‰ post-diversity loss — it **works**, and it
+transmits (`tx_submitted` 869) even though `SetTxMode` is unimplemented,
+because §3.0 Pass 118 makes each frame's radiotap authoritative. The measured
+penalty is the sweep: **33.6 s vs 10.9 s** for the same 25-channel list, only
+the uplink die swapped.
+
+**What this Pass does NOT claim to have measured.** The class-0 *cross-channel*
+overrun is a derivation from devourer's own 526 ms retune figure, not an
+end-to-end measurement: both verified quickconnects were same-channel
+(`5540->5540`), so neither exercised a retune inside a campaign. The rule
+above is stated as a capability constraint because the arithmetic is
+unambiguous, but the failure itself is unobserved and a test for it is open.
 
 Not ruled here, deliberately: widening `dt_to_switch_ms` from a per-adapter
 retune cost. It is tractable for ground-issued campaigns (the field is a

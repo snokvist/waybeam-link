@@ -3913,7 +3913,11 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   a campaign on its own clock — and a node on which it is the **only** radio
   cannot meet class-0 timing. The §15.2 election ranks an unlisted part last
   and the scout roams the uplink adapter only, so a mixed ground puts a Realtek
-  die in both roles and is unaffected.
+  die in both roles and is unaffected. Device-verified 2026-09-12: an
+  MT7612U-only ground does scout, latch and receive (`diversity/uniq` 1.00,
+  1‰ post-diversity loss); the measured penalty is a 25-channel sweep of
+  33.6 s against 10.9 s on a Realtek uplink. The cross-channel class-0 overrun
+  itself is derived from the die's retune cost, not yet observed end to end.
 
   `dt_to_switch_ms` is a per-copy `uint16` the ISSUER stamps, so widening it
   from a per-adapter retune cost is available to a ground-issued campaign with

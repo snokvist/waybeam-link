@@ -12,6 +12,61 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-12 — an MT7612U-only ground works; the cost is the sweep, not the link
+
+**Setup.** x86 ground `.242`, array-form config pinning both MT7612U by bus
+path (`2-1` tx, `5-1` rx), 8812AU deliberately excluded. Live craft 17 on
+5540 MHz. Standalone `waybeam-link rx`, no hub. A/B against the same binary
+and the same 25-channel 5 GHz allowlist with the auto config, where the §15.2
+election puts the 8812AU in the uplink role.
+
+**It works.** Both MediaTek parts enumerated and came up, MT7612U carried the
+TX role, the scout found craft 17 (1677 frames, −29 dBm, announced,
+psk_known), quickconnect latched, and the node received with
+`diversity/uniq = 25162/25190 ≈ 1.00` — exactly ears−1 for two ears — at
+2 ‰ pre / 1 ‰ post-diversity loss. `tx_submitted` advanced to 869, so the die
+**does** transmit despite `SetTxMode` being unimplemented: §3.0 Pass 118 puts
+the rate in every frame's radiotap and that always wins. What is lost is only
+the fallback for a rate-less frame (which would air at OFDM 6 Mbps); the link
+emits none.
+
+**The measured cost is the sweep.** Same code, same channel list, only the
+uplink die swapped:
+
+| uplink | 25-channel sweep | per channel |
+|---|---|---|
+| RTL8812AU | **10.9 s** | ~436 ms |
+| MT7612U | **33.6 s** | ~1.34 s |
+
+3.1× slower, +22.7 s absolute. The per-channel delta (~0.9 s) is LARGER than
+the 526−48 = 478 ms the die's retune figures predict, so something beyond one
+full retune per dwell is in the path — unexplained, and the first thing to
+look at if this is optimised.
+
+**A correction to an earlier attribution.** `csa: acquire ABORTED (no
+CSA_ARMED) — parked on 5540` is **not** MT7612U-specific: the 8812AU produces
+it identically. Both quickconnects were `5540->5540`, i.e. same-channel
+claims where no CSA is needed, so the craft never arms and the ground takes
+the parked-acquire path and latches. Correct behaviour behind an alarming log
+line. It had been carried as an open MT7612U item since 2026-09-11; it is not
+one.
+
+**What stays open.** The class-0 *cross-channel* retune overrun that Pass 201
+reasons about is still **derived, not measured here** — it rests on devourer's
+own 526 ms figure (`docs/mt7612u.md:246`). Both quickconnects in this run were
+same-channel, so neither exercised it. Forcing the ground off-channel with
+`POST /api/v1/channel` while latched is not the lever: it timed out and
+triggered latch recovery (the node recovered fully, three ears, no wedge).
+A proper test needs the ground parked before the claim.
+
+Also unexplained and worth a look: during the sweep the resting diversity ear
+read `rx=0 / rssi=−128` while the roaming uplink ear read `rx=5365 / snr=0` —
+the first is expected (it holds the resting channel, where nothing airs), the
+second is a real `snr_valid=false` window on a die that reports SNR fine when
+latched (54/55 dB).
+
+---
+
 ## 2026-09-05 — the bionic gate was blind to the control server, and flipping it moved the blind spot
 
 `io/src/control_server.cpp:187` passed `size_t` to `::poll()`, which takes
