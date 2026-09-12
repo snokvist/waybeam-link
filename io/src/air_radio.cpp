@@ -689,7 +689,8 @@ struct RadioAir::Impl {
             }
             return;
         }
-        const auto mpdu_len = mpdu_len_without_fcs(p.Data.size());
+        const auto mpdu_len =
+            mpdu_len_without_fcs(p.Data.size(), p.RxAtrib.fcs_present);
         if (!mpdu_len) {
             return;
         }

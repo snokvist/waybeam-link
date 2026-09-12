@@ -32,12 +32,24 @@ inline uint8_t desc_rate_to_mcs(uint16_t code) {
     return mcs < kRxMcsBuckets ? static_cast<uint8_t>(mcs) : kRxMcsUnknown;
 }
 
-// §3.0: monitor RX delivers the MPDU with the chip-validated 4-byte FCS still
-// appended. Strip it before the length-exact parse; a frame that is all
-// trailer (or shorter) is not a frame. nullopt = drop.
-inline std::optional<size_t> mpdu_len_without_fcs(size_t delivered) {
-    if (delivered <= kFcsLen) return std::nullopt;
-    return delivered - kFcsLen;
+// §3.0: strip the trailing FCS before the length-exact parse; a frame that is
+// all trailer (or shorter) is not a frame. nullopt = drop.
+//
+// Whether there IS a trailer is a PER-FRAME fact the backend reports
+// (devourer rx_pkt_attrib::fcs_present), not a property of monitor RX. Every
+// Realtek generation sets the MAC's append-FCS bit, so its PKT_LEN counts
+// those four bytes; MediaTek's MT7612U strips the FCS, and the four bytes
+// after the MPDU are an FCE info trailer. Removing them there deletes four
+// bytes of real payload, decode_data's length-exact check rejects the frame
+// as kLengthMismatch, and a decode failure has NO counter — so the ear reads
+// healthy (rx, RSSI, SNR, MCS histogram all advancing) while contributing
+// nothing to any stream. Required argument, not a defaulted one: a caller
+// must not be able to re-acquire the assumption by omission.
+inline std::optional<size_t> mpdu_len_without_fcs(size_t delivered,
+                                                  bool fcs_present) {
+    const size_t trailer = fcs_present ? kFcsLen : 0;
+    if (delivered <= trailer) return std::nullopt;
+    return delivered - trailer;
 }
 
 // Per-chain power bytes -> dBm for the best chain. The descriptor reports
