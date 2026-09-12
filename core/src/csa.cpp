@@ -53,11 +53,13 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (policy_.psk.empty()) {
         if (!policy_.allow_unauthenticated) {
             ++unauth_rejected_;
+            ++refusals_.no_key;
             return false;
         }
     } else {
         const auto want = mac_of(pkt, policy_.psk);
         if (!want || *want != pkt.csa_mac) {
+            ++refusals_.bad_mac;
             return false;
         }
     }
@@ -67,6 +69,7 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     const std::optional<uint16_t> lock = latched_issuer ? latched_issuer
                                                         : latched_;
     if (lock && *lock != pkt.prefix.originator) {
+        ++refusals_.issuer_lock;
         return false;
     }
     // §11.6 rendezvous beacon (Pass 69): dt == 0 never arms. A MAC-valid
@@ -88,19 +91,26 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
                                     pkt.prefix.session_id);
     const auto it = last_applied_.find(key);
     if (it != last_applied_.end() && pkt.csa_nonce <= it->second) {
+        // Also the ordinary case for copies 2..5 of an accepted campaign, so
+        // this one is expected to be NONZERO on a healthy craft — it is the
+        // only refusal here that is not a fault.
+        ++refusals_.nonce_replay;
         return false;  // replay, or another copy of an accepted campaign
     }
     if (!allowed(policy_.allowlist, pkt.target_chan)) {
+        ++refusals_.not_allowlisted;
         return false;
     }
     if (last_accept_us_ != 0 &&
         now_us - last_accept_us_ <
             static_cast<uint64_t>(policy_.min_interval_ms) * 1000) {
+        ++refusals_.rate_limited;
         return false;
     }
 
     // Accept. §11.2 TSF anchor: elapsed since the copy left the air, from the
     // SAME adapter's TSF; no TSF read → host-arrival approximation.
+    ++refusals_.accepted;
     last_applied_[key] = pkt.csa_nonce;
     last_accept_us_ = now_us;
     latched_ = pkt.prefix.originator;

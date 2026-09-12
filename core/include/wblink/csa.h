@@ -122,6 +122,26 @@ class CsaFollower {
     uint64_t freeze_until_us() const { return freeze_until_us_; }  // §11.3
     // The issuer this follower latched onto (established by a MAC-valid CSA).
     std::optional<uint16_t> latched_issuer() const { return latched_; }
+
+    // §11.4 refusal accounting. EVERY rejection path in on_csa() is a bare
+    // `return false` — fourteen of them in csa.cpp, and before this none left
+    // a trace. A craft declining every campaign was therefore indistinguishable
+    // from one that never heard a copy, from the ground AND from the craft: the
+    // 2026-09-13 bench spent three sessions on a 0/4 that any one of these
+    // would have answered in a single campaign. `accepted` is the denominator
+    // and is the field that separates "never heard one" from "heard, declined"
+    // — a refusal set that is all zeros while accepted is also zero means the
+    // copies are not arriving at all, which is a different fault entirely.
+    struct Refusals {
+        uint32_t no_key = 0;          // §11.4a empty key, fail closed
+        uint32_t bad_mac = 0;         // MAC mismatch
+        uint32_t issuer_lock = 0;     // bound to a different command source
+        uint32_t nonce_replay = 0;    // csa_nonce <= last applied for this key
+        uint32_t not_allowlisted = 0; // target outside policy.csa allowlist
+        uint32_t rate_limited = 0;    // inside min_interval_ms of the last
+        uint32_t accepted = 0;
+    };
+    const Refusals& refusals() const { return refusals_; }
     // §11.4a fail-closed rejections (empty key, non-spectator).
     uint64_t unauth_rejected() const { return unauth_rejected_; }
     const char* state_str() const;
@@ -150,6 +170,7 @@ class CsaFollower {
     CsaParams policy_;
     State state_ = State::kIdle;
     std::optional<uint16_t> latched_;
+    Refusals refusals_{};
     uint64_t unauth_rejected_ = 0;
     // §11.4 anti-replay: last accepted nonce per (originator, session).
     std::map<std::pair<uint16_t, uint32_t>, uint32_t> last_applied_;

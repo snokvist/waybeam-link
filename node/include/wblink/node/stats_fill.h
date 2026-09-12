@@ -271,7 +271,8 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
                        uint16_t channel_mhz = 0,
                        const UplinkStatsFill* uplink = nullptr,
                        const std::vector<UplinkDataStreamStats>* uplink_data =
-                           nullptr) {
+                           nullptr,
+                       const CsaFollower::Refusals* csa_refusals = nullptr) {
     const uint64_t now = now_ms();
     StatsSnapshot snap;
     snap.t_ms = now - t0;
@@ -286,6 +287,15 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
     }
     if (csa_state != nullptr) {
         snap.link.csa_state = csa_state;
+    }
+    if (csa_refusals != nullptr) {
+        snap.link.csa_accepted = csa_refusals->accepted;
+        snap.link.csa_no_key = csa_refusals->no_key;
+        snap.link.csa_bad_mac = csa_refusals->bad_mac;
+        snap.link.csa_issuer_lock = csa_refusals->issuer_lock;
+        snap.link.csa_nonce_replay = csa_refusals->nonce_replay;
+        snap.link.csa_not_allowlisted = csa_refusals->not_allowlisted;
+        snap.link.csa_rate_limited = csa_refusals->rate_limited;
     }
     snap.link.channel_mhz = channel_mhz;  // §11 current operating channel (0 = not tracked)
     if (tx != nullptr) {

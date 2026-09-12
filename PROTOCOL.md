@@ -5312,6 +5312,18 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   is the device set outright, so the array-parallelism rule that governs it in
   the array form does not apply.
 
+  **§11.4 refusal accounting (follower side, §15.3).** Every rejection path in
+  the follower's CSA acceptance is silent by construction — it drops the copy
+  and returns. A craft that declines every campaign is therefore
+  indistinguishable on the wire from one that never heard a copy, which cost
+  the 2026-09-13 bench three sessions on a campaign that landed 0/4. The
+  counters `csa_no_key`, `csa_bad_mac`, `csa_issuer_lock`, `csa_nonce_replay`,
+  `csa_not_allowlisted` and `csa_rate_limited` name which guard fired, and
+  `csa_accepted` is the denominator that separates "declined" from "never
+  arrived": all-zero refusals AND zero accepted means the copies are not
+  reaching the craft at all, a different fault. `csa_nonce_replay` is EXPECTED
+  nonzero on a healthy craft — copies 2..N of an accepted campaign land on it.
+
   **Enumeration is filtered by interface descriptor**, not by PID: a candidate
   is a device of a *supported vendor* exposing a **vendor-specific (`0xFF`)
   interface with at least one bulk IN and one bulk OUT** endpoint. Supported
@@ -5809,6 +5821,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "lockout_active_mask": 32, "lockout_latched_mask": 0,
     "lockout_conflict": false,
     "flap_freeze": false, "csa_state": "IDLE",
+    "csa_accepted": 0, "csa_no_key": 0, "csa_bad_mac": 0,
+    "csa_issuer_lock": 0, "csa_nonce_replay": 0,
+    "csa_not_allowlisted": 0, "csa_rate_limited": 0,
     "channel": 5805,
     "venc_bitrate_kbps": 14000, "venc_pushes": 6, "venc_failures": 0,
     "venc_live_fallback": false, "venc_persisted_writes": 0,

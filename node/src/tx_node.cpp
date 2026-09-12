@@ -1262,7 +1262,8 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
                        &shm_stats, nullptr, nullptr, &last_snap, &timing,
                        &vfill, cur_chan, nullptr,
-                       uplink_accepts.empty() ? nullptr : &uplink_data_stats);
+                       uplink_accepts.empty() ? nullptr : &uplink_data_stats,
+                       &csa.refusals());
             if (control) {
                 control->publish_stats(emitter.last_line());
             }
