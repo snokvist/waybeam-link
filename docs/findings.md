@@ -12,6 +12,63 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — the 0/4 was STALE CRAFT STATE; with a working baseline, MT7612U ears break CSA 0/2 vs 3/3
+
+The refusal counters (§11.4, this branch) were deployed to craft `.232` and
+answered the question in one campaign. **The craft was never refusing.**
+
+| | csa_accepted | refusals | verdict |
+|---|---|---|---|
+| claim campaign | 1 | 0 (+4 nonce_replay) | accepted |
+| retune campaign | 2 | 0 (+3 nonce_replay) | accepted, armed, jumped |
+
+`csa_nonce_replay` tracking `kCopies − 1` per campaign is the instrument
+reading exactly as designed — copies 2..5 of an accepted campaign. Every real
+refusal counter stayed **0** across 7 campaigns.
+
+**And then the campaigns started working.** Deploying the counters required
+restarting the craft's hub, which had been up since 2026-08-30. After that
+restart, class-0 retune campaigns on a single-adapter 8812AU ground confirmed
+**3 of 3** (5580, 5560, 5540) — ground and craft both `COMMITTED` on the
+target, verified from both control planes.
+
+So **the 0/4 was stale craft-side CSA state**, cleared by the restart, not a
+design fault. Every conclusion drawn while it was in effect was drawn on a
+broken baseline — including "class-0 campaigns fail bench-wide", which was
+wrong.
+
+**With a baseline that works, the MT7612U consequence isolates cleanly** —
+same craft, same channels, same binary, back to back:
+
+| ground | class-0 campaigns | signature |
+|---|---|---|
+| 8812AU alone | **3 / 3 confirmed** | — |
+| 8812AU + 2× MT7612U | **0 / 2** | `armed=1 landed=0 video=0` |
+
+The only variable is the presence of two MediaTek **diversity RX ears** — the
+uplink is the same 8812AU retuning in 41 ms in both arms. `landed=0` is the
+ground failing to arrive inside the class-0 deadline, because `retune_all` is
+serial and sums to ~1643 ms. **Pass 201's consequence is now confirmed against
+a control that actually passes**, which is what every earlier attempt lacked.
+
+No stranding in either arm: the craft reverted with the ground and both ended
+on 5540. The craft accepted all 7 campaigns; the failures were entirely
+ground-side.
+
+**What this changes for the final-jump spec.** The rework is still the right
+call — a design where each side independently backs out on its own timer is
+what makes a slow ear fatal rather than merely slow. But its justification is
+now narrower and more honest: CSA is **not** broken bench-wide, it works 3/3 on
+a Realtek ground. What it cannot survive is a slow radio anywhere in the node,
+and that is the thing the deadline removal fixes.
+
+**Method note.** A long-lived craft accumulating state that silently breaks a
+subsystem is not visible from the ground, and cost this investigation several
+wrong conclusions. Restart the craft before trusting a negative CSA result —
+and note the counters would have shown "accepted, not refused" on day one.
+
+---
+
 ## 2026-09-13 — craft-side CSA is observable after all, and every refusal is silent
 
 **Increment 0 of the CSA-final-jump spec, and it changes the diagnosis.**
