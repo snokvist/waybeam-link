@@ -179,16 +179,29 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
                 verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
             }
             if (now_us >= verify_deadline_us_) {
-                // §11.5 jump-failed backout: the retune landed on a dead
-                // channel — revert to prev_chan, drop the incomplete claim,
-                // return to IDLE. No mid-flight rendezvous (Pass 59).
-                a.kind = CsaAction::Kind::kRevert;
-                a.chan_mhz = campaign_.prev_chan;
-                a.bw = campaign_.prev_bw;
-                a.fast = campaign_.retune_class == 0;
-                a.power_intent = campaign_.power_intent;
-                latched_ = std::nullopt;
-                state_ = State::kIdle;
+                // §11.5 FINAL JUMP (Pass 202): the window closing without
+                // confirmation no longer backs out. It used to revert to
+                // prev_chan, which is what made the switch a two-sided
+                // VERIFIED handshake — and two ends deciding the same
+                // question from different evidence on independent timers can
+                // disagree, at which point one reverts and the other holds.
+                // That stranding was the design, not a bug in it, and
+                // rx_node.cpp recorded the exact shape: "the craft reaches
+                // COMMITTED on the target while the issuer reverts".
+                //
+                // We commit instead and stay. Recovery for a genuinely
+                // missed jump is RE-ACQUISITION, not backout: this node keeps
+                // transmitting on a channel inside the shared allowlist, so a
+                // ground scan always finds it. Losing the deadline is also
+                // what stops a slow radio being a protocol-level fault —
+                // measured, two MT7612U diversity ears took a 3-ear ground's
+                // serial retune_all to 1643 ms against a 300 ms budget and
+                // broke every campaign (0/2 against 3/3 without them).
+                //
+                // The binding is KEPT: dropping it here would re-open the
+                // craft to a different issuer on a channel it just followed
+                // this one onto.
+                state_ = State::kCommitted;
             }
             break;
         case State::kCommitted:
@@ -472,11 +485,20 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                     state_ = State::kIdle;
                     break;
                 }
-                // Issuer revert-on-no-video (§11.6 backstop, also covers a
-                // forged CSA_ARMED making us commit to a ghost).
-                a.kind = IssuerAction::Kind::kRevert;
-                a.chan_mhz = tmpl_.prev_chan;
-                a.bw = tmpl_.prev_bw;
+                // §11.6 FINAL JUMP (Pass 202): no video inside the window no
+                // longer retreats to prev_chan. The revert was a backstop
+                // against a jump the craft did not follow (and against a
+                // forged CSA_ARMED committing us to a ghost) — but it is the
+                // half of the handshake that strands the pair when the two
+                // ends disagree, and §11.4 authentication is what actually
+                // guards the forged case.
+                //
+                // `video_seen_` stays false here and is still reported, so an
+                // operator can tell a confirmed switch from an unconfirmed
+                // one. What changed is that we no longer ACT on it.
+                a.kind = IssuerAction::Kind::kSuccess;
+                a.chan_mhz = tmpl_.target_chan;
+                a.bw = tmpl_.target_bw;
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
                 state_ = State::kIdle;

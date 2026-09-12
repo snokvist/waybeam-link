@@ -200,11 +200,17 @@ int main() {
                    static_cast<unsigned>(CsaAction::Kind::kNone));
         CHECK_EQ_U(f.tick(329'000).kind,
                    static_cast<unsigned>(CsaAction::Kind::kNone));
+        // Pass 202 FINAL JUMP: the window still OPENS at landing and still
+        // closes on the same schedule — what changed is what closing does. It
+        // used to revert to prev_chan and drop the binding; it now commits and
+        // stays, because a two-sided verified handshake strands the pair
+        // whenever the two ends disagree.
         const auto rv = f.tick(330'000);  // wire t_revert_ms = 150 from landing
-        CHECK_EQ_U(rv.kind, static_cast<unsigned>(CsaAction::Kind::kRevert));
-        CHECK_EQ_U(rv.chan_mhz, 5805);  // prev_chan
-        CHECK(std::string_view(f.state_str()) == "IDLE");
-        CHECK(!f.latched_issuer().has_value());
+        CHECK_EQ_U(rv.kind, static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
+        // The binding is KEPT. Dropping it here would re-open this craft to a
+        // different issuer on a channel it just followed THIS one onto.
+        CHECK(f.latched_issuer().has_value());
     }
     {
         // §11.5a binding release: after bind_release_ms (default 90 s) of
@@ -353,10 +359,15 @@ int main() {
         CHECK_EQ_U(is.tick(300'000 + 149'000).kind,
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
+        // Pass 202 FINAL JUMP: the deadline still fires on the same schedule,
+        // but no-video no longer retreats to prev_chan — the issuer succeeds
+        // on the TARGET and stays. video_seen_ is still reported so an
+        // operator can tell a confirmed switch from an unconfirmed one; we
+        // simply no longer act on it.
         const auto a = is.tick(300'000 + 150'000);
         CHECK_EQ_U(a.kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
-        CHECK_EQ_U(a.chan_mhz, 5805);
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
+        CHECK_EQ_U(a.chan_mhz, 5745);  // target, not prev
         CHECK(!is.active());
         // Nonce advanced: the next campaign is strictly greater.
         CHECK(is.start({9, 0, 1234}, 5825, 0, 0, 5805, 0, 4, 10'000'000));
@@ -433,9 +444,12 @@ int main() {
         is.note_craft_video(120'000, false);  // BEFORE T_switch (300 ms, §11.2
                                               // Pass 91): ignored
         // Deadline = max(T_switch, landing) + verify_timeout = 300 + 150.
+        // Pass 202: pre-T_switch video is still ignored as commit proof, so
+        // the campaign closes unconfirmed — and now SUCCEEDS on the target
+        // rather than retreating.
         const auto a = is.tick(450'001);
         CHECK_EQ_U(a.kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
         CHECK(!is.active());
     }
     {
@@ -587,11 +601,14 @@ int main() {
                    static_cast<unsigned>(CsaAction::Kind::kRetune));
         CHECK_EQ_U(f.tick(180'000).kind,  // landing: window opens
                    static_cast<unsigned>(CsaAction::Kind::kNone));
-        // Clamped to the LOCAL 150 ms, so revert at 180+150 — not 180+65535.
+        // Clamped to the LOCAL 150 ms — the point is that a u16 t_revert_ms
+        // cannot strand the follower for 65 s. Pass 202 keeps the clamp and
+        // changes only the outcome: the window closes into COMMITTED.
         CHECK_EQ_U(f.tick(329'000).kind,
                    static_cast<unsigned>(CsaAction::Kind::kNone));
         CHECK_EQ_U(f.tick(330'000).kind,
-                   static_cast<unsigned>(CsaAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
     }
     // ...and the issuer CAN still shorten it.
     {
@@ -604,8 +621,11 @@ int main() {
         CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
         f.tick(150'000);                  // retune
         f.tick(180'000);                  // landing
+        // The issuer may still SHORTEN the window (Pass 86); Pass 202 changes
+        // what the window closing MEANS, not who may set it.
         CHECK_EQ_U(f.tick(230'000).kind,  // 180 + 50, the issuer's tighter budget
-                   static_cast<unsigned>(CsaAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaAction::Kind::kNone));
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
     }
     {
         // Pass 89: the §11.5 default is 500 ms, not the old median-derived
@@ -633,10 +653,12 @@ int main() {
         // re-anchors the deadline to 310 + 150 = 460 ms (was 450).
         is.note_craft_video(310'000, true);
         is.note_craft_video(400'000, true);
-        // Deadline: no commit proof was ever seen, so the issuer must REVERT
-        // and follow the craft back rather than declare success.
+        // Deadline with no commit proof — CSA_ARMED never cleared. Pre-Pass-202
+        // the issuer followed the craft back; under the final jump it stays on
+        // the target. The distinction stays VISIBLE (video_seen_ false and
+        // reported), it is simply no longer acted on.
         CHECK_EQ_U(is.tick(460'001).kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
         CHECK(!is.active());
     }
     {
@@ -700,8 +722,9 @@ int main() {
         is.note_craft_video(380'000, true);  // landing -> deadline 530
         is.note_craft_video(500'000, true);  // must NOT push it to 650
         is.note_craft_video(520'000, true);
+        // The deadline still must not be pushed out by later ARMED video.
         CHECK_EQ_U(is.tick(530'001).kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
         CHECK(!is.active());
     }
     {
@@ -723,7 +746,7 @@ int main() {
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
         CHECK_EQ_U(is.tick(450'001).kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
     }
     {
         // Pass 92: a campaign the craft never reaches leaves the deadline
@@ -738,7 +761,7 @@ int main() {
                    static_cast<unsigned>(
                        CsaIssuer::IssuerAction::Kind::kSendBeacon));
         CHECK_EQ_U(is.tick(450'001).kind,
-                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kRevert));
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
     }
     {
         // Pass 92: the seed the ENGINE ships. Pass 89 ruled 500 ms; the value
