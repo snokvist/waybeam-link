@@ -932,10 +932,14 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
         }
         if (found == 0) {
             return Result<RadioAir>::fail(
-                "radio: adapters.auto found no radio — no Realtek device "
-                "exposing a vendor-specific bulk interface is present (a "
-                "Bluetooth or card-reader dongle on the same vendor id is "
-                "deliberately not a candidate)");
+                "radio: adapters.auto found no radio — no supported device "
+                "exposing a vendor-specific bulk interface is present. "
+                "Supported means the Realtek vendor id, plus (only in a build "
+                "that compiled the MediaTek backend) the exact VID:PID pairs "
+                "in devourer's MT7612U table. A Bluetooth or card-reader "
+                "dongle on the same vendor id is deliberately not a "
+                "candidate, and MediaTek is matched by table rather than by "
+                "vendor id so a laptop's internal combo radio is not either.");
         }
         for (size_t i = 0; i < found; ++i) {
             AdapterCfg a;

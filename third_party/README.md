@@ -23,8 +23,14 @@ Build integration (top-level `CMakeLists.txt`, `WBLINK_RADIO=ON`):
   JAGUAR3_8822E (8812EU); `au` / `eu` / `8733b` pin one family for a craft
   build; `all` adds RTL8733BU **and the MediaTek MT7612U** to the fleet trio
   for a ground that may meet any craft. MT7612U is reachable only from `all`,
-  so it is compiled for `x86-ground` and `rk3566` and for nothing else — no
-  craft carries one, and it is the only non-Realtek family in the tree.
+  so no craft build compiles it — craft presets pin a narrow set, and it is the
+  only non-Realtek family in the tree. `all` is NOT only this repo's two ground
+  presets, though: a downstream consumer that vendors this tree and selects
+  `all` compiles the MediaTek backend too, even on a platform where it cannot
+  work (its firmware loader searches `/lib/firmware/mediatek` and `./firmware`,
+  neither of which exists on Android). `android-arm64` here leaves the chip set
+  at `fleet`, so this repo's only bionic gate never compiles an mt7612u TU —
+  that backend's bionic portability is UNTESTED by our gates.
   8814/Jaguar2/Kestrel/PCIe are off in every combination, and the top-level
   CMake **fails** if the vendored tree builds a family that was not asked
   for — MT7612U included, which is what keeps it out of the craft images.

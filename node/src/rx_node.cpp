@@ -1239,6 +1239,28 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
     // width, and the sweep's exit paths (selection, rest) stay retune_all
     // + reapply_tx_power, so the §11.2 TXAGC posture is unchanged.
     const bool scout_fast = air.value->adapter_caps(scout_idx).fastretune;
+    // §15.5 static per-die facts, read ONCE. adapter_caps() returns three
+    // std::strings by value (`aliases` is past SSO), so calling it per frame
+    // would put a malloc/free in the RX drain callback — the one path whose
+    // whole point is host CPU. `ear_stamped` answers "does this die fill
+    // RxAtrib.tsfl", which the §11 return anchor needs per paced EOB.
+    std::vector<uint8_t> ear_stamped;
+    for (size_t i = 0; i < air.value->rx_adapters(); ++i) {
+        ear_stamped.push_back(
+            air.value->adapter_caps(i).hw_rx_timestamp ? 1u : 0u);
+    }
+    // §11.2: an uplink die with no lean retune cannot meet the class-0
+    // timing contract — its full SetMonitorChannel is the only path it has.
+    // Loud at bring-up rather than silent at the first failed campaign,
+    // because the failure presents as a reverted CSA with the craft already
+    // committed, not as an error anyone would trace back to the adapter.
+    if (!scout_fast) {
+        wb_logf("radio: WARNING uplink die has no fast retune — §11.2 class-0 "
+                "campaigns and scout dwells both pay its FULL retune. On "
+                "MT7612U that is ~526 ms against a 300 ms class-0 budget: "
+                "quick-connect may not land, and a sweep costs ~0.5 s per "
+                "channel. Prefer a Realtek uplink where the ground has one.\n");
+    }
     ScoutEngine scout(
         ScoutEngine::Hooks{
             [&, scout_idx, scout_fast](uint16_t ch, uint8_t bw) {
@@ -2743,8 +2765,22 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 if (!air.value->supports_csa()) {
                     return;
                 }
+                // Same per-frame-stamp rule as the §11 return anchor below:
+                // on_csa computes `(uint32_t)tsf_now - rx_tsfl`, so a die
+                // that never fills RxAtrib.tsfl makes that the whole TSF low
+                // word. csa.cpp clamps it (`elapsed > dt_us -> 0`) where
+                // return_deadline did not, so this was never live — but it
+                // left a ~1-in-28000 chance per CSA of retuning up to dt
+                // early, and spent a USB control transfer per CSA on a die
+                // whose answer can never be used. Hand it nullopt instead and
+                // take the documented host-arrival path deliberately.
+                const bool csa_stamped =
+                    meta.adapter_id < ear_stamped.size() &&
+                    ear_stamped[meta.adapter_id] != 0;
                 if (follower.on_csa(*c, now_us_it,
-                                    air.value->read_tsf(meta.adapter_id),
+                                    csa_stamped
+                                        ? air.value->read_tsf(meta.adapter_id)
+                                        : std::nullopt,
                                     static_cast<uint32_t>(meta.tsf_us),
                                     std::nullopt)) {
                     // §10.7: a retune moves the channel out from under an
@@ -2877,7 +2913,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 //
                 // So gate on the per-frame stamp, not on the register read.
                 const bool stamped =
-                    air.value->adapter_caps(meta.adapter_id).hw_rx_timestamp;
+                    meta.adapter_id < ear_stamped.size() &&
+                    ear_stamped[meta.adapter_id] != 0;
                 const auto tsf_now = stamped
                                          ? air.value->read_tsf(meta.adapter_id)
                                          : std::nullopt;

@@ -3900,6 +3900,28 @@ static rendezvous channel cannot be redirected by a forged/accepted campaign.
   **class 0 (fast intra-band, `FastRetune`, ~0.5–2.5 ms) ⇒ 300 ms**; **class 1
   (cross-band, full `SetMonitorChannel`, up to ~277 ms on 8812AU) ⇒ 500 ms**.
 
+  **Both figures are FLOORS derived from a Realtek max-retune, so class 0 is a
+  DIE CAPABILITY, not a constant (Pass 201).** A die with no lean retune
+  override runs the full calibrating path for every hop, and if that exceeds
+  the class budget it cannot satisfy the class's timing contract at all — the
+  campaign is issued, the local retune overruns `dt_to_switch_ms`, and the node
+  lands after T_switch with the peer already COMMITTED. That failure presents
+  as a reverted CSA, not as an error, so it must be reasoned about here rather
+  than discovered. MediaTek MT7612U is such a die: no `FastRetune` override,
+  **526 ms measured** full retune, exceeding class 0 *and* class 1. It is
+  therefore supported as a diversity RX ear — where it never issues or follows
+  a campaign on its own clock — and a node on which it is the **only** radio
+  cannot meet class-0 timing. The §15.2 election ranks an unlisted part last
+  and the scout roams the uplink adapter only, so a mixed ground puts a Realtek
+  die in both roles and is unaffected.
+
+  `dt_to_switch_ms` is a per-copy `uint16` the ISSUER stamps, so widening it
+  from a per-adapter retune cost is available to a ground-issued campaign with
+  no wire change. It is NOT available to a craft-issued CSA that a ground
+  follows: the craft cannot know a following ground has a slow ear, so that
+  half needs the ground to advertise its retune cost. Neither is specified
+  here yet — see Pass 201.
+
   **Class 0 widened 150 → 300 ms (Pass 91, operator-ruled 2026-07-24).** The
   budget is no longer sized only by the retune it precedes: since Pass 90 it
   must simultaneously hold (a) a copy window long enough to deliver a campaign

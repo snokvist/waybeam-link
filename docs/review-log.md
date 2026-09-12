@@ -24,6 +24,48 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 201 — §3.0 enumeration is vendor-SET, and §11.2 class 0 is a die capability (2026-09-12)
+
+Two rulings, both forced by admitting the first non-Realtek family (MediaTek
+MT7612U) to the ground fleet.
+
+**§3.0 enumeration.** The candidate rule read "a Realtek-VID device exposing a
+vendor-specific (`0xFF`) interface with at least one bulk IN and one bulk OUT".
+It now reads *a device of a supported vendor* — the Realtek VID always, plus,
+**only in a build that compiled the MediaTek backend**, the exact VID:PID pairs
+in devourer's MT7612U table. MediaTek is matched by TABLE and never by its
+vendor id `0x0e8d`: that id also covers the internal combo radios in laptops,
+and a candidate has its kernel driver detached on the claim path, so a
+vendor-wide match would take the host's own WiFi off the air. A build without
+the backend must not accept those ids either — claiming a device no compiled
+backend can drive detaches a driver to reach nothing.
+
+**§11.2 class 0 is a capability, not a constant.** The class budgets
+(class 0 ⇒ 300 ms, class 1 ⇒ 500 ms) were derived from a max-retune assumption
+of ~0.5–2.5 ms fast / ~277 ms full, both Realtek figures. MT7612U has no lean
+retune override, so every retune is the full calibrating path: **526 ms
+measured**, which exceeds BOTH budgets. The ruling is that a die whose full
+retune exceeds the class budget cannot satisfy that class's timing contract,
+and the spec must say so rather than let a campaign be issued that cannot land
+— the failure presents as a reverted CSA with the craft already committed, not
+as an error.
+
+Scope of the consequence, measured rather than assumed: the scout roams the
+**uplink adapter only** (`scout_idx = tx_index()`), and the §15.2 election
+ranks an unlisted part last, so on a mixed ground the scout and the class-0
+issuer are both Realtek and neither is affected. The constraint binds a ground
+where MT7612U is the **only** radio. As a diversity ear it is unaffected and
+device-verified: three ears on the x86 ground, `diversity/uniq` 2.00, 0‰
+post-diversity loss over a 119 s soak.
+
+Not ruled here, deliberately: widening `dt_to_switch_ms` from a per-adapter
+retune cost. It is tractable for ground-issued campaigns (the field is a
+per-copy `uint16` the issuer stamps, and the class figures are floors, not
+caps) and needs a wire addition for craft-issued CSA, where the craft cannot
+know a following ground has a slow ear. Evidence: `feat/mt7612u-ground`,
+devourer `docs/mt7612u.md:246`, `Mt7612uRadio.cpp:1075`.
+
+
 ## Pass 200 — the responder's `supported` is a cached answer, not a lockout (2026-09-04)
 
 §15.5's `supported` was specified as "learned at the first arm attempt", and
