@@ -296,6 +296,42 @@ if(WBLINK_RADIO)
             "devourer built MT7612U despite WBLINK_DEVOURER_CHIPS="
             "'${WBLINK_DEVOURER_CHIPS}' — see the Kestrel note above.")
     endif()
+    # The families `third_party/README.md` promises are "off in every
+    # combination" and that had no witness until now: 8814, both Jaguar2
+    # variants, and PCIe. The first three default ON upstream — the exact
+    # property the 8733B note above cites as the reason a missing line means
+    # "silently on in every vehicle build" — so the guarantee was prose for
+    # them while being enforced for Kestrel/8733B/MT7612U. Latent rather than
+    # live (we set all four from _wblink_extra/OFF and CMP0077 is NEW), which
+    # is precisely the shape that survives a re-vendor unnoticed.
+    foreach(_k 8814 JAGUAR2 JAGUAR2_8822B JAGUAR2_8821C)
+        if(NOT _wblink_extra AND "DEVOURER_HAVE_${_k}=1" IN_LIST _wblink_dv_defs)
+            message(FATAL_ERROR
+                "devourer built ${_k} despite WBLINK_DEVOURER_CHIPS="
+                "'${WBLINK_DEVOURER_CHIPS}' — see the Kestrel note above.")
+        endif()
+    endforeach()
+    if("DEVOURER_HAVE_PCIE=1" IN_LIST _wblink_dv_defs)
+        message(FATAL_ERROR
+            "devourer built the PCIe transport; waybeam-link pins it OFF "
+            "unconditionally (USB only) — see the Kestrel note above.")
+    endif()
+    # POSITIVE witness, the mirror of every negative one above. Those fire when
+    # a family we did NOT ask for got built; none of them notices a family we
+    # DID ask for going missing. That direction is the one this branch depends
+    # on: without DEVOURER_HAVE_MT7612U the `#ifdef` in air_radio.cpp compiles
+    # the MediaTek arm out, is_radio_candidate() silently reverts to
+    # Realtek-only, MT7612U dongles stop enumerating — and the STATUS line
+    # below still prints mt7612u=ON. A re-vendor that renames or drops the
+    # define would delete the feature behind a green build.
+    if(_wblink_mt7612u AND NOT "DEVOURER_HAVE_MT7612U=1" IN_LIST _wblink_dv_defs)
+        message(FATAL_ERROR
+            "WBLINK_DEVOURER_CHIPS='${WBLINK_DEVOURER_CHIPS}' asks for MT7612U "
+            "but the vendored tree did not define DEVOURER_HAVE_MT7612U — the "
+            "enumeration arm in io/src/air_radio.cpp would compile out and no "
+            "MT7612U would be claimed, silently. Check the option name and "
+            "target_compile_definitions after a re-vendor.")
+    endif()
     message(STATUS
         "devourer chips '${WBLINK_DEVOURER_CHIPS}': jaguar1=${_wblink_j1} "
         "8822c=${_wblink_j3c} 8822e=${_wblink_j3e} 8733b=${_wblink_8733b} "

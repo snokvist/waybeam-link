@@ -6,6 +6,12 @@
 
 #include <cstdio>
 
+// The ID table is header-only and present in the vendored tree whether or not
+// the MT7612U BACKEND is compiled, so this check runs under the default
+// `fleet` merge gate too. Guarding it on DEVOURER_HAVE_MT7612U would have made
+// it dead code exactly where it needs to run: `dev` builds chips=fleet.
+#include "mt7612u/Mt7612uUsbIds.h"
+
 #include "wbtest.h"
 
 namespace {
@@ -64,6 +70,53 @@ void test_mpdu_len_without_fcs() {
     if (tiny) CHECK_EQ_U(*tiny, kFcsLen);
 }
 
+// §3.0 enumeration. A `true` here puts the device on the claim path, which
+// DETACHES its kernel driver — so a false positive takes the host's own radio
+// off the air rather than merely failing an open. The stub stands in for
+// devourer's mt7612u::is_usb_id table so both build arms run in one binary.
+bool stub_mt7612u_id(uint16_t vid, uint16_t pid) {
+    return vid == 0x0e8d && (pid == 0x7612 || pid == 0x7632);
+}
+
+void test_radio_vendor_ok() {
+    // Realtek is accepted whether or not MT7612U was built — the MediaTek
+    // clause is additive, never a replacement.
+    CHECK(radio_vendor_ok(0x0bda, 0x8812, false, stub_mt7612u_id));
+    CHECK(radio_vendor_ok(0x0bda, 0x8812, true, stub_mt7612u_id));
+    CHECK(radio_vendor_ok(0x0bda, 0xa81b, false, stub_mt7612u_id));
+
+    // MT7612U only when the family is actually compiled in. Without the
+    // backend a claimed dongle has no driver, so accepting it would detach a
+    // kernel driver to reach a device nothing can talk to.
+    CHECK(!radio_vendor_ok(0x0e8d, 0x7612, false, stub_mt7612u_id));
+    CHECK(radio_vendor_ok(0x0e8d, 0x7612, true, stub_mt7612u_id));
+    CHECK(radio_vendor_ok(0x0e8d, 0x7632, true, stub_mt7612u_id));
+
+    // THE one that matters: match the ID TABLE, never MediaTek's vendor id.
+    // 0e8d:0616 is an internal laptop combo radio and is present on the dev
+    // host — a vendor-wide test would take the machine's own WiFi off the air.
+    CHECK(!radio_vendor_ok(0x0e8d, 0x0616, true, stub_mt7612u_id));
+    CHECK(!radio_vendor_ok(0x0e8d, 0x0616, false, stub_mt7612u_id));
+    // Neither vendor, either arm.
+    CHECK(!radio_vendor_ok(0x1234, 0x7612, true, stub_mt7612u_id));
+
+    // And against devourer's REAL table, not just the stub: a stub that
+    // drifted from the vendored table would otherwise let this pass while the
+    // shipping predicate matched something else.
+    CHECK(mt7612u::is_usb_id(0x0e8d, 0x7612));
+    CHECK(!mt7612u::is_usb_id(0x0e8d, 0x0616));
+    CHECK(!mt7612u::is_usb_id(0x0bda, 0x8812));  // disjoint from Realtek
+    // The table must stay disjoint from Realtek's VID entirely, or the two
+    // clauses of radio_vendor_ok() would overlap and the MediaTek arm could
+    // silently widen the Realtek one.
+    for (uint16_t pid = 0x8000; pid < 0x9000; ++pid) {
+        if (mt7612u::is_usb_id(0x0bda, pid)) {
+            CHECK(false);  // a Realtek-VID entry in the MediaTek table
+            break;
+        }
+    }
+}
+
 void test_rssi_dbm_from_chains() {
     // 0 on every chain = no PHY report on this frame. The previous reading is
     // kept: a report-less frame says nothing about signal, and inventing a
@@ -102,6 +155,7 @@ void test_rssi_dbm_from_chains() {
 int main() {
     test_desc_rate_to_mcs();
     test_mpdu_len_without_fcs();
+    test_radio_vendor_ok();
     test_rssi_dbm_from_chains();
     return wbtest_finish("radio_decode_test");
 }

@@ -42,7 +42,8 @@ namespace wblink {
 
 namespace {
 
-constexpr uint16_t kRealtekVid = 0x0bda;
+// kRealtekVid now lives in radio_decode.h beside radio_vendor_ok(), so the
+// enumeration rule and its test read the same constant.
 constexpr size_t kRxQueueCap = 512;
 
 // AdapterCfg.channel_mhz (center frequency) → 802.11 channel number.
@@ -110,11 +111,21 @@ bool is_radio_candidate(libusb_device* dev) {
     if (libusb_get_device_descriptor(dev, &dd) != 0) {
         return false;
     }
-    bool vendor_ok = dd.idVendor == kRealtekVid;
+    // The VID:PID rule itself is radio_vendor_ok() in radio_decode.h — pure,
+    // so it is unit-tested; this function cannot be, because everything below
+    // needs a live libusb_device. The build answer is passed as a value rather
+    // than #ifdef'd inside the predicate so a test can drive both arms.
 #ifdef DEVOURER_HAVE_MT7612U
-    vendor_ok = vendor_ok || mt7612u::is_usb_id(dd.idVendor, dd.idProduct);
+    constexpr bool kMt7612uBuilt = true;
+    const auto mt7612u_id = [](uint16_t v, uint16_t p) {
+        return mt7612u::is_usb_id(v, p);
+    };
+#else
+    constexpr bool kMt7612uBuilt = false;
+    const auto mt7612u_id = [](uint16_t, uint16_t) { return false; };
 #endif
-    if (!vendor_ok) {
+    if (!radio_vendor_ok(dd.idVendor, dd.idProduct, kMt7612uBuilt,
+                         mt7612u_id)) {
         return false;
     }
     // EVERY configuration, not just the active one. A device that no kernel
@@ -234,6 +245,8 @@ struct RadioAir::Impl {
         std::string part;
         std::string aliases;
         bool fastretune_ok = false;
+        // §15.5: does this backend stamp RxAtrib.tsfl? False on MT7612U.
+        bool hw_rx_timestamp = false;
         std::thread rx_thread;
 
         // §15.2 (Pass 195): the per-unit teardown lives HERE, not only in
@@ -1402,6 +1415,10 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
     // thread per adapter over the already-up chip. RX threads start only
     // after the Pass 154 re-bind below — an adapter id crossing the queue
     // must be the FINAL stanza index.
+    // §15.2: units whose bring-up threw, dropped together AFTER the loop.
+    // Erasing inside it would invalidate both the index and the three arrays
+    // that must stay parallel (im.adapters / cfg.adapters / cfg.adapter_fds).
+    std::vector<size_t> bringup_failed;
     for (size_t i = 0; i < im.adapters.size(); ++i) {
         Impl::Adapter& ad = *im.adapters[i];
         const uint8_t chan = mhz_to_channel(cfg.adapters[i].channel_mhz);
@@ -1438,6 +1455,7 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
             ad.part = dcaps.chip_name != nullptr ? dcaps.chip_name : "";
             ad.aliases = dcaps.marketing_names != nullptr ? dcaps.marketing_names : "";
             ad.fastretune_ok = dcaps.fastretune_ok;
+            ad.hw_rx_timestamp = dcaps.hw_rx_timestamp;
             // §10.5 (Pass 171): whether this die has a TX-power lever at all,
             // read at the same moment and for the same reason. ANNOUNCED on a
             // role:"tx" adapter, because the node keeps flying without one (the
@@ -1459,10 +1477,60 @@ Result<RadioAir> RadioAir::create(RadioAirCfg cfg) {
                 ad.mac = buf;
             }
         } catch (const std::exception& e) {
-            return Result<RadioAir>::fail(
-                "radio: adapter \"" + ad.name + "\": bring-up failed: " +
-                e.what());
+            // A bring-up throw is per-UNIT evidence, and under `adapters.auto`
+            // the node's job is to fly on whatever came up — the same posture
+            // the claim path already takes for a candidate that cannot be
+            // opened (skip_or_fail above). Failing the whole create() here
+            // meant one dongle could refuse the entire ground: MT7612U throws
+            // when its firmware blobs are missing (linux-firmware ships them
+            // zstd-compressed and devourer reads them raw), so plugging a
+            // supported MediaTek part into a ground whose image lacks
+            // /lib/firmware/mediatek/mt7662*.bin took down a link that three
+            // working Realtek ears were otherwise carrying. A degraded node
+            // beats a node that will not start.
+            //
+            // The ARRAY form still fails: there the operator named this port,
+            // so a unit that cannot come up is a config error they can act on,
+            // not a surprise on the bench.
+            if (!automode) {
+                return Result<RadioAir>::fail(
+                    "radio: adapter \"" + ad.name + "\": bring-up failed: " +
+                    e.what());
+            }
+            wb_logf("radio: adapters.auto: SKIPPING \"%s\" at %s — bring-up "
+                    "failed: %s\n",
+                    ad.name.c_str(),
+                    ad.path.empty() ? "(unclaimed)" : ad.path.c_str(),
+                    e.what());
+            bringup_failed.push_back(i);
+            continue;
         }
+    }
+
+    // Drop the units that threw, keeping the three parallel arrays in step.
+    // Reverse order so each erase leaves the lower indices valid. The unit's
+    // own destructor runs devourer's teardown (§15.2 per-unit teardown), so
+    // the dongle is released rather than left claimed.
+    if (!bringup_failed.empty()) {
+        for (size_t k = bringup_failed.size(); k-- > 0;) {
+            const size_t idx = bringup_failed[k];
+            im.adapters.erase(im.adapters.begin() +
+                              static_cast<std::ptrdiff_t>(idx));
+            if (idx < cfg.adapters.size()) {
+                cfg.adapters.erase(cfg.adapters.begin() +
+                                   static_cast<std::ptrdiff_t>(idx));
+            }
+            if (idx < cfg.adapter_fds.size()) {
+                cfg.adapter_fds.erase(cfg.adapter_fds.begin() +
+                                      static_cast<std::ptrdiff_t>(idx));
+            }
+        }
+        if (im.adapters.empty()) {
+            return Result<RadioAir>::fail(
+                "radio: adapters.auto: every claimed radio failed bring-up");
+        }
+        wb_logf("radio: adapters.auto: %zu adapter(s) survived bring-up\n",
+                im.adapters.size());
     }
 
     // §15.2 (Pass 195) THE ELECTION. Every unit is up and has named its die
@@ -2079,7 +2147,8 @@ AirIface::AdapterCapsView RadioAir::adapter_caps(size_t adapter) const {
     // All cached at bring-up (§15.5 Pass 172) — this read is USB-free, the
     // same property tx_power_applied() latches for.
     return AdapterCapsView{a.chip,           a.part,          a.aliases,
-                           a.power_actuator_ok, a.ldpc_flag_ok, a.fastretune_ok};
+                           a.power_actuator_ok, a.ldpc_flag_ok, a.fastretune_ok,
+                           a.hw_rx_timestamp};
 }
 
 // §10.5 (Pass 150): devourer's native lever already IS the relative one —
@@ -2107,7 +2176,16 @@ bool RadioAir::retune(size_t adapter, uint16_t chan_mhz, uint8_t width_mhz,
         return false;
     }
     IRadio& dev = *impl_->adapters[adapter]->dev;
-    if (fast && bw == 0) {
+    // §11.2 class 0 is a TIMING contract, not merely a shorter code path, and
+    // `fastretune_ok` is the die's own answer to whether it can honour one.
+    // MT7612U does not override FastRetune, so IRadio's base implementation
+    // runs a full SetMonitorChannel anyway — devourer measures 526 ms there
+    // against ~48 ms on its own fast path. Taking the `fast` arm would not be
+    // quicker; it would only let the caller believe a half-second blocking
+    // retune was a 2.5 ms one, inside the §11.2 switch deadline. Route it to
+    // the explicit branch so the cost sits where the caller can see it.
+    const bool fast_ok = fast && impl_->adapters[adapter]->fastretune_ok;
+    if (fast_ok && bw == 0) {
         // §11.2 class 0: same-width hop, ~0.5–2.5 ms. FastRetune skips the
         // TXAGC re-apply, so the caller follows up with reapply_tx_power().
         dev.FastRetune(chan);
@@ -2436,7 +2514,10 @@ void RadioAir::Impl::quality_drain(uint64_t now_steady_ms) {
         if (s.frames > 0) {
             w.rssi_peak_dbm = s.rssi_max_raw - 110;
             w.rssi_mean_dbm = s.rssi_mean_raw - 110;
-            w.snr_db = s.snr_mean_raw / 2;
+            if (s.snr_valid) {
+                w.snr_db = s.snr_mean_raw / 2;
+                w.snr_valid = true;
+            }
             if (s.evm_valid) {
                 w.evm_db = s.evm_mean_raw / 2;
                 w.evm_valid = true;
@@ -2458,6 +2539,20 @@ void RadioAir::Impl::quality_drain(uint64_t now_steady_ms) {
     // Pass 155). No ear heard anything → NoSignal.
     if (best < 0) {
         quality_verdict = link_verdict::kNoSignal;
+        return;
+    }
+    // §3.16: the classifier's constellation legs are
+    // `dirty = evm_poor || (!evm_valid && snr_poor)` — so with EVM absent it
+    // rests entirely on SNR, and LinkHealthInput has no way to say "no SNR
+    // sample". Handing it the accumulator's 0 asserts snr_poor, and a strong
+    // near ear then classifies SATURATED with the fix "REDUCE TX power" —
+    // confidently wrong, and wrong in the direction an operator would act on.
+    // An ear with neither EVM nor SNR has no constellation evidence at all,
+    // which §3.16 already has a value for: kUnknown, "absence of evidence,
+    // gates nothing". Reachable for the first time on MT7612U, which never
+    // reports EVM and reports SNR only when the RXWI noise byte is plausible.
+    if (!best_raw.evm_valid && !best_raw.snr_valid) {
+        quality_verdict = link_verdict::kUnknown;
         return;
     }
     devourer::LinkHealthInput in;

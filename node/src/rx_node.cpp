@@ -2858,7 +2858,29 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 // adapters); a failed read falls back to host arrival.
                 // Pass 78: audio EOBs don't re-anchor — the craft's gap
                 // keys on the same video EOB this side heard.
-                const auto tsf_now = air.value->read_tsf(meta.adapter_id);
+                // The anchor is `tsf_now - meta.tsf_us`, so it needs BOTH
+                // halves. read_tsf() supplies the first and succeeds on any
+                // die with a TSF register — including MT7612U. The second is
+                // the EOB frame's own stamp, which only a backend that fills
+                // RxAtrib.tsfl can give: MT7612U does not (hw_rx_timestamp
+                // false, the RXWI TSF field is unparsed) and leaves it 0.
+                //
+                // Zero is not "absent" to the arithmetic below. `elapsed`
+                // would become the whole TSF low word, which clears any
+                // plausible `target` with probability ~1, so return_deadline
+                // takes its "window middle already passed" arm and fires the
+                // coalesced return IMMEDIATELY — into the craft's transmit
+                // window, the one place §11 return pacing exists to avoid.
+                // That is strictly worse than having no TSF at all, which
+                // yields the documented elapsed=0 fallback, and it would
+                // report itself as anchored while doing it.
+                //
+                // So gate on the per-frame stamp, not on the register read.
+                const bool stamped =
+                    air.value->adapter_caps(meta.adapter_id).hw_rx_timestamp;
+                const auto tsf_now = stamped
+                                         ? air.value->read_tsf(meta.adapter_id)
+                                         : std::nullopt;
                 ret_tsf_anchored = tsf_now.has_value();
                 if (!tsf_now) {
                     ++tsf_fallbacks;

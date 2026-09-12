@@ -5280,8 +5280,16 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   the array form does not apply.
 
   **Enumeration is filtered by interface descriptor**, not by PID: a candidate
-  is a Realtek-VID device exposing a **vendor-specific (`0xFF`) interface with
-  at least one bulk IN and one bulk OUT** endpoint. That admits every radio
+  is a device of a *supported vendor* exposing a **vendor-specific (`0xFF`)
+  interface with at least one bulk IN and one bulk OUT** endpoint. Supported
+  vendor means the Realtek VID (`0x0bda`) always, plus — only in a build that
+  actually compiled the MediaTek backend — the exact VID:PID pairs in
+  devourer's MT7612U table. MediaTek is matched by TABLE and never by its
+  vendor id `0x0e8d`, which also covers the internal combo radios in laptops:
+  a candidate has its kernel driver detached on the claim path, so a
+  vendor-wide match would take the host's own WiFi off the air. A build
+  without the backend must not accept those ids either — claiming a device no
+  compiled backend can drive detaches a driver to reach nothing. That admits every radio
   devourer supports and excludes the Realtek Bluetooth (`0xE0`), mass-storage
   (`0x08`, including the ZeroCD `0bda:1a2b` identity) and HID devices sharing
   the vendor id — which the unfiltered VID-only scan would otherwise open. The

@@ -396,6 +396,13 @@ class RadioAir : public AirIface {
         int32_t rssi_peak_dbm = 0;
         int32_t rssi_mean_dbm = 0;
         int32_t snr_db = 0;
+        // false = no frame in the window carried SNR, not "0 dB". New at the
+        // 30d248e bump (RxQualitySnapshot::snr_valid) and load-bearing for
+        // the first die we build that can leave it unset: MT7612U fills snr[]
+        // only when the RXWI noise byte is plausible. Without the flag a
+        // silent window publishes a fabricated 0 as a measurement, and §3.16
+        // reads that 0 as "SNR poor".
+        bool snr_valid = false;
         int32_t evm_db = 0;       // lower (more negative) = cleaner
         bool evm_valid = false;   // false = no frame carried EVM, not "0"
         int32_t noise_dbm = 0;    // passive floor: rssi_dbm - snr_db
