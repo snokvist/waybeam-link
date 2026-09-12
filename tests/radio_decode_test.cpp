@@ -8,9 +8,19 @@
 
 // The ID table is header-only and present in the vendored tree whether or not
 // the MT7612U BACKEND is compiled, so this check runs under the default
-// `fleet` merge gate too. Guarding it on DEVOURER_HAVE_MT7612U would have made
-// it dead code exactly where it needs to run: `dev` builds chips=fleet.
+// `fleet` merge gate too — guarding it on DEVOURER_HAVE_MT7612U would have
+// made it dead code exactly where it needs to run, since `dev` builds
+// chips=fleet.
+//
+// WBLINK_RADIO is a different axis and does gate it: at WBLINK_RADIO=OFF the
+// whole devourer subdirectory is skipped, so its include path does not exist.
+// This test deliberately builds in that configuration (it is outside the
+// `if(WBLINK_RADIO)` gate in tests/CMakeLists.txt, like dot11_test), and no
+// gate arm covers RADIO=OFF — `gates.sh`'s "reduced" arm pins RADIO=ON on
+// purpose — so an unguarded include here breaks a supported build invisibly.
+#if WBLINK_RADIO
 #include "mt7612u/Mt7612uUsbIds.h"
+#endif
 
 #include "wbtest.h"
 
@@ -100,6 +110,7 @@ void test_radio_vendor_ok() {
     // Neither vendor, either arm.
     CHECK(!radio_vendor_ok(0x1234, 0x7612, true, stub_mt7612u_id));
 
+#if WBLINK_RADIO
     // And against devourer's REAL table, not just the stub: a stub that
     // drifted from the vendored table would otherwise let this pass while the
     // shipping predicate matched something else.
@@ -115,6 +126,7 @@ void test_radio_vendor_ok() {
             break;
         }
     }
+#endif  // WBLINK_RADIO
 }
 
 void test_rssi_dbm_from_chains() {

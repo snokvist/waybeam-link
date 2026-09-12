@@ -2504,6 +2504,8 @@ void RadioAir::Impl::quality_drain(uint64_t now_steady_ms) {
     quality_drained_ms = now_steady_ms;
     int best = -1;
     devourer::RxQualitySnapshot best_raw{};
+    int evidence = -1;
+    devourer::RxQualitySnapshot evidence_raw{};
     for (size_t i = 0; i < adapters.size(); ++i) {
         // snapshot() drains and resets the vendored accumulator. Unit folds
         // per LinkHealth.h: PWDB dBm ≈ raw − 110; SNR/EVM signed half-dB
@@ -2526,9 +2528,21 @@ void RadioAir::Impl::quality_drain(uint64_t now_steady_ms) {
                 w.noise_dbm = static_cast<int32_t>(s.nf_mean_dbm);
                 w.noise_valid = true;
             }
+            // Two bests, on purpose. `best` is the strongest ear full stop
+            // — what "did any ear hear anything" turns on. `evidence` is the
+            // strongest ear that carried CONSTELLATION evidence (EVM or SNR),
+            // which is the only kind of ear §3.16 can classify at all. They
+            // are the same adapter on an all-Realtek node and diverge exactly
+            // on the mixed ground this branch creates.
             if (best < 0 || s.rssi_max_raw > best_raw.rssi_max_raw) {
                 best = static_cast<int>(i);
                 best_raw = s;
+            }
+            if ((s.evm_valid || s.snr_valid) &&
+                (evidence < 0 ||
+                 s.rssi_max_raw > evidence_raw.rssi_max_raw)) {
+                evidence = static_cast<int>(i);
+                evidence_raw = s;
             }
         }
         quality_cache[i] = w;
@@ -2547,14 +2561,27 @@ void RadioAir::Impl::quality_drain(uint64_t now_steady_ms) {
     // sample". Handing it the accumulator's 0 asserts snr_poor, and a strong
     // near ear then classifies SATURATED with the fix "REDUCE TX power" —
     // confidently wrong, and wrong in the direction an operator would act on.
-    // An ear with neither EVM nor SNR has no constellation evidence at all,
+    // Reachable for the first time on MT7612U, which never reports EVM and
+    // reports SNR only when the RXWI noise byte is plausible.
+    //
+    // Classify the strongest ear WITH evidence, not the strongest ear. Those
+    // differ only on a mixed node — and a mixed node is what this branch
+    // builds, so refusing to classify because the loudest ear happens to be
+    // the blind one would throw away a Realtek sibling's full EVM+SNR from
+    // the same window. kUnknown is not inert downstream: it suppresses the
+    // §3.16 verdict frame to the craft (rx_core.h), stands down the §15.5a
+    // "impairment is not channel-attributable" refusal and neutralises the
+    // scout ranking hook. Silence is a weaker answer than a wrong one, but it
+    // is still an answer, and it must not be produced while evidence exists.
+    //
+    // Only when NO ear carried either metric is there nothing to classify —
     // which §3.16 already has a value for: kUnknown, "absence of evidence,
-    // gates nothing". Reachable for the first time on MT7612U, which never
-    // reports EVM and reports SNR only when the RXWI noise byte is plausible.
-    if (!best_raw.evm_valid && !best_raw.snr_valid) {
+    // gates nothing".
+    if (evidence < 0) {
         quality_verdict = link_verdict::kUnknown;
         return;
     }
+    best_raw = evidence_raw;
     devourer::LinkHealthInput in;
     in.frames = best_raw.frames;
     in.rssi_raw = best_raw.rssi_max_raw;
