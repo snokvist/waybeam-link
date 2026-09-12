@@ -335,6 +335,11 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
     // Seeded kRetune: every campaign that is not an operator acquire is a
     // move of the craft we already fly, and that is the conservative half.
     CampaignIntent campaign_intent = CampaignIntent::kRetune;
+    // §11 recovery ordering (Pass 202): the channel the last campaign aimed
+    // at. Under the final jump a peer that did not follow is on exactly one of
+    // two channels — where it was, or where we told it to go — so the scout
+    // tries those first. 0 = no campaign issued this run.
+    uint16_t last_csa_target = 0;
     std::string selection_state = "configured";
     std::string previous_selection_state = selection_state;
 
@@ -1312,6 +1317,36 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
         std::vector<uint16_t> channels = requested;
         if (channels.empty()) channels = l.cfg.scout.channels;
         if (channels.empty()) channels = l.cfg.policy.csa.channel_allowlist;
+        // §11 recovery ordering (Pass 202). A full sweep costs 10.9 s on an
+        // 8812AU and 33.6 s with an MT7612U uplink (measured 2026-09-12), and
+        // under the final jump the common reason to be sweeping at all is a
+        // jump one end did not follow. In that case the peer is on one of two
+        // channels: the one we were last latched to, or the campaign target.
+        // Trying those first turns re-acquisition into ~1 s without changing
+        // WHICH channels are eligible — this is a stable reorder of the list,
+        // never an addition, so the allowlist stays the only authority on what
+        // may be tuned (§11.4 fail-closed).
+        {
+            const uint16_t hints[] = {active_selection.chan, last_csa_target,
+                                      operating_chan};
+            std::vector<uint16_t> ordered;
+            ordered.reserve(channels.size());
+            for (const uint16_t h : hints) {
+                if (h == 0) continue;
+                bool already = false;
+                for (const uint16_t o : ordered) already = already || (o == h);
+                if (already) continue;
+                bool eligible = false;
+                for (const uint16_t c : channels) eligible = eligible || (c == h);
+                if (eligible) ordered.push_back(h);
+            }
+            for (const uint16_t c : channels) {
+                bool taken = false;
+                for (const uint16_t o : ordered) taken = taken || (o == c);
+                if (!taken) ordered.push_back(c);
+            }
+            channels.swap(ordered);
+        }
         scout.set_rest_chan(operating_chan);
         scout.set_rest_filter(active_selection.net_id);
         const uint16_t selected_originator = active_selection.originator;
@@ -1569,6 +1604,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
         // which is why the OSD menu's channel jumps worked and quick-connect
         // did not).
         const CommonPrefix pre{l.cfg.node.originator, 0, session};
+        last_csa_target = target;
         if (!issuer.start(pre, target, 0, 0, cand->chan, 0, 4, now_us_it)) {
             claim_rollback();
             // Named precisely: this is also what a target outside
@@ -2233,6 +2269,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                     }
                 }
                 const CommonPrefix pre{l.cfg.node.originator, 0, session};
+                last_csa_target = static_cast<uint16_t>(mhz);
                 if (issuer.start(pre, static_cast<uint16_t>(mhz), 0,
                                  static_cast<uint8_t>(klass != 0),
                                  operating_chan, active_selection.bw, 4,

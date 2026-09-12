@@ -24,6 +24,50 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 202 — the channel switch is a FINAL JUMP, not a verified handshake (2026-09-13)
+
+§11's switch was two-sided and *verified*: both ends jump at T_switch, each
+waits for evidence of the other, and each backs out alone on its own timer —
+craft at `csa.cpp` kVerify (revert to `prev_chan`), ground at kVerify
+(revert-on-no-video). Two ends deciding the same question from different
+evidence on independent timers can disagree, and when they do one reverts while
+the other holds. `rx_node.cpp` already recorded the shape for retune class 1:
+*"the craft reaches COMMITTED on the target while the issuer reverts."*
+**Stranding was the design, not a fault in it.**
+
+**Ruling: both back-out edges are removed.** Agree `(channel, T_switch)`, both
+go, both stay. The craft commits and holds (keeping its binding — dropping it
+would re-open the craft to another issuer on a channel it had just followed
+this one onto). The issuer succeeds on the TARGET. `video_seen_` is unchanged
+and still published, so a confirmed switch remains distinguishable from an
+unconfirmed one; it is no longer *acted on*.
+
+**Recovery is re-acquisition, not backout.** A craft that missed the jump keeps
+transmitting on a channel inside the shared allowlist, so a ground scan always
+finds it. The scout now orders its sweep by last-latched channel, then last
+campaign target, then the rest — a stable reorder, never an addition, so the
+allowlist stays the only authority on what may be tuned. A full sweep costs
+10.9 s (8812AU) / 33.6 s (MT7612U uplink); the two plausible channels cost ~1 s.
+
+**What is given up, stated plainly.** The revert was a second line of defence
+against a campaign the peer never followed, and against a forged `CSA_ARMED`
+committing the issuer to a ghost. §11.4 authentication is now the only guard
+on the forged case, and it is unchanged. The cost of a genuinely missed jump is
+a re-acquisition outage rather than an automatic backout.
+
+**This dissolves Pass 201 rather than fixing it.** With no verify deadline
+there is no deadline to miss, so a slow radio is merely slow. Measured against
+a baseline that passes: an 8812AU ground lands class-0 **3/3**, and the same
+ground with two MT7612U **diversity** ears lands **0/2** (`landed=0`) because
+`retune_all` is serial and sums to 1643 ms against a 300 ms budget. No per-die
+rule is introduced anywhere.
+
+**Deployment is fleet-wide.** A new ground against an old craft leaves the
+craft reverting underneath it. The craft-side change is a deletion, which is
+the safe direction, but both ends must move together. Evidence:
+`specs/2026-09-13-csa-final-jump/`, `docs/findings.md` 2026-09-13.
+
+
 ## Pass 201 — §3.0 enumeration is vendor-SET, and §11.2 class 0 is a die capability (2026-09-12)
 
 Two rulings, both forced by admitting the first non-Realtek family (MediaTek

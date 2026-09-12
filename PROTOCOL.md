@@ -4073,7 +4073,16 @@ IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─�
                                                                                                 csa_settle_s)
 ```
 COMMITTED is terminal until reboot — it has no automatic outgoing edge (no
-mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
+mid-flight revert). **Pass 202: there is now no backout at all.** VERIFY closing
+without confirmation commits and STAYS; it no longer reverts to `prev_chan`,
+and the binding is kept. The switch is a final jump — agree
+`(channel, T_switch)`, both ends go, both ends stay — because two ends deciding
+the same question from different evidence on independent timers can disagree,
+and when they do one reverts while the other holds. Recovery for a genuinely
+missed jump is RE-ACQUISITION by scan, not backout: a craft that missed it
+keeps transmitting on a channel inside the allowlist, so a ground always finds
+it, and §11.5a's scout ordering (last-latched channel, then last campaign
+target) bounds that to ~1 s against a 10.9-33.6 s full sweep.
 - **Jump-failed backout (kept):** in VERIFY, no valid traffic within
   `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note below) → revert
   to `prev_chan` and return to IDLE.
@@ -4217,8 +4226,10 @@ direction** lets us make the strand class *never happen* rather than recover aft
 - **Issuer failure posture is INTENT-SCOPED (Pass 199).** Two operator-visible
   operations share this one campaign machine and need opposite failures:
   - **RETUNE** — move the craft we already fly to another channel
-    (`POST /api/v1/csa`). The operator never asked to leave it, so a failed
-    move MUST NOT strand it: revert to `prev_chan` as below.
+    (`POST /api/v1/csa`). **Pass 202: the intent split no longer changes the
+    failure posture** — with no backout on either side there is one posture,
+    and a failed move leaves both ends on the target rather than stranding
+    them on opposite channels, which is what the revert actually produced.
   - **ACQUIRE** — leave the current craft and take a different one
     (`POST /api/v1/scout/quickconnect`). The operator explicitly abandoned the
     previous craft, so a revert UNDOES the request. It also lands them on a
