@@ -92,6 +92,28 @@ operator-triggered. Increment 3 makes it ~1 s when run; nothing runs it
 automatically. Auto-scout on an unconfirmed close is an operator decision and
 is deliberately not invented here.
 
+## Increment 4c — one generous dt (ADDED after the second device run)
+
+Also not anticipated as an increment, though `requirements.md` had already
+ruled it: *"`dt_to_switch_ms` — kept, generous, single value."* It was left
+unimplemented, and the bench proved it was not cosmetic. Cross-channel retunes
+landed **0 of N** while same-channel claims landed every time; the craft WAS
+accepting and jumping, but its `CSA_ARMED` could not get back inside a 250 ms
+copy window, so the issuer aborted — and with Pass 202's revert gone, nothing
+undid the split.
+
+- `kDtToSwitchMs = 5000`, class split deleted; `retune_class` keeps only its
+  fast/slow radio-path meaning.
+- `T_switch` replaces `ack_timeout_ms` as the ack deadline (the 1000 ms timer
+  fired 4 s before T_switch and killed live campaigns).
+- **Verify:** 5/5 cross-channel class-0 campaigns converge, read from both
+  control planes. **Done** — see `validation.md`.
+- **Recorded as Pass 204.**
+
+**Accepted cost:** the issuer pre-positions on `CSA_ARMED` and then waits out
+the rest of `dt`, so a channel change carries a video gap of up to `dt`.
+Shortening it per adapter is the min-maxing the operator ruled out.
+
 ## Increment 5 — fleet
 
 Ground and craft must move together; a new ground against an old craft leaves

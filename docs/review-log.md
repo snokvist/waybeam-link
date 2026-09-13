@@ -24,6 +24,48 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 204 — §11.2's dt is ONE generous value, and T_switch is the ack deadline (2026-09-13)
+
+**Verdict.** The class-0 / class-1 `dt_to_switch_ms` split (300 / 500 ms) is
+deleted. `dt` is a single generous value (`CsaIssuer::kDtToSwitchMs` = 5000 ms)
+for every campaign, with **no per-die rules** — an explicit operator
+requirement of this spec. `retune_class` stays on the wire and still selects
+the radio's fast/slow retune path; it no longer picks a budget. The separate
+`policy.csa.ack_timeout_ms` is replaced by **`T_switch` itself** and is now
+inert (§11.7's `policy.cmd.ack_timeout_ms` is unrelated and still live).
+
+**Why.** The classes existed only to size the real-time deadline Pass 202
+deleted, so they were sizing nothing — but 300 ms was still actively breaking
+campaigns. `dt` must cover the craft catching a copy through its §7.2 quiet
+gap, that craft's `CSA_ARMED` returning before it departs, and the issuer's own
+`retune_all` (serial; 1643 ms on three ears). At 300 ms the copy window is
+250 ms and a campaign succeeds only if the craft accepts one of the FIRST
+copies; a craft accepting a late retransmit jumped before its ACK could land,
+the issuer aborted, and — with Pass 202's revert gone — nothing undid the
+split. Device-observed repeatedly 2026-09-13: cross-channel retunes landed
+**0 of N** while same-channel claims landed every time, across two ground
+builds, two ground compositions, and quiet-gap both on and off.
+
+**Evidence.** After the change, 5 consecutive class-0 cross-channel campaigns
+**converged 5/5**, verified by reading `link.channel` from BOTH control planes;
+craft `csa_accepted` 1 → 6. One of the five closed `campaign UNCONFIRMED`
+(armed=1 landed=0 video=0) and **held the target** — Pass 203's branch firing
+in production conditions, converging where the old build would have reverted
+away from a committed craft.
+
+**Accepted cost, stated not discovered.** The issuer pre-positions on
+`CSA_ARMED` (Pass 69) and then waits out the rest of `dt` on the target, so a
+channel change carries a video gap of up to `dt`. That is the trade: a
+deterministic gap on a switch that works, instead of a short gap on a switch
+that strands the pair. Shortening it per adapter is exactly the min-maxing the
+operator ruled out.
+
+**Spec sections:** §11.2 (dt, ack deadline, the gap cost), §11.6.
+**Evidence:** `docs/findings.md` 2026-09-13 "VERIFIED: the 300 ms dt was the
+bench blocker"; branch `spec/csa-final-jump`; `tests/csa_test.cpp` re-timed off
+`kDtToSwitchMs` rather than literals, plus a direct assertion that a campaign
+outlives the old 1000 ms ack timeout and is still retransmitting into it.
+
 ## Pass 203 — a refusal set must be EXHAUSTIVE, and a final jump must report itself (2026-09-13)
 
 **Verdict.** Two rulings, both forced by Pass 202's first device run, which

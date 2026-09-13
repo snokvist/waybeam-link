@@ -290,11 +290,10 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     tmpl_.prev_chan = prev_chan_mhz;
     tmpl_.prev_bw = prev_bw;
     tmpl_.power_intent = power_intent;
-    // §11.2 dt budget: campaign span + max retune for the class + margin.
-    // §11.2 (Pass 91): class 0 is 300 ms, not 150. The budget must hold both
-    // the copy window and the 50 ms ack-lead cutoff; at 150 ms those conflict
-    // and the window collapses to roughly the pre-Pass-90 burst.
-    const uint32_t dt0_ms = retune_class == 0 ? 300 : 500;
+    // §11.2 (Pass 204): one generous dt, no class split. See kDtToSwitchMs —
+    // retune_class survives only as the fast/slow retune-path hint it passes
+    // to the radio, not as a budget anyone can miss.
+    const uint32_t dt0_ms = kDtToSwitchMs;
     started_us_ = now_us;
     switch_at_us_ = now_us + static_cast<uint64_t>(dt0_ms) * 1000;
     copies_left_ = kCopies;
@@ -468,8 +467,18 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                 // computed lazily there (0 = not yet landed), never here.
                 verify_deadline_us_ = 0;
                 state_ = State::kVerify;
-            } else if (now_us - started_us_ >=
-                       static_cast<uint64_t>(policy_.ack_timeout_ms) * 1000) {
+            } else if (now_us >= switch_at_us_) {
+                // §11.6 (Pass 204): the campaign's OWN T_switch is the ack
+                // deadline — no separate ack_timeout_ms timer. Two timers
+                // deciding one question is the pattern this whole rework
+                // deletes, and here the second one was actively harmful: at
+                // the generous dt the 1000 ms ack_timeout fired 4 s before
+                // T_switch and aborted campaigns whose copies were still
+                // going out. Waiting to T_switch is also the RIGHT answer on
+                // its own terms: no CSA_ARMED by the instant we agreed to
+                // move means the craft is not coming, so we must not move —
+                // jumping anyway would strand us, which under the final jump
+                // has no backout.
                 a.kind = IssuerAction::Kind::kAbort;
                 state_ = State::kIdle;
             }

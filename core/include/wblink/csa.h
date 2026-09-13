@@ -202,6 +202,21 @@ class CsaFollower {
 
 class CsaIssuer {
   public:
+    // §11.2 FINAL JUMP (Pass 204): ONE dt for every campaign, deliberately
+    // generous. The old 300/500 ms class split existed only to size a
+    // real-time deadline, and Pass 202 deleted that deadline — so the classes
+    // were sizing nothing. What dt must still cover is agreement latency:
+    // the craft catching one copy through its §7.2 quiet gap, the craft's
+    // CSA_ARMED getting back before it departs, and the issuer's own
+    // retune_all, which is SERIAL and measured 1643 ms on a three-ear ground
+    // (41 + 815 + 787). At 300 ms a campaign could only succeed if the craft
+    // accepted one of the FIRST copies; a craft that accepted a late
+    // retransmit jumped before its ARMED could reach the issuer, which then
+    // aborted and stranded the pair. Device-observed 2026-09-13, repeatedly.
+    // 5000 ms is the operator's ruling and is not min-maxed per adapter: no
+    // per-die rules is an explicit requirement of this spec.
+    static constexpr uint32_t kDtToSwitchMs = 5000;
+
     explicit CsaIssuer(const CsaParams& policy);
 
     // §15.5a claim re-key: swap the CSA PSK (a cached announced token per §11.4a,

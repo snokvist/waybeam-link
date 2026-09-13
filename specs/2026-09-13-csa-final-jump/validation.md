@@ -114,3 +114,37 @@ bisecting. Never bench a mixed pair and read anything into the result.
   same-channel claim out of it.
 - **`retune_all` is serial**, so a campaign's retune cost is the sum across
   ears, not the uplink's. Any timing measurement must say which it means.
+
+## RESULT — device-verified 2026-09-13 (Matrix A)
+
+`.242` 8812AU ground (bus-pinned, `part=RTL8812A` confirmed) + `.232` SSC338Q
+craft, both on the final-jump build with Passes 203 + 204.
+
+| # | target | ground chan | craft chan | craft `csa_accepted` | verdict |
+|---|---|---|---|---|---|
+| 1 | 5560 | 5560 | 5560 | 2 | `campaign confirmed` |
+| 2 | 5580 | 5580 | 5580 | 3 | `campaign confirmed` |
+| 3 | 5540 | 5540 | 5540 | 4 | **`campaign UNCONFIRMED`** armed=1 landed=0 video=0 |
+| 4 | 5600 | 5600 | 5600 | 5 | `campaign confirmed` |
+| 5 | 5540 | 5540 | 5540 | 6 | `campaign confirmed` |
+
+**5/5 converged** against **0/N before Pass 204**. Row 3 is the load-bearing
+one: the unconfirmed branch fired, the ground HELD the target, and the pair
+converged anyway — the same event that on the old build is `selection
+reverted`, taking the ground away from a craft that had committed.
+
+Also verified: `csa_beacon` 0 → 343 on device; a craft that jumps alone stays
+`COMMITTED` on the target (Increment 2); `diversity/uniq` **1.99** on a 3-ear
+ground with MT7612U retunes re-measured at 809 / 788 ms (no MT7612U
+regression); post-diversity loss 0‰.
+
+**NOT covered:** Matrix B (MT7612U-ears overrun) — one MT7612U wedged its MCU
+after repeated restarts and the arm was dropped rather than fought. Matrix C
+(MT7612U-only) untested. rk3566 compile-only.
+
+**Bench trap found the hard way — check ground TX power FIRST.** The shipped
+`.242` config pins `power_offset_qdb: -72`, its own comment calling it
+"BENCH-LOW for 50 cm geometry". At that setting the craft heard the ground at
+−64 dBm, reports flowed fine, and every campaign failed; at offset 0 (−46 dBm)
+the claim landed immediately. Reports retry at 10 Hz forever and survive a
+marginal uplink — a 5-copy campaign burst does not.

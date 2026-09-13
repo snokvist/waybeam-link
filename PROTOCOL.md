@@ -4083,6 +4083,33 @@ missed jump is RE-ACQUISITION by scan, not backout: a craft that missed it
 keeps transmitting on a channel inside the allowlist, so a ground always finds
 it, and §11.5a's scout ordering (last-latched channel, then last campaign
 target) bounds that to ~1 s against a 10.9-33.6 s full sweep.
+- **`dt_to_switch_ms` is ONE generous value (Pass 204), not a per-class budget.**
+  The 300 ms / 500 ms class-0 / class-1 split existed only to size the
+  real-time deadline Pass 202 deleted, so it was sizing nothing. `retune_class`
+  stays on the wire and still means something — it selects the radio's
+  fast/slow retune path — but it no longer picks a budget. What `dt` must
+  cover is **agreement latency**: the craft catching one copy through its §7.2
+  quiet gap, that craft's `CSA_ARMED` getting back before it departs, and the
+  issuer's own `retune_all`, which is **serial** (measured 1643 ms on a
+  three-ear ground). At 300 ms a campaign could only succeed if the craft
+  accepted one of the FIRST copies; a craft that accepted a late retransmit
+  jumped before its ACK could arrive, and the issuer aborted and stranded the
+  pair — device-observed repeatedly on 2026-09-13. **No per-die rules**: one
+  value, generous enough for the slowest adapter, is an explicit requirement.
+
+  **The ack deadline is `T_switch` itself**, not a separate
+  `policy.csa.ack_timeout_ms`. Two timers deciding one question is the pattern
+  this rework deletes, and at a generous `dt` the old 1000 ms ack timer fired
+  seconds before `T_switch` and killed campaigns whose copies were still going
+  out. `policy.csa.ack_timeout_ms` is still accepted and is now **inert**
+  (§11.7's `policy.cmd.ack_timeout_ms` is unrelated and still live).
+
+  **The cost, stated plainly:** the issuer pre-positions on `CSA_ARMED` (Pass
+  69) and then waits out the rest of `dt` on the target channel, so a channel
+  change now carries a video gap of up to `dt`. That is the trade a generous
+  budget buys, and it is deliberate — a deterministic gap on a switch that
+  works, instead of a short gap on a switch that strands the pair.
+
 - **Verify window (Pass 202: no longer a backout):** in VERIFY, no valid
   traffic within `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note
   below) → **COMMIT on the target and stay**, binding kept. The window is now

@@ -101,4 +101,7 @@ ground can always re-find it by scanning.
    it does not have (Pass 203, added after the first device run reported three
    unfollowed jumps as "campaign confirmed").
 5. Device-verified on `.232` across both ground compositions (Realtek-only and
-   with MT7612U ears present).
+   with MT7612U ears present). **Realtek-only: DONE — 5/5 convergence,
+   2026-09-13. MT7612U-ears arm: NOT done** (an MT7612U wedged its MCU during
+   the session); the MT7612U diversity path itself is unregressed —
+   `diversity/uniq` 1.99 with retunes re-measured at 809 / 788 ms.

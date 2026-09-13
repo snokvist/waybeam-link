@@ -12,6 +12,90 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — VERIFIED: the 300 ms dt was the bench blocker, and the final jump now converges 5/5
+
+**Device-verified on `.242` (8812AU ground) + `.232` (SSC338Q craft), both ends
+on the final-jump build.** This is the run the two entries below were missing.
+
+**What the bench showed first: cross-channel retunes NEVER landed, while claims
+always did.** Same craft, same channel, minutes apart, reproduced across two
+ground builds, two ground compositions (1-ear and 3-ear) and with the §7.2
+quiet gap both ON and OFF — so the quiet-gap hold was NOT the cause, which is
+what it looked like:
+
+| campaign | outcome |
+|---|---|
+| claim / acquire (target == craft's channel) | accepted, **every time** |
+| retune (cross-channel) | `csa: aborted (no CSA_ARMED)`, **every time** |
+
+**The craft was accepting them.** Mid-investigation the craft turned up on 5560
+with `csa_accepted` incremented and `csa_state COMMITTED`, while the ground sat
+on 5540 reporting an abort. So the copies arrived, the craft armed and jumped —
+and its `CSA_ARMED` never got back to the issuer before it departed.
+
+**Root cause: the 300 ms class-0 dt.** `dt` has to cover the craft catching a
+copy through its quiet gap, the craft's ACK getting back, AND the issuer's own
+`retune_all` (serial, 1643 ms on three ears). At 300 ms the copy window is
+250 ms and a campaign can only succeed if the craft accepts one of the FIRST
+copies; accept a late retransmit and the craft jumps before its ACK can land.
+The issuer then aborts — and under the final jump there is no revert to undo
+the split.
+
+**Fix (Pass 204), exactly what the operator ruled: one generous dt, no per-die
+rules.** `kDtToSwitchMs = 5000`, the 300/500 class split deleted (it sized a
+deadline Pass 202 removed), and the separate `ack_timeout_ms` replaced by
+`T_switch` itself — at the generous dt the old 1000 ms ack timer fired 4 s
+early and killed campaigns whose copies were still going out.
+
+**Result — 5 consecutive class-0 cross-channel campaigns, CONVERGENCE read from
+BOTH control planes:**
+
+| # | target | ground | craft | verdict |
+|---|---|---|---|---|
+| 1 | 5560 | 5560 | 5560 | `campaign confirmed` |
+| 2 | 5580 | 5580 | 5580 | `campaign confirmed` |
+| 3 | 5540 | 5540 | 5540 | **`campaign UNCONFIRMED`** (armed=1 landed=0 video=0) |
+| 4 | 5600 | 5600 | 5600 | `campaign confirmed` |
+| 5 | 5540 | 5540 | 5540 | `campaign confirmed` |
+
+**5/5 converged**, craft `csa_accepted` 1 → 6, against **0/N before the change**.
+
+**Campaign 3 is the most valuable row.** It is the Pass 203 unconfirmed branch
+firing in production conditions: the issuer saw no video inside its window,
+reported honestly, and **held the target instead of retreating** — and the pair
+converged anyway, because the craft was already there. That same event on the
+old build is `csa: selection reverted`, which takes the ground AWAY from a
+craft that had committed. One run, showing both halves of the rework doing
+their job.
+
+**Also verified in the same session:**
+- `csa_beacon` (Pass 203) counts on device: 0 → 343 across the run. Those
+  packets were previously invisible, and their invisibility is what made a
+  split pair read as a dead link.
+- **A craft that jumps alone STAYS** (Increment 2, on hardware): the craft
+  reached 5560 and held `COMMITTED` while the ground was elsewhere. The old
+  build reverts to `prev_chan` here.
+- **No MT7612U regression**: 3-ear ground read `diversity/uniq` **1.99**
+  (= ears − 1) with MT7612U retunes re-measured at **809 / 788 ms** against the
+  8812AU's 0 ms — Pass 201's numbers reproduced.
+- Post-diversity loss 0‰, 214818 uniq, 1 unrecoverable frame over the run.
+
+**Bench trap worth keeping: the ground's TX power is the first thing to check,
+not the last.** The shipped `.242` config pins `power_offset_qdb: -72`, its own
+comment saying "BENCH-LOW for 50 cm geometry — raise before any range test".
+The craft heard the ground at −64 dBm and every campaign failed while reports
+still flowed; at offset 0 it heard −46 dBm and the claim landed immediately.
+Reports are retried at 10 Hz forever and so survive a marginal uplink; a
+5-copy campaign burst does not. **A link that looks up can still be too weak
+for the one burst that matters.**
+
+**Not covered by this run:** the MT7612U-ears overrun arm (Matrix B) — one
+MT7612U wedged its MCU (`mcu command timed out`) after repeated restarts and
+the arm was dropped rather than fought. Matrix C (MT7612U-only) untested here.
+rk3566 remains compile-only.
+
+---
+
 ## 2026-09-13 — the "undiagnosed regression" was a BLIND COUNTER and a ground that lies
 
 **Diagnosed. There is no regression in the accept path — there never was one.**
