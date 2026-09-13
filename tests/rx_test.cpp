@@ -334,8 +334,8 @@ int main() {
         // Pass 205: one unified deadline is min(iframe, pframe), so hold both
         // far out of the way or the gap would be deadline-dropped before the
         // stall is observed.
-        p.default_deadline_iframe_ms = 100000;
-        p.default_deadline_pframe_ms = 100000;
+        p.default_deadline_iframe_ms = 60000;
+        p.default_deadline_pframe_ms = 60000;
         Harness h(p);
         h.latch();
         h.feed(1, 2, 0, 0, 5);       // adapter 1 heard the stream, last=2

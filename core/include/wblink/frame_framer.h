@@ -76,8 +76,8 @@ enum class FrameFecClass : uint8_t { kP = 0, kEnhance = 1, kIdr = 2 };
 class FrameFramer {
   public:
     // emit(frame, frame_len, hdr, now_ms): frame is valid only during the call;
-    // hdr carries the stamped fields for resend-ring bookkeeping (§5.2). Same
-    // contract as Framer::Emit.
+    // hdr carries the stamped fields for block bookkeeping. Same contract as
+    // Framer::Emit.
     using Emit = std::function<void(const uint8_t* frame, size_t frame_len,
                                     const DataHeader& hdr, uint64_t now_ms)>;
 
@@ -170,7 +170,7 @@ class FrameFramer {
     std::vector<const uint8_t*> src_ptrs_;
     std::vector<uint8_t> src_payload_;     // 4-B source subheader + chunk
     std::vector<uint8_t> repair_payload_;  // 11-B subheader + s coded bytes
-    uint8_t frame_buf_[kDataHeaderSize + kMaxDataPayload];
+    uint8_t frame_buf_[kDataHeaderSize + kMaxDataPayload]{};
 };
 
 }  // namespace wblink
