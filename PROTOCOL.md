@@ -6329,7 +6329,7 @@ plane supersedes the ground CSA stdin trigger, which is removed** — `POST
 | `GET /api/v1/health` | terse `{ state, mcs, profile, rssi_best, loss_milli, fps }` |
 | `GET /api/v1/discovery` | bounded passive discovery: `{nodes:[], streams:[]}` from HEARTBEAT/ANNOUNCE/DATA observations |
 | `GET /api/v1/scout/results` | current scout state: `{scanning, current_chan, channels:[], candidates:[], candidate_sightings:[], ranking:{rounds, domain, confidence_permille, rejects:{}, recommendation:{}, bins:[]}}`; `candidates` is resolved/deduplicated, sightings are diagnostic. Each `candidates[]` row carries `rssi_dbm`: the **strongest** RSSI decoded from that originator on its resolved channel, or `null` if no frame reported one — a "which craft is nearest" indicator, not a link-budget figure (§15.5a; ground/rx node) |
-| `GET /api/v1/link/selection` | receiver's configured/latched/claiming/committed vehicle tuple and cache-follow readiness (§15.5a) |
+| `GET /api/v1/link/selection` | receiver's configured/latched/claiming/committed/spectating vehicle tuple and cache-follow readiness (§15.5a) |
 | `GET /api/v1/cache/assignment` | cache's configured controller and last applied vehicle tuple (§14.3 cache node) |
 | `GET /api/v1/vehicle/command` | issuer's last §11.7 campaign: `{nonce, cmd, arg, state}`, `state` ∈ `idle`\|`pending`\|`acked`\|`rejected`\|`timeout` — `idle` (nonce/cmd/arg zero) before any campaign has run (issuer/ground node) |
 | `GET /api/v1/link/mtu` | local §9.3a state: `{mode, requested, effective, supported}` (every node; craft mode is `remote`) |
@@ -6380,6 +6380,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-mcs0" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 | `POST /api/v1/channel` | `{ "mhz": 5805 }` | locally retune the craft to an **allowlisted** channel outside any §11 campaign: retunes all adapters, informs the §9 selector, arms the §11.6 RX-liveness guard, clears any in-flight CSA campaign and drops the §11.5a binding (the ground must re-scout). 400 off-allowlist; **volatile** — a reboot returns to the boot channel (Pass 113, TX/craft node) |
+| `POST /api/v1/move` | `{ "mhz": 5805 }` | detach and locally retune **this node's own** radio to any valid channel: the operator override, **not** restricted to `channel_allowlist` (unlike the TX `/channel` form). Releases every §11.5a/§11.7 binding and any follower campaign; on an rx node it un-pins the §2 selection and enters `spectating`, where the first craft to clear normal admission is adopted (Pass 206). **409 while the issuer, or a vehicle-command campaign, is in flight** — a move is not a silent campaign cancel. 400 on `mhz<=0` or `mhz>65535`; **volatile** (both roles) |
 | `POST /api/v1/psk` | `{ "enabled": true\|false }` | §11.4a runtime pairing gate: `false` = re-key with a fresh announced token + drop the §11.5a binding (open pairing), `true` = stop announcing the current key (locked). Craft-session volatile (Pass 113, TX/craft node) |
 | `POST /api/v1/reports/latch` | `{ "clear": true }` or `{ "originator": N }` | §3.5 report-authority override: `clear` releases the LINK_REPORT + JSCC_FEEDBACK latch so the next reporter takes it within `relatch_ms`; `originator` forces it to a specific node (bench). Exactly one of the two per request; 400 otherwise. Refused with 400 when `preferred_originator` is configured — config outranks the override, and the refusal is explicit rather than a silent no-op. Volatile (Pass 115, TX/craft node) |
 | `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
@@ -6468,16 +6469,60 @@ Rationale and scope of the ruling:
 - Adoption is **one-way and one-shot**: only `configured` → `latched`. A latch
   never overwrites a `claiming`, `committed`, or already-`latched` tuple, so it
   cannot steal a deliberate operator claim, and a §2 re-latch onto a different
-  craft after a claim does not silently redirect campaigns.
+  craft after a claim does not silently redirect campaigns. A `spectating`
+  selection (Pass 206) is the deliberate exception: it is non-terminal and
+  re-resolves on teardown, but it never overwrites a `claiming`/`committed`
+  tuple and its selection state does not change, so it is never a bound claim.
 - The adopted tuple carries the receiver's **own current** channel, bandwidth,
   and net_id — a latch observes a craft, it does not discover a channel. Only
-  `/csa` and `scout/quickconnect` move the link.
+  `/csa`, `/move` and `scout/quickconnect` move the link.
 
 Two `/csa` refusals that this ruling separates were previously one string. `409
 no craft selected` means the selection tuple names nobody (nothing latched, no
 claim); `400 no live CSA key for craft` means a craft *is* selected but no
 announced token is cached for it (secret-mode craft, or one not heard for
 &gt;5 s). Conflating them sent operators to re-scout a link that was healthy.
+
+**`POST /api/v1/move` is the operator's manual channel override (Pass 206).**
+It is a detach-and-retune primitive, not a campaign: it moves **this node's
+own** radio to the named channel and establishes no relationship with whatever
+is heard there — it sends nothing and contacts no peer. On an **rx** node the
+sequence is detach → retune → un-pin → `spectating`:
+
+- any in-flight follower CSA campaign is cleared and every §11.5a/§11.7 binding
+  released; an **issuer** campaign — or an in-flight vehicle-command campaign —
+  is not cancelled, and `/move` **409**s while either owns one, because silently
+  aborting a campaign mid-commit would strand the craft (abort is the campaign's
+  own timeout/revert);
+- the §2 selection pin is dropped, so normal §2 admission is free to resolve the
+  first tuple heard;
+- every RX adapter is retuned to the channel, the `net_id` stamp/filter is
+  restored to the node's own `net_id`, `operating_chan` is set, and the state
+  becomes `spectating`.
+
+`spectating` is distinct from `tuned` (the §15.5a scout-candidate path): a
+spectating receiver holds a **channel**, not a craft — it is not bound, latched,
+or committed, and not a `vehicle/command` target. The §2 latch picker then
+resolves **sticky first-admitted**: the first `(originator, stream, session)`
+tuple to clear the normal §2 admission gate is adopted into the selection tuple
+while the state **stays** `spectating` — it is the engine's stream latch, not a
+selection-state promotion, that holds the craft. Nothing re-selects while that
+stream lives, and only when the stream tears down does the receiver resolve
+again. A craft on the channel is therefore shown without an operator claim —
+moving onto a channel with two craft shows whichever wins admission, and an empty
+channel shows nothing. Seeing is not commanding: §11.7 "no bootstrap" is
+unchanged, so a spectating latch is a valid `/csa` target but never a command
+target until a claim commits.
+
+The channel need **not** be in `csa.channel_allowlist`: that list governs what a
+§15.5a claim accepts and what a TX `/channel` retune may do, while `/move` is
+the operator's explicit override. `mhz<=0` is a 400. On a **tx** node `/move` is
+`/channel`'s local retune **without** the allowlist restriction. Either role
+drops the §11.5a binding and does not inform the peer, so a ground that does not
+follow loses the craft until it re-scouts; moving the craft from the ground
+remains `/csa`. Which role a UI is moving is a **caller** concern: the hub
+exposes one `/move {target,mhz}` and **409**s a target that is not its own
+`role`.
 
 **`GET /api/v1/modes` (Pass 104)** enumerates the operating-mode **catalog** so a
 menu (the hub) need not carry its own copy of the mode list. The link reads each
