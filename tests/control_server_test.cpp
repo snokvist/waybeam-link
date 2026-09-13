@@ -509,7 +509,7 @@ int main() {
     // fec round-trip.
     {
         const std::string body =
-            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":120,\"min_k\":4,"
+            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":120,"
             "\"min_r\":3}";
         const std::string req =
             "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
@@ -545,7 +545,7 @@ int main() {
     // fec min_r defaults to 2 when the body omits it.
     {
         const std::string body =
-            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":200,\"min_k\":3}";
+            "{\"stream_id\":0,\"i_permille\":300,\"p_permille\":200}";
         const std::string req =
             "POST /api/v1/fec HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;

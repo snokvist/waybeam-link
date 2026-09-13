@@ -211,8 +211,6 @@ def build_event_trace(args):
         block = blocks.setdefault(key, {"packets": {},
                                         "first_tx_us": int(row["t_us"])})
         block["first_tx_us"] = min(block["first_tx_us"], int(row["t_us"]))
-        if row.get("retransmit", False):
-            continue  # decode-only swallow; no retransmit plane (Pass 205)
         block["packets"].setdefault(int(row["seq"]), dict(row))
     if not blocks:
         raise ValueError("TX packet trace contains no submitted DATA")

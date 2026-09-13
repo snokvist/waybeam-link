@@ -167,7 +167,7 @@ TX stream + FEC:
 "streams": [
   { "stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": { "kind": "frame-shm", "name": "venc_frame" },
-    "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100, "min_k": 3 } }
+    "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100 } }
 ]
 ```
 
@@ -405,7 +405,7 @@ HEARTBEAT-derived nodes plus DATA-derived stream candidates/latches). **Write**
 |---|---|---|
 | `POST /api/v1/csa` | `{"mhz":5805,"class":0}` | rx / ground (replaces the old stdin trigger) |
 | `POST /api/v1/link/profile` | `{"min":3,"max":3}` | tx (`min==max` pins the MCS+bitrate operating point; `{"max":255}` unpins) |
-| `POST /api/v1/fec` | `{"stream_id":0,"i_permille":250,"p_permille":100,"min_k":3}` | tx (frame-shm streams) |
+| `POST /api/v1/fec` | `{"stream_id":0,"i_permille":250,"p_permille":100}` | tx (frame-shm streams) |
 | `POST /api/v1/video/recover` | `{"stream_id":0}` (optional with one latch) | rx / ground; request one decoder-bootstrap IDR from the matched TX |
 | `POST /api/v1/stats/reset` | `{}` | any (fresh measurement window) |
 

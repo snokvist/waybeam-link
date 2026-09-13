@@ -77,7 +77,7 @@ class PacketEventTrace {
         buffer_.resize(kBufferBytes);
         std::setvbuf(out_, buffer_.data(), _IOFBF, buffer_.size());
         std::fprintf(out_,
-                     "{\"type\":\"schema\",\"schema\":\"waybeam-packet-events-v1\","
+                     "{\"type\":\"schema\",\"schema\":\"waybeam-packet-events-v2\","
                      "\"role\":\"%s\",\"cap\":%llu}\n",
                      role_, static_cast<unsigned long long>(cap_));
     }

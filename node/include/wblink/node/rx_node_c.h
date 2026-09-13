@@ -242,7 +242,7 @@ int wblink_rx_claim(wblink_rx *rx, uint16_t originator, uint16_t target_chan,
 
 /*
  * §11.7. Queue a command campaign toward the claimed craft. `cmd` is the §15.5
- * REST spelling ("arq", "fps_select", "mode", "mtu_tier", ...; the map is
+ * REST spelling ("fps_select", "mode", "mtu_tier", ...; the map is
  * `node/vcmd.h`) and is copied before this call returns — it need not outlive
  * the call. A name longer than 32 bytes is rejected rather than truncated,
  * since a truncated name could name a DIFFERENT command.

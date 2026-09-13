@@ -2481,7 +2481,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                 send_return(target, f.data(), f.size(), true);
             }
             // §7.5: uplink DATA rides the same window, after repair traffic
-            // (NACKs protect video) and before reports.
+            // (repair traffic) and before reports.
             flush_uplink();
             // Pass 78: last window's anchored reports repeat here, before
             // the fresh batch so epochs stay monotonic at the receiver.

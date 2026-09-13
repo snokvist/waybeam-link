@@ -113,7 +113,7 @@ range may be evaluated, but static 33% is not justified by this result.
 ### Gate 3 — NACK→RETRANSMIT round-trip (RF-proven, PASS)
 Live vehicle→desk link, all-IDR feed (every loss is ARQ-class), 15% synthetic
 ground loss to force gaps. Ground NACKs over RF → craft resends (802) → ground
-recovers; `tools/gate3_rtt.py` over the run:
+recovers; `~~tools/gate3_rtt.py~~ (removed Pass 205)` over the run:
 
 | distribution | P50 | P90 | max | vs deadline |
 |---|---|---|---|---|

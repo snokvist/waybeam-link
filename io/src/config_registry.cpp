@@ -24,8 +24,8 @@ using json = nlohmann::json;
 // whose gate cannot be pointed at gets NO predicate: reporting a live key as
 // dead is worse than not reporting it at all.
 
-// PROTOCOL.md:4510 — a spectator "generates no ARQ / NACK / LINK_REPORT
-// (return and §3.9 recovery paths no-op with no tx adapter)". The gate is the
+// PROTOCOL.md §15.2 — a spectator "generates no returns" (return and §3.9
+// recovery paths no-op with no tx adapter). The gate is the
 // TX adapter, not the spectator flag: the Ethernet cache archetype is also
 // uplink-free and correctly omits policy.return, which keying on `spectator`
 // would have missed. (Its config, deploy/cache-192.168.2.247.json, was deleted

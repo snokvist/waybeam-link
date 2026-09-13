@@ -54,16 +54,25 @@ FEC (§14.1), spatial cache (§14.3), decoder RECOVERY_REQUEST (§3.9), diversit
 and slice concealment. The design and its independent reviews are in
 `specs/2026-09-13-arq-removal/plan.md`.
 
-**Open — the merge precondition.** FEC-only vs the former ARQ-on baseline at
-~120 ‰ and ~300 ‰ loss, on a healthy and on a deliberately weak uplink, at
-matched airtime. Success = no regression in `frames_unrecoverable`/delivered;
-that measures the §14.1 rate re-tune that absorbs the freed ARQ airtime.
-*Hardware-required.*
+**Verification (2026-09-13).** Spec `665e81e`, code `0d94149`, sweep `5ff67e9`,
+gate fix `5556b5e`. `scripts/gates.sh` = 33 passed / 0 failed (cv610 + Android
+skipped for absent toolchains). A headless FEC-recovery bench
+(`frame_shm_udp_bench.sh`, `rlc256`, one listener so FEC — not diversity — does
+the repair, 100 ‰ loss, 42 frames) recovered 8 frames by FEC with `decode=ok`
+and 1 unrecoverable: FEC-only repair works with no ARQ present.
 
-**Closure (2026-09-13).** Spec landed as commit `665e81e` and the core/node/io/
-app/test deletion as commit `0d94149` ("code: remove the NACK/retransmit plane
-(Pass 205)"); the tools/data/docs sweep follows. The airtime re-tune above
-remains open and hardware-gated.
+**Waived — the hardware A/B.** FEC-only vs the former ARQ-on baseline at
+~120 ‰/~300 ‰ on healthy + weak uplinks (matched airtime) was **waived by the
+operator on 2026-09-13** as not worth the rig time. Consequently the §14.1
+airtime re-tune that this A/B would have sized **remains open**; the freed
+`arq_reserve_frac` airtime is available but unallocated.
+
+**Note (pre-existing, exposed by Pass 205).** A FEC-pending gap's deadline is
+taken from the nearest held block *above* the cursor (`core/src/rx.cpp`
+`advance_cursor`), so an interior gap can be held up to one block budget longer
+than its own block's — bounded, not a stall, and unchanged from before, but the
+"hold instead of drop" rule is what makes it observable. Candidate for a later
+tightening.
 
 ## 2026-09-13 — VERIFIED: the 300 ms dt was the bench blocker, and the final jump now converges 5/5
 

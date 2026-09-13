@@ -1630,8 +1630,9 @@ frame refused by egress is `frames_egress_rejected`, not `salvage_failed` or
 
 There is no NACK generation, no pending SACK set, no re-NACK backoff, no
 `POST /api/v1/arq` RX-local mute, and no vehicle-side ARQ command. A declared
-gap is either FEC-satisfied / superseded / past deadline, or it is counted
-`dropped_unrecoverable`; nothing is requested.
+gap is retired as FEC-satisfied, superseded, or — at its block deadline —
+`dropped_deadline` on a normal stream, and `dropped_unrecoverable` on a
+best-effort (§3.4) stream. Nothing is requested.
 
 **The surviving rule this section still owns:** exactly one adapter is the
 **designated uplink TX** for a node's returns, and **more than one `role:"tx"`
@@ -1884,7 +1885,8 @@ flags — the AUDIO one-datagram-one-block shape, §3.4).
   fields (§3.6/§9.3, Pass 205 — both fields stay in the canonical form, and using
   their minimum leaves neither silently dead).
 - There is no retry: RX never requests a resend and TX never resends. A gap past
-  its deadline is counted `dropped_unrecoverable`.
+  its deadline is counted `dropped_deadline` (a best-effort stream's declared-lost
+  gap is `dropped_unrecoverable`).
 - No clock crossing — each side applies its own local budget.
 - The deadline class is uniform: Pass 205 removed the I-frame/P-frame split and
   the `ARQ` importance class.

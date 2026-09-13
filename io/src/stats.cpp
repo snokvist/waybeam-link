@@ -245,7 +245,7 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.jscc_output_parity_symbols);
         out += ",\"jscc_output_remaining_us\":";
         append_u64(out, s.jscc_output_remaining_us);
-        out += ",\"jscc_output_discard\":";;
+        out += ",\"jscc_output_discard\":";
         append_bool(out, s.jscc_output_discard);
         out += ",\"jscc_feedback_epoch\":";
         append_u64(out, s.jscc_feedback_epoch);
@@ -285,7 +285,7 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
         append_u64(out, s.loss_postdiv_window_milli);
         out += ",\"loss_best_ear_window_milli\":";
         append_u64(out, s.loss_best_ear_window_milli);
-        out += ",\"source_symbols_sent\":";;
+        out += ",\"source_symbols_sent\":";
         append_u64(out, s.source_symbols_sent);
         out += ",\"repair_symbols_sent\":";
         append_u64(out, s.repair_symbols_sent);

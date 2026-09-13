@@ -5,6 +5,8 @@
 //   (a) independent per-adapter loss => diversity delivers with ~no gaps;
 //   (b) correlated burst => losses are declared and the stream survives;
 //   (c) rising loss => declared loss reacts monotonically.
+// This path is UDP/RTP (no FEC scheme); FEC decode/reassembly is covered by
+// frame_framer_test, frame_reassembler_test and frame_shm_loopback_test.
 #include <cstdio>
 #include <optional>
 #include <vector>

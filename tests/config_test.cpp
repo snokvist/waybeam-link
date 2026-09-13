@@ -930,8 +930,7 @@ int main() {
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
             "bind":{"kind":"frame-shm","name":"venc_frame"},
             "jscc_shadow":{"fec_floor_permille":500,"fec_cap_permille":400,
-              "arq_guard_us":500,"feedback_timeout_ms":500,
-              "min_rtt_samples":20}}]})", "floor <= cap");
+              "feedback_timeout_ms":500}}]})", "floor <= cap");
     }
 
     // --- profile table -------------------------------------------------------

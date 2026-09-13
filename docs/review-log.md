@@ -60,8 +60,12 @@ not dropped immediately.
 §9.4, §10.6, §11.6/§11.7, §12/§13, §14–§14.3, §15.1–§15.5, §16–§19.
 
 **Evidence:** `docs/findings.md` 2026-09-13; `specs/2026-09-13-arq-removal/plan.md`.
-Merge precondition: FEC-only vs ARQ-on at ~120 ‰/~300 ‰, healthy and weak
-uplink, matched airtime. Code follows in separate commits.
+Code: `0d94149`; tools/data/docs: `5ff67e9`. **Verification:** `scripts/gates.sh`
+33 passed / 0 failed (cv610 + Android skipped for absent toolchains) and a
+headless FEC-recovery bench (`frame_shm_udp_bench.sh`, `rlc256`, single
+listener, 100 ‰ loss: 8/42 frames recovered by FEC, decode ok). The **hardware
+FEC-only vs ARQ-on A/B was waived by the operator (2026-09-13)**; the §14.1
+airtime re-tune it would size remains open (`docs/findings.md`).
 
 ## Pass 204 — §11.2's dt is ONE generous value, and T_switch is the ack deadline (2026-09-13)
 
