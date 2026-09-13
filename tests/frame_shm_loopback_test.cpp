@@ -141,7 +141,6 @@ int main() {
         fc.fec.scheme = FecScheme::kRlc256;
         fc.fec.i_rate_permille = 300;
         fc.fec.p_rate_permille = 150;
-        fc.fec.min_k = 3;
         FrameFramer ff(fc);
         ff.set_operating_point(0, 0, kDefaultMaxPayload);
 
@@ -197,7 +196,6 @@ int main() {
         fc.fec.scheme = FecScheme::kRlc256;
         fc.fec.i_rate_permille = 500;
         fc.fec.p_rate_permille = 500;
-        fc.fec.min_k = 3;
         FrameFramer ff(fc);
         ff.set_operating_point(0, 0, kDefaultMaxPayload);
 
@@ -253,7 +251,6 @@ int main() {
         CHECK(got > 0 &&
               std::memcmp(obuf.data(), blob.data(), blob.size()) == 0);
         CHECK_EQ_U(ordered_deliveries, 0u);  // no second delivery on seq drain
-        CHECK_EQ_U(rx.build_nacks(now).size(), 0u);
         const auto streams = rx.streams();
         CHECK_EQ_U(streams.size(), 1u);
         CHECK(streams.size() == 1 &&
@@ -269,7 +266,6 @@ int main() {
         fc.fec.scheme = FecScheme::kRlc256;
         fc.fec.i_rate_permille = 200;
         fc.fec.p_rate_permille = 100;
-        fc.fec.min_k = 3;
         FrameFramer ff(fc);
         ff.set_operating_point(0, 0, kDefaultMaxPayload);
 

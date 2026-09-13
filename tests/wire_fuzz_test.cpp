@@ -39,9 +39,9 @@ void check_consistency(const Decoded& d, const uint8_t* buf, size_t len) {
         if (v->payload != nullptr) {
             CHECK(v->payload == buf + kDataHeaderSize);
         }
-    } else if (const NackView* v2 = std::get_if<NackView>(&d)) {
-        CHECK_EQ_U(len, kNackFixedSize + v2->bitmap_len);
-        CHECK((v2->bitmap_len == 0) == (v2->bitmap == nullptr));
+    } else if (std::get_if<ReservedNack>(&d)) {
+        // §3.1/§3.3 (Pass 205): the retired type's swallow carries only a
+        // prefix — any body length is ignorable, so no length contract applies.
     } else if (std::get_if<LinkReport>(&d)) {
         CHECK_EQ_U(len, kLinkReportSize);
     } else if (std::get_if<Heartbeat>(&d)) {
@@ -65,21 +65,11 @@ std::vector<std::vector<uint8_t>> golden_packets() {
     h.stream_type = stream_type::kRtp;
     h.seq = 90233;
     h.block_id = 4400;
-    h.data_flags = data_flags::kEndOfBlock | data_flags::kArq;
+    h.data_flags = data_flags::kEndOfBlock;
     h.active_profile = 4;
     h.table_version = 0xB2;
     const uint8_t payload[64] = {1, 2, 3, 4};
     size_t n = encode_data(h, payload, sizeof(payload), buf, sizeof(buf));
-    out.emplace_back(buf, buf + n);
-
-    NackHeader nh;
-    nh.prefix = {9, 17, 0xAABBCCDD};
-    nh.target_originator = 17;
-    nh.target_session = 0x01020304;
-    nh.target_stream_id = 0;
-    nh.base_seq = 90000;
-    const uint8_t bitmap[8] = {0xFF, 0x01};
-    n = encode_nack(nh, bitmap, sizeof(bitmap), buf, sizeof(buf));
     out.emplace_back(buf, buf + n);
 
     LinkReport r;
@@ -153,7 +143,7 @@ int main() {
     }
 
     const auto goldens = golden_packets();
-    CHECK_EQ_U(goldens.size(), 6);
+    CHECK_EQ_U(goldens.size(), 5);
 
     // 2. Every truncation of every valid packet must be an error.
     for (const auto& pkt : goldens) {

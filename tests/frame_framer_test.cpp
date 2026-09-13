@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// FrameFramer (§5.1a) + §14.1 FEC: fragmentation, block/seq/EOB/ARQ stamping,
-// repair emission + subheader, the min_k / oversize-k gates, and an end-to-end
-// RLC decode round-trip proving the emitted symbols are recoverable.
+// FrameFramer (§5.1a) + §14.1 FEC: fragmentation, block/seq/EOB stamping,
+// repair emission + subheader, the all-k repair rule, the oversize-k gate, and
+// an end-to-end RLC decode round-trip proving the emitted symbols are
+// recoverable. Pass 205 removed the ARQ class; every referenced frame now gets
+// r = max(ceil(k·rate), min_r) and none is stamped ARQ.
 #include "wblink/frame_framer.h"
 
 #include <cstdint>
@@ -25,26 +27,22 @@ struct Sym {
     std::vector<uint8_t> payload;
     bool is_repair() const { return (hdr.data_flags & data_flags::kFecRepair) != 0; }
     bool eob() const { return (hdr.data_flags & data_flags::kEndOfBlock) != 0; }
-    bool arq() const { return (hdr.data_flags & data_flags::kArq) != 0; }
 };
 
 struct Harness {
     FrameFramer framer;
     std::vector<Sym> sent;
 
-    explicit Harness(FrameFecConfig fec = {},
-                     FrameArqMode arq_mode = FrameArqMode::kIdrOnly)
-        : framer(make_cfg(fec, arq_mode)) {
+    explicit Harness(FrameFecConfig fec = {})
+        : framer(make_cfg(fec)) {
         framer.set_operating_point(4, 0x41, 1424);
     }
-    static FrameFramerConfig make_cfg(FrameFecConfig fec,
-                                      FrameArqMode arq_mode) {
+    static FrameFramerConfig make_cfg(FrameFecConfig fec) {
         FrameFramerConfig c;
         c.originator = 7;
         c.session_id = 99;
         c.stream_id = 0;
         c.stream_type = stream_type::kRtp;
-        c.arq_mode = arq_mode;
         c.fec = fec;
         return c;
     }
@@ -81,13 +79,6 @@ size_t repair_count_of(const std::vector<Sym>& sent) {
     return count;
 }
 
-bool any_pframe_arq(const std::vector<Sym>& sent) {
-    for (const Sym& sym : sent) {
-        if ((sym.hdr.data_flags & data_flags::kPframeArq) != 0) return true;
-    }
-    return false;
-}
-
 // §14.1a rlc256 policy at the seed rates, so every enhance case below shares
 // one construction and differs only in the knob under test.
 FrameFecConfig rlc(std::optional<uint16_t> e = std::nullopt) {
@@ -110,20 +101,17 @@ size_t source_count(const std::vector<Sym>& sent) {
 }  // namespace
 
 int main() {
-    // --- opt-in P-frame ARQ retains a distinct wire class ------------------
+    // --- no ARQ bit is ever stamped (Pass 205) -----------------------------
     {
-        Harness h({}, FrameArqMode::kAllFrames);
+        Harness h({});
         h.feed(make_frame(3000, /*idr=*/false, 0));
         CHECK(!h.sent.empty());
         for (const Sym& sy : h.sent) {
-            CHECK(!sy.arq());
-            CHECK((sy.hdr.data_flags & data_flags::kPframeArq) != 0);
+            CHECK((sy.hdr.data_flags & 0x22) == 0);  // ARQ|PFRAME_ARQ reserved
         }
         CHECK_EQ_U(h.framer.stats().idr_frames, 0u);
-        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
         h.feed(make_frame(3000, /*idr=*/true, 1));
         CHECK_EQ_U(h.framer.stats().idr_frames, 1u);
-        CHECK_EQ_U(h.framer.stats().arq_frames, 2u);
     }
 
     // --- basic fragmentation, no FEC ----------------------------------------
@@ -135,13 +123,12 @@ int main() {
         const uint16_t k = static_cast<uint16_t>((blob.size() + s - 1) / s);
         h.feed(blob);
         CHECK_EQ_U(h.sent.size(), k);
-        // seqs 0..k-1, one block, EOB on last only, ARQ on all (IDR), no repair.
+        // seqs 0..k-1, one block, EOB on last only, no repair.
         std::vector<uint8_t> reasm;
         for (uint16_t i = 0; i < k; ++i) {
             CHECK_EQ_U(h.sent[i].hdr.seq, i);
             CHECK_EQ_U(h.sent[i].hdr.block_id, 0u);
             CHECK(!h.sent[i].is_repair());
-            CHECK(h.sent[i].arq());  // IDR
             CHECK_EQ_U(h.sent[i].eob(), (i == k - 1));
             // §5.1a 4-byte source subheader: k, index.
             const uint8_t* p = h.sent[i].payload.data();
@@ -158,10 +145,8 @@ int main() {
         h.feed(make_frame(10, false, 2));
         CHECK_EQ_U(h.sent[k].hdr.block_id, 1u);
         CHECK_EQ_U(h.sent[k].hdr.seq, k);
-        CHECK(!h.sent[k].arq());  // non-IDR
     }
 
-    // --- min_k gate: k <= min_k => ARQ-only, r = 0 --------------------------
     // --- §9.3a negotiated ceiling intersects the profile ceiling ------------
     {
         Harness h;
@@ -264,11 +249,10 @@ int main() {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;
         fec.p_rate_permille = 200;
-        fec.min_k = 3;
         Harness h(fec);
         h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
         h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
-        h.framer.set_next_frame_override(1, true);
+        h.framer.set_next_frame_override(1);
         const auto blob = make_frame(30000 - kVencFrameMetaSize, false, 60);
         h.feed(blob);
         CHECK_EQ_U(h.framer.stats().source_symbols, 10u);
@@ -315,34 +299,12 @@ int main() {
         CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
     }
 
-    // The jumbo guard cannot override the ARQ-only min_k gate. This remains
-    // source-only even though Default sizing would have produced k >= 16.
-    {
-        FrameFecConfig fec;
-        fec.scheme = FecScheme::kRlc256;
-        fec.p_rate_permille = 200;
-        fec.min_k = 10;
-        fec.min_r = 2;
-        Harness h(fec, FrameArqMode::kAllFrames);
-        h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
-        h.framer.set_negotiated_packet_budget(mtu_tier::kHighBudget);
-        h.feed(make_frame(30000 - kVencFrameMetaSize, false, 61));
-        CHECK_EQ_U(source_count(h.sent), 10u);
-        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
-        CHECK_EQ_U(h.framer.stats().mtu_fec_guard_frames, 0u);
-        for (const Sym& sym : h.sent) {
-            CHECK(!sym.is_repair());
-            CHECK((sym.hdr.data_flags & data_flags::kPframeArq) != 0);
-        }
-    }
-
     // An impossible min_r remains the existing §14.1 source-only fallback;
     // Pass 124 must not recreate an invalid k+r > 256 block after rejection.
     {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;
         fec.p_rate_permille = 200;
-        fec.min_k = 3;
         fec.min_r = 255;
         Harness h(fec);
         h.framer.set_operating_point(7, 0x80, mtu_tier::kHighBudget);
@@ -355,14 +317,13 @@ int main() {
         CHECK_EQ_U(h.sent.size(), 10u);
     }
 
+    // --- Pass 205/O1: k <= min_k no longer ships bare ----------------------
     {
         FrameFecConfig fec;
-        fec.scheme = FecScheme::kRlc256;
-        fec.min_k = 3;
+        fec.scheme = FecScheme::kRlc256;  // i_rate 250, min_r 2
         Harness h(fec);
-        h.feed(make_frame(1000, true, 3));  // k = 1 <= 3
-        for (const Sym& s : h.sent) CHECK(!s.is_repair());
-        CHECK_EQ_U(h.framer.stats().repair_symbols, 0u);
+        h.feed(make_frame(1000, true, 3));  // k = 1
+        CHECK_EQ_U(h.framer.stats().repair_symbols, 2u);  // floored to min_r
     }
 
     // --- FEC on IDR (i_rate) + end-to-end decode round-trip -----------------
@@ -371,7 +332,6 @@ int main() {
         fec.scheme = FecScheme::kRlc256;
         fec.i_rate_permille = 250;
         fec.p_rate_permille = 100;
-        fec.min_k = 3;
         Harness h(fec);
         const uint16_t s = h.framer.symbol_size();
         auto blob = make_frame(10000, /*idr=*/true, 5);
@@ -428,12 +388,11 @@ int main() {
         CHECK(out == blob);
     }
 
-    // --- P-frame uses p_rate; no ARQ ----------------------------------------
+    // --- P-frame uses p_rate ------------------------------------------------
     {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;
         fec.p_rate_permille = 100;
-        fec.min_k = 3;
         fec.min_r = 0;  // isolate the rate formula from the Pass 98 floor
         Harness h(fec);
         const uint16_t s = h.framer.symbol_size();
@@ -442,7 +401,6 @@ int main() {
         const uint16_t r = static_cast<uint16_t>((static_cast<uint32_t>(k) * 100 + 999) / 1000);
         h.feed(blob);
         CHECK_EQ_U(h.framer.stats().repair_symbols, r);
-        for (const Sym& sy : h.sent) CHECK(!sy.arq());  // P-frame
     }
 
     // --- oversize-k cap: k + r > 256 => FEC off + stat ----------------------
@@ -450,7 +408,6 @@ int main() {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;
         fec.i_rate_permille = 250;
-        fec.min_k = 3;
         FrameFramerConfig c;
         c.stream_type = stream_type::kRtp;
         c.fec = fec;
@@ -483,100 +440,66 @@ int main() {
         fec.i_rate_permille = 250;
         fec.p_rate_permille = 100;
         fec.min_r = 0;  // isolate override / fixed-rate r from the Pass 98 floor
-        Harness h(fec, FrameArqMode::kAllFrames);
+        Harness h(fec);
         const uint16_t s = h.framer.symbol_size();
-        auto blob = make_frame(4 * s, /*idr=*/false, 9);  // k = 5 > min_k
-        // Override: zero parity + PFRAME_ARQ cleared for this frame only.
-        h.framer.set_next_frame_override(0, /*allow_pframe_arq=*/false);
+        auto blob = make_frame(4 * s, /*idr=*/false, 9);  // k = 5
+        // Override: zero parity for this frame only.
+        h.framer.set_next_frame_override(0);
         h.feed(blob);
         size_t repairs = 0;
-        for (const Sym& sy : h.sent) {
-            repairs += sy.is_repair() ? 1 : 0;
-            CHECK((sy.hdr.data_flags & data_flags::kPframeArq) == 0);
-        }
+        for (const Sym& sy : h.sent) repairs += sy.is_repair() ? 1 : 0;
         CHECK_EQ_U(repairs, 0u);
         // The override was consumed: the next frame is back on §14.1 fixed
-        // rates (ceil(5*0.1) = 1 repair) with PFRAME_ARQ restored.
+        // rates (ceil(5*0.1) = 1 repair).
         h.sent.clear();
         h.feed(blob);
         repairs = 0;
-        bool parq = false;
-        for (const Sym& sy : h.sent) {
-            repairs += sy.is_repair() ? 1 : 0;
-            parq |= (sy.hdr.data_flags & data_flags::kPframeArq) != 0;
-        }
+        for (const Sym& sy : h.sent) repairs += sy.is_repair() ? 1 : 0;
         CHECK_EQ_U(repairs, 1u);
-        CHECK(parq);
         // A huge override clamps to the GF(256) capacity (256 - k).
         h.sent.clear();
-        h.framer.set_next_frame_override(1000, true);
+        h.framer.set_next_frame_override(1000);
         h.feed(blob);
         repairs = 0;
         for (const Sym& sy : h.sent) repairs += sy.is_repair() ? 1 : 0;
         const uint16_t k = static_cast<uint16_t>((blob.size() + s - 1) / s);
         CHECK_EQ_U(repairs, 256u - k);
-        // The min_k ARQ-only rule survives enforcement (§14.2 rule 1) — but
-        // per Pass 94 only for an ARQ-eligible frame. An IDR under idr-only is
-        // eligible, so k <= min_k still ignores the parity override entirely.
-        Harness small(fec, FrameArqMode::kIdrOnly);
-        small.framer.set_next_frame_override(8, true);
-        small.feed(make_frame(100, /*idr=*/true, 10));  // k = 1 <= min_k 3
-        for (const Sym& sy : small.sent) CHECK(!sy.is_repair());
-        // ...and the Pass 94 case: the same small frame as a P-frame under
-        // idr-only has no ARQ to fall back on, so the gate must NOT block the
-        // override. Before Pass 94 this frame shipped bare — that was B11.
-        Harness bare(fec, FrameArqMode::kIdrOnly);
-        bare.framer.set_next_frame_override(2, true);
-        bare.feed(make_frame(100, /*idr=*/false, 10));  // k = 1 <= min_k 3
-        size_t bare_repairs = 0;
-        for (const Sym& sy : bare.sent) bare_repairs += sy.is_repair() ? 1 : 0;
-        CHECK_EQ_U(bare_repairs, 2u);
+        // Pass 205/O1: the min_k gate is gone, so the override applies at any
+        // k. A small IDR takes the enforced parity; so does a small P frame.
+        Harness small(fec);
+        small.framer.set_next_frame_override(8);
+        small.feed(make_frame(100, /*idr=*/true, 10));  // k = 1
+        CHECK_EQ_U(repair_count_of(small.sent), 8u);
+        Harness bare(fec);
+        bare.framer.set_next_frame_override(2);
+        bare.feed(make_frame(100, /*idr=*/false, 10));  // k = 1
+        CHECK_EQ_U(repair_count_of(bare.sent), 2u);
     }
 
-    // --- §14.1 Pass 94: the min_k gate is conditional on ARQ eligibility ----
+    // --- §14.1 Pass 205/O1: all-k parity, no class gate --------------------
     {
         FrameFecConfig fec;
         fec.scheme = FecScheme::kRlc256;
         fec.i_rate_permille = 300;
         fec.p_rate_permille = 200;
-        fec.min_k = 3;
         fec.min_r = 0;  // isolate the rate-derived r from the Pass 98 floor
 
-        // A small P-frame under idr-only: NOT ARQ-eligible, so it gets parity
-        // rather than nothing. r = ceil(3 * 0.2) = 1.
-        Harness p(fec, FrameArqMode::kIdrOnly);
-        const uint16_t s = p.framer.symbol_size();
-        p.feed(make_frame(3 * s - 8, /*idr=*/false, 20));  // k = 3 == min_k
-        size_t repairs = 0;
-        for (const Sym& sy : p.sent) repairs += sy.is_repair() ? 1 : 0;
-        CHECK_EQ_U(repairs, 1u);
+        const uint16_t s = Harness(fec).framer.symbol_size();
 
-        // The same frame under all-frames IS ARQ-eligible, so the gate holds
-        // and the optimisation still applies: no parity, ARQ carries it.
-        Harness a(fec, FrameArqMode::kAllFrames);
-        a.feed(make_frame(3 * s - 8, /*idr=*/false, 21));
-        for (const Sym& sy : a.sent) CHECK(!sy.is_repair());
+        // A small P frame: r = ceil(3 * 0.2) = 1.
+        Harness p(fec);
+        p.feed(make_frame(3 * s - 8, /*idr=*/false, 20));  // k = 3
+        CHECK_EQ_U(repair_count_of(p.sent), 1u);
 
-        // A small IDR is ARQ-eligible under either mode: gate holds.
-        Harness i(fec, FrameArqMode::kIdrOnly);
+        // A small IDR: r = ceil(3 * 0.3) = 1.
+        Harness i(fec);
         i.feed(make_frame(3 * s - 8, /*idr=*/true, 22));
-        for (const Sym& sy : i.sent) CHECK(!sy.is_repair());
+        CHECK_EQ_U(repair_count_of(i.sent), 1u);
 
-        // §4.1 cadence cutoff removes ARQ from every class, so the gate goes
-        // inert and even an IDR gets parity. r = ceil(3 * 0.3) = 1.
-        Harness c(fec, FrameArqMode::kAllFrames);
-        c.framer.set_arq_suppressed(true);
-        c.feed(make_frame(3 * s - 8, /*idr=*/true, 23));
-        repairs = 0;
-        for (const Sym& sy : c.sent) repairs += sy.is_repair() ? 1 : 0;
-        CHECK_EQ_U(repairs, 1u);
-
-        // Above min_k nothing changes: the gate was never in play.
-        Harness big(fec, FrameArqMode::kAllFrames);
-        big.feed(make_frame(5 * s - 8, /*idr=*/false, 24));  // k = 5 > min_k
-        repairs = 0;
-        for (const Sym& sy : big.sent) repairs += sy.is_repair() ? 1 : 0;
-        CHECK_EQ_U(repairs, 1u);  // ceil(5 * 0.2)
+        // Above the old min_k the rate is the only term.
+        Harness big(fec);
+        big.feed(make_frame(5 * s - 8, /*idr=*/false, 24));  // k = 5
+        CHECK_EQ_U(repair_count_of(big.sent), 1u);  // ceil(5 * 0.2)
     }
 
     // --- §14.1 Pass 98: minimum repair floor -------------------------------
@@ -585,71 +508,34 @@ int main() {
         fec.scheme = FecScheme::kRlc256;
         fec.i_rate_permille = 300;
         fec.p_rate_permille = 200;
-        fec.min_k = 3;
         fec.min_r = 2;
-        auto rcount = [&](size_t body, bool idr, FrameArqMode mode) {
-            Harness h(fec, mode);
+        auto rcount = [&](size_t body, bool idr) {
+            Harness h(fec);
             h.feed(make_frame(body, idr, 30));
-            size_t r = 0;
-            for (const Sym& sy : h.sent) r += sy.is_repair() ? 1 : 0;
-            return r;
+            return repair_count_of(h.sent);
         };
         const uint16_t s = Harness(fec).framer.symbol_size();
-        // k=1 P-frame under idr-only: ceil(1*0.2)=1, floored to min_r=2 — the
-        // only lever for k=1, since ceil(1*rate)=1 for any rate <= 1000.
-        CHECK_EQ_U(rcount(1 * s - 8, false, FrameArqMode::kIdrOnly), 2u);
+        // k=1 P-frame: ceil(1*0.2)=1, floored to min_r=2 — the only lever for
+        // k=1, since ceil(1*rate)=1 for any rate <= 1000.
+        CHECK_EQ_U(rcount(1 * s - 8, false), 2u);
         // k=3: ceil(3*0.2)=1 -> floored to 2.
-        CHECK_EQ_U(rcount(3 * s - 8, false, FrameArqMode::kIdrOnly), 2u);
+        CHECK_EQ_U(rcount(3 * s - 8, false), 2u);
         // Large frame: ceil(20*0.2)=4 already exceeds the floor, so unchanged.
-        CHECK_EQ_U(rcount(20 * s - 8, false, FrameArqMode::kIdrOnly), 4u);
-        // The floor never resurrects an ARQ-covered small frame (min_k gate
-        // still returns 0 first) or a P_rate=0 stream.
-        Harness gated(fec, FrameArqMode::kAllFrames);  // k<=min_k IS arq here
-        gated.feed(make_frame(2 * s - 8, false, 31));
-        for (const Sym& sy : gated.sent) CHECK(!sy.is_repair());
+        CHECK_EQ_U(rcount(20 * s - 8, false), 4u);
+        // A P_rate=0 stream stays deliberately bare: the floor must not force
+        // FEC on where the rate says none.
         FrameFecConfig off = fec;
-        off.p_rate_permille = 0;  // P-FEC disabled: floor must not force it on
-        Harness disabled(off, FrameArqMode::kIdrOnly);
+        off.p_rate_permille = 0;
+        Harness disabled(off);
         disabled.feed(make_frame(3 * s - 8, false, 32));
-        for (const Sym& sy : disabled.sent) CHECK(!sy.is_repair());
-    }
-
-    // --- §4.1 Pass 40 high-cadence ARQ cutoff --------------------------------
-    {
-        Harness h({}, FrameArqMode::kAllFrames);
-        h.framer.set_arq_suppressed(true);
-        h.feed(make_frame(3000, /*idr=*/true, 11));
-        h.feed(make_frame(3000, /*idr=*/false, 12));
-        for (const Sym& sy : h.sent) {
-            CHECK((sy.hdr.data_flags &
-                   (data_flags::kArq | data_flags::kPframeArq)) == 0);
-        }
-        CHECK_EQ_U(h.framer.stats().arq_frames, 0u);
-        CHECK_EQ_U(h.framer.stats().arq_cutoff_frames, 2u);
-        CHECK_EQ_U(h.framer.stats().idr_frames, 1u);
-        // Cadence drops back below the cutoff: stamping resumes (sticky off).
-        h.framer.set_arq_suppressed(false);
-        h.sent.clear();
-        h.feed(make_frame(3000, /*idr=*/true, 13));
-        bool arq = false;
-        for (const Sym& sy : h.sent) {
-            arq |= (sy.hdr.data_flags & data_flags::kArq) != 0;
-        }
-        CHECK(arq);
-        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
-        CHECK_EQ_U(h.framer.stats().arq_cutoff_frames, 2u);
-        // idr-only mode: a suppressed P frame is not counted (not ARQ-class).
-        Harness p({}, FrameArqMode::kIdrOnly);
-        p.framer.set_arq_suppressed(true);
-        p.feed(make_frame(3000, /*idr=*/false, 14));
-        CHECK_EQ_U(p.framer.stats().arq_cutoff_frames, 0u);
+        CHECK_EQ_U(repair_count_of(disabled.sent), 0u);
     }
 
     // === §14.1a non-referenced (SVC-T droppable) class — Pass 149 ==========
 
     // --- classification is disjoint and IDR-first -------------------------
     {
-        Harness h(rlc(), FrameArqMode::kAllFrames);
+        Harness h(rlc());
         h.feed(make_frame(3000, /*idr=*/false, 0, kFrameFlagEnhance));
         CHECK_EQ_U(h.framer.stats().fec_enhance_frames, 1u);
         CHECK_EQ_U(h.framer.stats().idr_frames, 0u);
@@ -666,8 +552,8 @@ int main() {
     // --- e_rate UNSET: parity rate identical to the P class ---------------
     {
         for (size_t body : {3000u, 9000u, 40000u}) {
-            Harness e(rlc(), FrameArqMode::kIdrOnly);
-            Harness p(rlc(), FrameArqMode::kIdrOnly);
+            Harness e(rlc());
+            Harness p(rlc());
             e.feed(make_frame(body, false, 2, kFrameFlagEnhance));
             p.feed(make_frame(body, false, 2));
             CHECK_EQ_U(repair_count_of(e.sent), repair_count_of(p.sent));
@@ -677,12 +563,12 @@ int main() {
 
     // --- e_rate = 0: genuinely zero parity, NOT resurrected by min_r ------
     {
-        Harness h(rlc(/*e=*/0), FrameArqMode::kIdrOnly);
+        Harness h(rlc(/*e=*/0));
         h.feed(make_frame(9000, false, 3, kFrameFlagEnhance));
         CHECK_EQ_U(repair_count_of(h.sent), 0u);
         CHECK(!h.sent.empty());  // source symbols still ship
         // ...while the P class at the same size keeps its parity.
-        Harness p(rlc(/*e=*/0), FrameArqMode::kIdrOnly);
+        Harness p(rlc(/*e=*/0));
         p.feed(make_frame(9000, false, 3));
         CHECK(repair_count_of(p.sent) > 0u);
     }
@@ -692,78 +578,41 @@ int main() {
         // e_rate 10 permille on a k~7 frame gives ceil(0.07)=1, floored to
         // min_r=2 — the same r the 100 permille P rate produces. Documented
         // in §14.1a so nobody reads a "light" setting as light.
-        Harness lo(rlc(/*e=*/10), FrameArqMode::kIdrOnly);
-        Harness p(rlc(), FrameArqMode::kIdrOnly);
+        Harness lo(rlc(/*e=*/10));
+        Harness p(rlc());
         lo.feed(make_frame(9000, false, 4, kFrameFlagEnhance));
         p.feed(make_frame(9000, false, 4));
         CHECK_EQ_U(repair_count_of(lo.sent), repair_count_of(p.sent));
     }
 
-    // --- ARQ: never eligible, under any arq_mode -------------------------
-    {
-        Harness h(rlc(), FrameArqMode::kAllFrames);
-        h.feed(make_frame(3000, false, 5, kFrameFlagEnhance));
-        CHECK(!any_pframe_arq(h.sent));
-        CHECK_EQ_U(h.framer.stats().arq_frames, 0u);
-        // A plain P frame in the same mode still gets it — the exclusion is
-        // the class, not the mode.
-        h.sent.clear();
-        h.feed(make_frame(3000, false, 6));
-        CHECK(any_pframe_arq(h.sent));
-        CHECK_EQ_U(h.framer.stats().arq_frames, 1u);
-        // arq_cutoff_frames must not count a class that had no ARQ to cut.
-        Harness s(rlc(), FrameArqMode::kAllFrames);
-        s.framer.set_arq_suppressed(true);
-        s.feed(make_frame(3000, false, 7, kFrameFlagEnhance));
-        CHECK_EQ_U(s.framer.stats().arq_cutoff_frames, 0u);
-    }
-
-    // --- the documented non-identity corner (§14.1a) ----------------------
-    {
-        // k <= min_k under all-frames: this frame WAS ARQ-only (r=0) and is
-        // now FEC'd at min_r instead. Pinned because it is the one place
-        // "e_rate unset changes nothing" would have been wrong.
-        Harness h(rlc(), FrameArqMode::kAllFrames);
-        const uint16_t s = h.framer.symbol_size();
-        h.feed(make_frame(s, false, 8, kFrameFlagEnhance));  // k = 2 (meta+body)
-        CHECK(!any_pframe_arq(h.sent));
-        CHECK_EQ_U(repair_count_of(h.sent), h.framer.fec().min_r);
-        // The same small frame without the flag keeps the old ARQ-only shape.
-        Harness p(rlc(), FrameArqMode::kAllFrames);
-        p.feed(make_frame(s, false, 8));
-        CHECK(any_pframe_arq(p.sent));
-        CHECK_EQ_U(repair_count_of(p.sent), 0u);
-    }
-
     // --- §14.2 exemption: an override never touches this class ------------
     {
-        // Without the exemption the ARQ change above flips rule 1's
-        // `k > min_k || !arq_eligible` gate permanently open, so the override
-        // would repaint parity onto exactly the frames e_rate leaves bare.
-        Harness h(rlc(/*e=*/0), FrameArqMode::kAllFrames);
-        h.framer.set_next_frame_override(/*parity_symbols=*/9,
-                                         /*allow_pframe_arq=*/true);
+        // The override would otherwise repaint parity onto exactly the frames
+        // e_rate exists to leave bare. Pass 205 removed the ARQ term from the
+        // override gate; the class exemption is now the only one.
+        Harness h(rlc(/*e=*/0));
+        h.framer.set_next_frame_override(/*parity_symbols=*/9);
         h.feed(make_frame(9000, false, 9, kFrameFlagEnhance));
         CHECK_EQ_U(repair_count_of(h.sent), 0u);  // still bare
         // Same override on a P frame DOES actuate — the exemption is scoped
         // to the class, not a disabling of §14.2.
-        Harness p(rlc(/*e=*/0), FrameArqMode::kAllFrames);
-        p.framer.set_next_frame_override(9, true);
+        Harness p(rlc(/*e=*/0));
+        p.framer.set_next_frame_override(9);
         p.feed(make_frame(9000, false, 9));
         CHECK_EQ_U(repair_count_of(p.sent), 9u);
-        // ...and at k <= min_k, where the gate is the thing that changed.
-        Harness sm(rlc(/*e=*/0), FrameArqMode::kAllFrames);
-        sm.framer.set_next_frame_override(5, true);
-        sm.feed(make_frame(sm.framer.symbol_size(), false, 10,
-                           kFrameFlagEnhance));
-        CHECK_EQ_U(repair_count_of(sm.sent), 0u);
+        // ...and still does at small k, where the removed min_k gate used to
+        // block it.
+        Harness sm(rlc(/*e=*/0));
+        sm.framer.set_next_frame_override(5);
+        sm.feed(make_frame(sm.framer.symbol_size(), false, 10));
+        CHECK_EQ_U(repair_count_of(sm.sent), 5u);
     }
 
     // --- live retune (§15.5) is a full replacement ------------------------
     {
-        Harness h(rlc(/*e=*/0), FrameArqMode::kIdrOnly);
+        Harness h(rlc(/*e=*/0));
         CHECK(h.framer.fec().e_rate_permille.has_value());
-        h.framer.set_fec_rates(250, 100, 3, 2);  // e omitted => cleared
+        h.framer.set_fec_rates(250, 100, 2);  // e omitted => cleared
         CHECK(!h.framer.fec().e_rate_permille.has_value());
         h.feed(make_frame(9000, false, 11, kFrameFlagEnhance));
         CHECK(repair_count_of(h.sent) > 0u);  // back to inheriting p_rate

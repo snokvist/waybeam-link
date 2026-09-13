@@ -90,7 +90,7 @@ int main() {
     int latch_calls = 0, latch_clear = -1, latch_orig = -1;
     std::optional<uint16_t> fec_e;  // §14.1a; nullopt = inherit p_permille
     int fec_calls = 0;
-    int fec_sid = -1, fec_i = -1, fec_p = -1, fec_k = -1, fec_r = -1;
+    int fec_sid = -1, fec_i = -1, fec_p = -1, fec_r = -1;
     bool fec_ok = true;
     int reset_calls = 0;
     int recovery_stream = -2;
@@ -159,12 +159,11 @@ int main() {
         ++ucal_calls;
         return ucal_refuse;  // non-empty = failed prerequisite -> 409
     };
-    h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+    h.fec = [&](int sid, int ip, int pp, int mr,
                 std::optional<uint16_t> ep) -> std::string {
         fec_sid = sid;
         fec_i = ip;
         fec_p = pp;
-        fec_k = mk;
         fec_r = mr;
         fec_e = ep;  // §14.1a: nullopt = inherit p_permille
         ++fec_calls;
@@ -198,11 +197,11 @@ int main() {
     bool vcmd_bound = true;
     h.vehicle_command_json = [] {
         return std::string(
-            "{\"nonce\":42,\"cmd\":\"arq\",\"arg\":0,\"state\":\"acked\"}");
+            "{\"nonce\":42,\"cmd\":\"selector\",\"arg\":0,\"state\":\"acked\"}");
     };
     h.vehicle_command = [&](const std::string& cmd, int arg)
         -> std::pair<int, std::string> {
-        if (cmd != "arq" && cmd != "selector" && cmd != "fps_ladder") {
+        if (cmd != "selector" && cmd != "fps_ladder") {
             return {400, "{\"ok\":false,\"error\":\"unknown cmd\"}"};
         }
         if (!vcmd_bound) {
@@ -226,12 +225,6 @@ int main() {
         }
         mtu_mode = mode;
         return {200, "{\"ok\":true}"};
-    };
-    // §6.4 RX-local NACK-emission gate.
-    int arq_state = -1;
-    h.arq_enable = [&](bool enabled) -> std::string {
-        arq_state = enabled ? 1 : 0;
-        return "";
     };
     // §15.5 operating-mode selection (Pass 96).
     std::string mode_state = "boot-mode";
@@ -525,7 +518,6 @@ int main() {
         CHECK_EQ_U(fec_sid, 0);
         CHECK_EQ_U(fec_i, 300);
         CHECK_EQ_U(fec_p, 120);
-        CHECK_EQ_U(fec_k, 4);
         CHECK_EQ_U(fec_r, 3);
         CHECK(!fec_e.has_value());  // §14.1a: omitted => inherit p_permille
     }
@@ -637,7 +629,7 @@ int main() {
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
     // §11.7 vehicle command: GET state, POST round-trip incl. the typed
-    // 409/400 outcomes, missing fields, and the §6.4 arq gate.
+    // 409/400 outcomes and missing fields.
     {
         const std::string r = roundtrip(
             s, port, "GET /api/v1/vehicle/command HTTP/1.0\r\n\r\n");
@@ -664,15 +656,15 @@ int main() {
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
     {
-        const std::string body = "{\"cmd\":\"arq\",\"arg\":0}";
+        const std::string body = "{\"cmd\":\"fps_ladder\",\"arg\":1}";
         const std::string req =
             "POST /api/v1/vehicle/command HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         const std::string r = roundtrip(s, port, req);
         CHECK_EQ_U(status_of(r), 200);
         CHECK(body_of(r).find("\"nonce\":42") != std::string::npos);
-        CHECK(vcmd_last_cmd == "arq");
-        CHECK_EQ_U(vcmd_last_arg, 0);
+        CHECK(vcmd_last_cmd == "fps_ladder");
+        CHECK_EQ_U(vcmd_last_arg, 1);
     }
     {
         const std::string body = "{\"cmd\":\"warp\",\"arg\":1}";
@@ -691,26 +683,18 @@ int main() {
         vcmd_bound = true;
     }
     {
-        const std::string body = "{\"cmd\":\"arq\"}";  // arg required
+        const std::string body = "{\"cmd\":\"fps_ladder\"}";  // arg required
         const std::string req =
             "POST /api/v1/vehicle/command HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
-    {
+    {  // Pass 205: the RX-local ARQ gate endpoint is removed.
         const std::string body = "{\"enabled\":false}";
         const std::string req =
             "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
             std::to_string(body.size()) + "\r\n\r\n" + body;
-        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
-        CHECK_EQ_U(arq_state, 0);
-    }
-    {
-        const std::string body = "{\"enabled\":1}";  // must be a bool
-        const std::string req =
-            "POST /api/v1/arq HTTP/1.0\r\nContent-Length: " +
-            std::to_string(body.size()) + "\r\n\r\n" + body;
-        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 404);
     }
     // §9.11 craft-local FPS-ladder toggle (Pass 99).
     {  // ladder on → 200, handler sees true.

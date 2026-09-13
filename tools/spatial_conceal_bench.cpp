@@ -122,7 +122,6 @@ int main(int argc, char** argv) {
     fc.fec.scheme = FecScheme::kRlc256;
     fc.fec.i_rate_permille = 250;
     fc.fec.p_rate_permille = p_rate;
-    fc.fec.min_k = 3;
     fc.fec.min_r = 2;
     FrameFramer framer(fc);
 

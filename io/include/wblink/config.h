@@ -11,7 +11,6 @@
 #include <vector>
 
 #include "wblink/csa.h"
-#include "wblink/nal.h"
 #include "wblink/table.h"
 #include "wblink/types.h"
 
@@ -30,7 +29,7 @@ struct BindCfg {
 };
 
 // §14.1 per-stream FEC policy (frame-shm streams). scheme=kNone => the
-// TX FrameFramer fragments + ARQs but emits no repair symbols.
+// TX FrameFramer fragments but emits no repair symbols.
 struct StreamFecCfg {
     FecScheme scheme = FecScheme::kNone;
     uint16_t i_rate_permille = 250;
@@ -38,16 +37,13 @@ struct StreamFecCfg {
     // §14.1a non-referenced (SVC-T droppable) class. UNSET => inherit
     // p_rate_permille, i.e. identical to a config predating Pass 149.
     std::optional<uint16_t> e_rate_permille;
-    uint16_t min_k = 3;
     uint16_t min_r = 2;  // §14.1 (Pass 98) minimum repair floor per FEC'd frame
 };
 
 struct JsccShadowCfg {
     uint16_t fec_floor_permille = 0;
     uint16_t fec_cap_permille = 0;
-    uint32_t arq_guard_us = 0;
     uint32_t feedback_timeout_ms = 0;
-    uint16_t min_rtt_samples = 0;
     bool enforce = false;  // §14.2 Pass 38: actuate valid decisions
 };
 
@@ -55,7 +51,7 @@ struct NodeCfg {
     uint16_t originator = 0;
     Role role = Role::kRx;
     // §2/§13 passive spectator (Pass 74): a display node with no uplink —
-    // FEC+diversity best-effort, no ARQ/returns, passive tune+latch, re-scout
+    // FEC+diversity best-effort, no returns, passive tune+latch, re-scout
     // on CSA move. Permits zero role:"tx" adapters. Fail-closed opt-in.
     bool spectator = false;
     // §3.9 Pass 106: emit a RECOVERY_REQUEST when an RTP stream first latches.
@@ -163,9 +159,6 @@ struct StreamCfg {
     // out-streams only: optionally pin the latch to one sender (§2 v0 latch
     // policy — first admitted tuple matching type [+ originator]).
     std::optional<uint16_t> originator;
-    // RTP in-streams (§4.1): "size" (default) / "h264" / "h265".
-    RtpClassifier classifier = RtpClassifier::kSize;
-    FrameArqMode arq_mode = FrameArqMode::kIdrOnly;
     // §14.1 FEC for frame-shm streams (ignored on udp streams).
     StreamFecCfg fec;
     std::optional<JsccShadowCfg> jscc_shadow;
@@ -269,34 +262,15 @@ struct VencCfg {
     std::string modes_dir;
 };
 
-struct ArqPolicy {
-    double airtime_frac = 0.15;
-    uint8_t attempt_cap = 3;
-    uint32_t holddown_ms = 20;
-    uint32_t fwd_clamp_blocks = 4;  // §6.6 clamp K, in blocks
-    // §5.2 ring + §5.3/§12 scheduler knobs (all §17-overridable seeds).
-    uint32_t ring_window_ms = 50;
-    uint32_t ring_byte_budget = 256 * 1024;
-    uint32_t classifier_size_threshold = 8 * 1024;  // §4.1 size heuristic
-    uint32_t release_timeout_ms = 500;              // §12 contested release
-    uint32_t min_recoverable_ms = 0;                // §5.3; gate-3 measured
-    uint32_t budget_interval_ms = 100;
-    uint32_t budget_floor_bytes = 4096;
-    uint32_t max_block_pkts = 64;  // §13 bitmap sanity clamp
-    // §4.1 Pass 40: no ARQ class above this cadence (0 = no cutoff).
-    uint16_t arq_max_fps = 100;
-};
-
 // §6 RX-side knobs (all §17-overridable seeds).
 struct RxCfgPolicy {
     uint32_t stall_timeout_ms = 200;   // §6.5
     uint32_t dwell_ceiling_ms = 20;    // §6.2-3
     uint8_t admit_n = 3;               // §2
     uint32_t admit_window_ms = 1000;   // §2
-    uint8_t renack_attempts = 3;       // §6.4
-    uint32_t renack_backoff_ms = 6;    // §6.4
     uint32_t idle_teardown_ms = 5000;  // §2
     uint32_t fwd_clamp_pkts = 256;     // §6.6 seq clamp
+    uint32_t fwd_clamp_blocks = 4;     // §6.6 clamp K, in blocks (relocated P205)
     uint32_t clamp_resync_ms = 500;    // §6.6 sustained-clamp resync window
 };
 
@@ -420,7 +394,6 @@ struct Policy {
     // Default on binding release like any commanded tier.
     std::string mtu_default = "default";
     SelectPolicy select;
-    ArqPolicy arq;
     RxCfgPolicy rx;
     FecPolicy fec;
     ReturnPolicy ret;  // JSON key "return" (C++ keyword)
@@ -434,7 +407,7 @@ struct Policy {
 // NOT §15); "radio" is the devourer path (§3.0) — its adapters come from
 // the top-level adapters array, nothing is duplicated here.
 struct AirUdpCfg {
-    std::vector<std::string> tx;  // frame targets (tx: video; rx: NACKs)
+    std::vector<std::string> tx;  // frame targets (tx: video; rx: returns)
     std::vector<std::string> rx;  // listen sockets = virtual adapters
     // Bench-only per-adapter synthetic RX drop (0–1000), parity with the
     // radio backend — manufactures known loss on the udp-air path.
@@ -605,7 +578,6 @@ struct CacheRepairCfg {
     uint32_t min_collect_ms = 4;
     uint32_t hard_close_ms = 8;
     uint32_t request_timeout_ms = 4;
-    uint32_t nack_grace_ms = 3;
     uint16_t repair_fraction_permille = 200;
     uint8_t absolute_symbol_limit = 8;
     uint8_t max_cache_attempts = 2;

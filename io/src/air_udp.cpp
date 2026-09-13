@@ -19,7 +19,7 @@ constexpr size_t kPacedCatchupCap = 64;
 
 const CommonPrefix* prefix_of(const Decoded& dec) {
     if (const auto* p = std::get_if<DataView>(&dec)) return &p->hdr.prefix;
-    if (const auto* p = std::get_if<NackView>(&dec)) return &p->hdr.prefix;
+    if (const auto* p = std::get_if<ReservedNack>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<LinkReport>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<Heartbeat>(&dec)) return &p->prefix;
     if (const auto* p = std::get_if<CsaPacket>(&dec)) return &p->prefix;

@@ -595,7 +595,7 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
             e_permille = static_cast<uint16_t>(e);
         }
         return done(h_.fec(j.value("stream_id", 0), j.value("i_permille", 250),
-                           j.value("p_permille", 100), j.value("min_k", 3),
+                           j.value("p_permille", 100),
                            j.value("min_r", 2), e_permille));
     }
     if (path == "/api/v1/stats/reset") {
@@ -703,14 +703,6 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
                      code == 200 ? "OK"
                                  : (code == 409 ? "Conflict" : "Bad Request"),
                      jbody);
-    }
-    if (path == "/api/v1/arq") {
-        if (!h_.arq_enable) return na();
-        if (!j.contains("enabled") || !j["enabled"].is_boolean()) {
-            return reply(400, "Bad Request",
-                         json_err("enabled (bool) required"));
-        }
-        return done(h_.arq_enable(j.value("enabled", true)));
     }
     if (path == "/api/v1/link/fps") {
         if (!h_.link_fps) return na();

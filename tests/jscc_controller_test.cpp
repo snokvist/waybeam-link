@@ -18,10 +18,6 @@ JsccInnerInput base() {
     in.deadline_us = 16000;
     in.elapsed_us = 2000;
     in.source_tx_remaining_us = 6000;
-    in.rtt_p95_us = 4000;
-    in.resend_airtime_us = 1000;
-    in.arq_guard_us = 1000;
-    in.arq_capable = true;
     return in;
 }
 }  // namespace
@@ -31,10 +27,9 @@ int main() {
         const auto out = jscc_inner_decide(base());
         CHECK_EQ_U(out.parity_symbols, 8u);
         CHECK_EQ_U(out.remaining_after_source_us, 8000u);
-        CHECK(out.arq_eligible);
         CHECK(!out.discard);
-        CHECK(out.reason == JsccReason::kFecAndArq);
-        CHECK(std::strcmp(jscc_reason_string(out.reason), "fec_and_arq") == 0);
+        CHECK(out.reason == JsccReason::kFecOnly);
+        CHECK(std::strcmp(jscc_reason_string(out.reason), "fec_only") == 0);
     }
     {
         auto in = base();
@@ -51,19 +46,15 @@ int main() {
         const auto out = jscc_inner_decide(in);
         CHECK(!out.discard);
         CHECK_EQ_U(out.remaining_after_source_us, 0u);
-        CHECK(!out.arq_eligible);
         CHECK(out.reason == JsccReason::kFecOnly);
     }
     {
         auto in = base();
         in.predicted_loss_symbols = 2;
         in.fec_floor_symbols = 6;
-        in.rtt_p95_us = 6000;
-        in.resend_airtime_us = 1000;
-        in.arq_guard_us = 1000;
         const auto out = jscc_inner_decide(in);
         CHECK_EQ_U(out.parity_symbols, 6u);
-        CHECK(out.arq_eligible);
+        CHECK(out.reason == JsccReason::kFecOnly);
     }
     {
         auto in = base();
@@ -83,16 +74,10 @@ int main() {
         CHECK(out.fec_capacity_limited);
     }
     {
+        // Pass 205/O6: with no ARQ, zero desired parity is simply unprotected.
         auto in = base();
         in.predicted_loss_symbols = 0;
         in.fec_floor_symbols = 0;
-        CHECK(jscc_inner_decide(in).reason == JsccReason::kArqOnly);
-    }
-    {
-        auto in = base();
-        in.predicted_loss_symbols = 0;
-        in.fec_floor_symbols = 0;
-        in.arq_capable = false;
         CHECK(jscc_inner_decide(in).reason == JsccReason::kUnprotected);
     }
     {

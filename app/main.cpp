@@ -58,9 +58,7 @@
 #include "wblink/report_gate.h"
 #include "wblink/mcs_probe.h"
 #include "wblink/reporter.h"
-#include "wblink/ring.h"
 #include "wblink/rx.h"
-#include "wblink/scheduler.h"
 #include "wblink/scout_sense.h"
 #include "wblink/scout_store.h"
 #include "wblink/selector.h"
@@ -111,9 +109,7 @@ using wblink::node::calib_params_from;
 using wblink::node::s_to_ms;
 using wblink::node::selector_policy;
 using wblink::node::bw_code;
-using wblink::node::scheduler_policy;
 using wblink::node::TxCore;
-using wblink::node::ArqTimingTracker;
 using wblink::node::emit_stats;
 using wblink::node::InfoSelfState;
 using wblink::node::load_all;
@@ -362,18 +358,19 @@ int run_loopback(const Loaded& l) {
     };
     // RX -> return direction -> TX (its own loss). No L2 addressing in
     // loopback — the unicast target is meaningless here.
-    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
-                                           uint16_t) {
+    const RxCore::Inject inject_return = [&](const uint8_t* f, size_t n,
+                                             uint16_t) {
         if (return_rng.uniform() >= l.cfg.loopback.return_loss_p) {
             tx.on_air(f, n, loop_now);
         }
     };
     // §3.5: Reporter::build() leaves report_epoch at 0 and the INJECTOR stamps
     // it, so an injector that does not stamp emits a constant 0 on the wire.
-    // run_rx has send_report for this; loopback passed inject_nack as its
-    // report injector and therefore emitted epoch 0 on every LINK_REPORT,
-    // silently degrading anything on the bench that keys on epoch monotonicity
-    // — including the §10.7 denominator the whole feature is measured with.
+    // run_rx has send_report for this; the loopback bench must not pass the
+    // generic return injector as its report injector, or it emits epoch 0 on
+    // every LINK_REPORT, silently degrading anything on the bench that keys on
+    // epoch monotonicity — including the §10.7 denominator the whole feature
+    // is measured with.
     const RxCore::Inject inject_report = [&](const uint8_t* f, size_t n,
                                              uint16_t) {
         std::vector<uint8_t> tmp(f, f + n);
@@ -423,18 +420,17 @@ int run_loopback(const Loaded& l) {
                                static_cast<uint8_t>(mx));
             return "";
         };
-        h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+        h.fec = [&](int sid, int ip, int pp, int mr,
                     std::optional<uint16_t> ep) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
-            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 ||
                 mr < 0 || mr > 255)
-                return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
+                return "bad fec rates (0..4000 permille, min_r 0..255)";
             // §14.1a: the control server already range-checked e_permille;
             // nullopt here means "inherit p_permille" (full replacement).
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
-                                     static_cast<uint16_t>(mk),
                                      static_cast<uint16_t>(mr), ep)
                        ? ""
                        : "no frame-shm stream with that id";
@@ -485,7 +481,7 @@ int run_loopback(const Loaded& l) {
             tx.on_ingress(ev.stream_id, ev.data, ev.len, loop_now, inject);
         });
         tx.tick(loop_now, inject);
-        rx.tick(loop_now, deliver, inject_nack, inject_report);
+        rx.tick(loop_now, deliver, inject_report, inject_return);
         if (control) {
             control->service(loop_now);
         }

@@ -360,9 +360,7 @@ add_library(wblink_core STATIC
     core/src/jscc_controller.cpp
     core/src/jscc_loss_estimator.cpp
     core/src/jscc_runtime_shadow.cpp
-    core/src/ring.cpp
     core/src/rx.cpp
-    core/src/scheduler.cpp
     core/src/reporter.cpp
     core/src/selector.cpp
     core/src/csa.cpp

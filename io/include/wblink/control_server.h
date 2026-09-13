@@ -77,7 +77,7 @@ struct ControlHandlers {
     // e_permille: §14.1a third class; nullopt = inherit p_permille. The
     // POST is a full replacement, so an omitted e_permille restores that.
     std::function<std::string(int stream_id, int i_permille, int p_permille,
-                              int min_k, int min_r,
+                              int min_r,
                               std::optional<uint16_t> e_permille)>
         fec;
     std::function<void()> reset_stats;  // side-effect only; always 200
@@ -114,8 +114,6 @@ struct ControlHandlers {
     // §9.3a ground-local preference. Returns a complete HTTP outcome so an
     // in-flight command can be reported as 409 without losing the preference.
     std::function<std::pair<int, std::string>(const std::string& mode)> link_mtu;
-    // §6.4 RX-local NACK-emission gate (rx only; null → 409).
-    std::function<std::string(bool enabled)> arq_enable;
     // §9.11 craft-local FPS-ladder toggle (Pass 99; tx/craft only, null → 409).
     // true = variable fps (ladder runs), false = static (ladder holds). Routes
     // through the same §11.7 transition as the over-air FPS_LADDER command.

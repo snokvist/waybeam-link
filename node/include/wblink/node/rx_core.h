@@ -42,19 +42,17 @@
 namespace wblink {
 namespace node {
 
-// §15.2 -> §3 policy translation. Lived beside its siblings (arq_policy,
-// selector_policy, quietgap_policy) in main.cpp; those stay there until the
-// TX half of Phase 2a moves, because they have callers this layer does not.
+// §15.2 -> §3 policy translation. Lived beside its siblings (selector_policy,
+// quietgap_policy) in main.cpp; those stay there until the TX half of Phase 2a
+// moves, because they have callers this layer does not.
 inline RxPolicy rx_policy(const Config& cfg) {
     RxPolicy p;
     p.fwd_clamp_pkts = cfg.policy.rx.fwd_clamp_pkts;
-    p.fwd_clamp_blocks = cfg.policy.arq.fwd_clamp_blocks;
+    p.fwd_clamp_blocks = cfg.policy.rx.fwd_clamp_blocks;
     p.stall_timeout_ms = cfg.policy.rx.stall_timeout_ms;
     p.dwell_ceiling_ms = cfg.policy.rx.dwell_ceiling_ms;
     p.admit_n = cfg.policy.rx.admit_n;
     p.admit_window_ms = cfg.policy.rx.admit_window_ms;
-    p.renack_attempts = cfg.policy.rx.renack_attempts;
-    p.renack_backoff_ms = cfg.policy.rx.renack_backoff_ms;
     p.idle_teardown_ms = cfg.policy.rx.idle_teardown_ms;
     p.clamp_resync_ms = cfg.policy.rx.clamp_resync_ms;
     return p;
@@ -164,15 +162,6 @@ struct RxCore {
         engine_.complete_frame(stream_id, block_id, now, deliver);
     }
 
-    bool defer_first_nack(uint8_t stream_id, uint32_t block_id,
-                          uint64_t not_before_ms) {
-        return engine_.defer_first_nack(stream_id, block_id, not_before_ms);
-    }
-
-    bool block_had_nack(uint8_t stream_id, uint32_t block_id) const {
-        return engine_.block_had_nack(stream_id, block_id);
-    }
-
     // §10.7: the ground's own emitted-report counter. report_epoch advances
     // once per emitted report (§3.5), so this IS the emission count — the
     // calibrator needs it only for the counter-blackout case, where the
@@ -237,18 +226,21 @@ struct RxCore {
     }
 
     void tick(uint64_t now, const RxEngine::Deliver& deliver,
-              const Inject& inject_report, const Inject& inject_nack,
-              bool emit_nacks = true, uint8_t link_verdict_now = 0,
+              const Inject& inject_report, const Inject& inject_return,
+              uint8_t link_verdict_now = 0,
               const Inject* inject_verdict = nullptr) {
+        // Pass 205: tick no longer emits returns itself (the NACK producer is
+        // gone); the injector is retained in the signature because callers
+        // still drive RECOVERY_REQUEST / JSCC_FEEDBACK through the same object.
+        (void)inject_return;
         engine_.tick(now, deliver);
         // §3.5 Pass 163: refresh the up-candidate evidence for the video
         // stream before building; unfilled/stale fails closed to kNoProbe.
         if (probe_key_) {
             reporter_.set_probe_per(*probe_key_, probe_window_.probe_per(now));
         }
-        // §7.3: LINK_REPORTs ride the same uplink as NACKs. The epoch is
-        // stamped by the injector at the radio call, not here — see
-        // Reporter::next_epoch().
+        // §7.3: LINK_REPORTs ride the return lane. The epoch is stamped by the
+        // injector at the radio call, not here — see Reporter::next_epoch().
         for (LinkReport r : reporter_.build(engine_, now)) {
             r.prefix.originator = originator_;
             r.prefix.destination = r.target_originator;
@@ -286,26 +278,6 @@ struct RxCore {
                 }
             }
         }
-        if (!emit_nacks) {
-            return;
-        }
-        for (const NackRequest& req : engine_.build_nacks(now)) {
-            NackHeader hdr;
-            hdr.prefix.originator = originator_;
-            hdr.prefix.destination = req.target_originator;
-            hdr.prefix.session_id = session_;
-            hdr.target_originator = req.target_originator;
-            hdr.target_session = req.target_session;
-            hdr.target_stream_id = req.target_stream_id;
-            hdr.base_seq = req.base_seq;
-            uint8_t frame[kNackFixedSize + 255];
-            const size_t n = encode_nack(
-                hdr, req.bitmap.data(),
-                static_cast<uint8_t>(req.bitmap.size()), frame, sizeof(frame));
-            if (n > 0) {
-                inject_nack(frame, n, req.target_originator);
-            }
-        }
     }
 
     void emit_jscc_feedback(
@@ -330,14 +302,12 @@ struct RxCore {
             f.target_stream_id = info.key.stream_id;
             f.feedback_epoch = ++feedback_epoch_;
             f.repair_demand_permille = state->repair_demand_permille;
-            f.rtt_p95_us = info.counters.nack_rtt_p95_us;
+            // §3.10 (Pass 205): the rtt_p95_us / rtt_samples fields stay in
+            // the wire layout reserved and always 0 — their only source was
+            // the removed NACK RTT estimator. Layout unchanged.
             f.repair_samples = state->repair_samples;
-            f.rtt_samples = info.counters.nack_rtt_samples;
             if (state->repair_ready) {
                 f.valid_flags |= jscc_feedback_flags::kRepairReady;
-            }
-            if (f.rtt_samples > 0) {
-                f.valid_flags |= jscc_feedback_flags::kRttReady;
             }
             f.observed_block_id = state->observed_block_id;
             uint8_t frame[kJsccFeedbackSize];
@@ -369,18 +339,10 @@ struct RxCore {
                            : static_cast<uint32_t>(
                                  info.counters.lost_declared * 1000 / denom);
             fill_loss_window(st, info, now);
-            st.recovered_arq = info.counters.recovered_arq;
             st.dropped_superseded = info.counters.dropped_superseded;
             st.dropped_deadline = info.counters.dropped_deadline;
-            st.nacks_sent = info.counters.nacks_sent;
             st.best_effort = info.best_effort;
             st.table_mismatch = info.counters.table_mismatch;
-            st.nack_rtt_hist = info.counters.nack_rtt_hist;
-            st.nack_rtt_max_ms = info.counters.nack_rtt_max_ms;
-            st.nack_rtt_samples = info.counters.nack_rtt_samples;
-            st.nack_rtt_p95_us = info.counters.nack_rtt_p95_us;
-            st.arq_rec_hist = info.counters.arq_rec_hist;
-            st.arq_rec_max_ms = info.counters.arq_rec_max_ms;
             st.active_profile = info.active_profile;
             snap.streams.push_back(std::move(st));
         }
@@ -616,13 +578,13 @@ struct RxCore {
 
     // §3.4: announce the best-effort fallback ONCE per stream. The downgrade
     // is correct and deliberate, but until now it was completely silent — the
-    // stream keeps delivering by diversity and FEC while ARQ eligibility,
-    // §6.2-2 supersession and deadline drops are all switched off, and the
-    // counters that would betray it (nacks_sent, dropped_superseded,
-    // dropped_deadline) just read 0, which is what a healthy link with
-    // nothing to recover also reads. Measured 2026-08-30: a craft and a
-    // ground on two legitimately different §9.3 tables ran for hours with
-    // unrecoverable frames accumulating and no operator-visible cause.
+    // stream keeps delivering by diversity and FEC while §6.2-2 supersession
+    // and deadline drops are all switched off, and the counters that would
+    // betray it (dropped_superseded, dropped_deadline) just read 0, which is
+    // what a healthy link with nothing to drop also reads. Measured
+    // 2026-08-30: a craft and a ground on two legitimately different §9.3
+    // tables ran for hours with unrecoverable frames accumulating and no
+    // operator-visible cause.
     // Latched per local_stream_id, not per tuple: a re-latch under the same
     // mismatch is the same standing condition, not news.
     void log_best_effort_edges() {
@@ -711,9 +673,8 @@ struct RxCore {
     }
 
     // §3.4: is the VIDEO stream currently running degraded? /features
-    // publishes ARQ as an operator latch, which cannot see this — the two
-    // senses have to be distinguishable or "arq_enabled: true" keeps being
-    // read as "ARQ is working".
+    // reports best-effort separately — the two senses have to be
+    // distinguishable or a healthy link keeps being read as a degraded one.
     bool video_best_effort() const {
         for (const RxStreamInfo& info : engine_.streams()) {
             if (info.stream_type == stream_type::kRtp && info.best_effort) {

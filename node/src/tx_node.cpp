@@ -65,9 +65,7 @@
 #include "wblink/recovery.h"
 #include "wblink/report_gate.h"
 #include "wblink/reporter.h"
-#include "wblink/ring.h"
 #include "wblink/rx.h"
-#include "wblink/scheduler.h"
 #include "wblink/scout_sense.h"
 #include "wblink/scout_store.h"
 #include "wblink/selector.h"
@@ -372,7 +370,6 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
     // send_now()/resend() flush first by construction, so no unbatched frame
     // can overtake a staged one.
     StagedAir<AirBackend> sa(*air.value);
-    ArqTimingTracker arq_timing;
     uint64_t now_us_it = now_us();
     VideoSlotCadence selector_state_cadence(500);
     // §3.15 word while the feed is paused (Pass 153): with no live slots the
@@ -422,14 +419,6 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
             return;
         }
         send_raw(f, n);
-    };
-    const TxCore::Inject inject_resend = [&](const uint8_t* f, size_t n) {
-        // §12 resends take the unbatched path — they are single frames with
-        // no co-available siblings, and delaying one behind a partial batch
-        // would add latency to the one path that exists to remove it. Flush
-        // so a resend never overtakes video staged before it.
-        sa.resend(f, n);
-        arq_timing.note_resend_submitted(f, n, now_us());
     };
     // §3.16 (Pass 153): probes and tallies are control-plane — plain inject,
     // never the §7.2 held queue (they must not arm or ride quiet gaps).
@@ -519,11 +508,7 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                                    air.value ? &*air.value : nullptr);
         };
         h.features_json = [&] {
-            // §3.4 is a RECEIVE-engine state; a TX node has none, so the
-            // operator latch is also the effective answer here.
-            return build_features_json(l, tx.cmd_arq_enabled(),
-                                       tx.cmd_fps_ladder(),
-                                       tx.cmd_arq_enabled());
+            return build_features_json(l, tx.cmd_fps_ladder());
         };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.link_mtu_json = [&] {
@@ -672,25 +657,23 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
             }
             return {200, std::string("{\"ok\":true}")};
         };
-        h.fec = [&](int sid, int ip, int pp, int mk, int mr,
+        h.fec = [&](int sid, int ip, int pp, int mr,
                     std::optional<uint16_t> ep) -> std::string {
             if (sid < 0 || sid > 255) return "bad stream_id";
-            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 || mk < 1 ||
+            if (ip < 0 || ip > 4000 || pp < 0 || pp > 4000 ||
                 mr < 0 || mr > 255)
-                return "bad fec rates (0..4000 permille, min_k>=1, min_r 0..255)";
+                return "bad fec rates (0..4000 permille, min_r 0..255)";
             // §14.1a: the control server already range-checked e_permille;
             // nullopt here means "inherit p_permille" (full replacement).
             return tx.set_stream_fec(static_cast<uint8_t>(sid),
                                      static_cast<uint16_t>(ip),
                                      static_cast<uint16_t>(pp),
-                                     static_cast<uint16_t>(mk),
                                      static_cast<uint16_t>(mr), ep)
                        ? ""
                        : "no frame-shm stream with that id";
         };
         h.reset_stats = [&] {
             tx.reset_stats();
-            arq_timing.reset();
             for (ShmIn& si : shm_ins) {
                 if (si.ring) si.ring->reset_stats();
             }
@@ -923,11 +906,7 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
             }
             // meta.rssi / meta.rx_mcs feed §3.16's cumulative counters at the
             // accepted-LINK_REPORT point inside on_air.
-            if (tx.on_air(d, n, service_now, meta.rssi, meta.rx_mcs)) {
-                arq_timing.note_nack_received(d, n, service_us);
-                // A valid NACK bypasses the normal tick and live-video path.
-                tx.drain_resends(service_now, inject_resend);
-            }
+            (void)tx.on_air(d, n, service_now, meta.rssi, meta.rx_mcs);
         });
     };
     // Pass 174 (2026-08-14 review fix): ONE lambda builds the status object
@@ -1192,7 +1171,7 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                 sa.send_now(ef, sizeof(ef));
             }
         }
-        tx.tick(service_now, inject, inject_resend);
+        tx.tick(service_now, inject);
         // Last fan-out of the tick. After this the loop consults tx_pending()
         // and the poll timeout, both of which assume nothing is held back.
         (void)sa.flush();
@@ -1250,9 +1229,7 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                     shm_stats.emplace_back(si.stream_id, si.ring->stats());
                 }
             }
-            const ArqTimingStats timing = arq_timing.snapshot();
-            const VcmdStatsFill vfill{craft_cmd.last_nonce(), nullptr, 0,
-                                      true};
+            const VcmdStatsFill vfill{craft_cmd.last_nonce(), nullptr, 0};
             std::vector<UplinkDataStreamStats> uplink_data_stats;
             uplink_data_stats.reserve(uplink_accepts.size());
             for (const UplinkAcceptor& ua : uplink_accepts) {
@@ -1260,7 +1237,7 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
             }
             emit_stats(emitter, l, session, t0, &tx, nullptr, &*air.value, 0,
                        csa.state_str(), 0, 0, wedge.wedged(), nullptr,
-                       &shm_stats, nullptr, nullptr, &last_snap, &timing,
+                       &shm_stats, nullptr, nullptr, &last_snap,
                        &vfill, cur_chan, nullptr,
                        uplink_accepts.empty() ? nullptr : &uplink_data_stats,
                        &csa.refusals());

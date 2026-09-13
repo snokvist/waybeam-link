@@ -99,17 +99,11 @@ struct StreamStats {
     // §3.7: these two must never be conflated.
     uint32_t loss_prediversity_milli = 0;
     uint32_t loss_postdiv_prearq_milli = 0;
-    uint64_t recovered_arq = 0;
     uint64_t recovered_fec = 0;
-    // Successfully delivered frame attribution. Unlike recovered_arq (packet
-    // sequence gaps) and recovered_fec (frames), the *_symbols fields share a
-    // symbol unit and distinguish retransmitted source from repair rows.
+    // Successfully delivered frame attribution: absent source rows
+    // reconstructed by successful FEC decodes, on the FEC-decode path only.
     uint64_t fec_recovered_source_symbols = 0;
-    uint64_t arq_recovered_source_symbols = 0;
-    uint64_t arq_recovered_repair_symbols = 0;
-    uint64_t frames_with_arq = 0;
     uint64_t frames_fec_only = 0;
-    uint64_t frames_fec_after_arq = 0;
     uint64_t frame_count = 0;
     uint64_t frame_bytes = 0;
     uint32_t frame_size_last = 0;
@@ -150,12 +144,8 @@ struct StreamStats {
     uint16_t jscc_input_cap_symbols = 0;
     uint32_t jscc_input_deadline_us = 0;
     uint32_t jscc_input_source_tx_us = 0;
-    uint32_t jscc_input_rtt_p95_us = 0;
-    uint32_t jscc_input_resend_us = 0;
-    uint32_t jscc_input_guard_us = 0;
     uint16_t jscc_output_parity_symbols = 0;
     uint32_t jscc_output_remaining_us = 0;
-    bool jscc_output_arq_eligible = false;
     bool jscc_output_discard = false;
     uint32_t jscc_feedback_epoch = 0;
     uint32_t jscc_feedback_age_ms = 0;
@@ -181,17 +171,15 @@ struct StreamStats {
     uint64_t shm_ring_full = 0;
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
-    uint64_t nacks_sent = 0;
     // §3.4 best-effort fallback. Emitted because the downgrade was otherwise
-    // INVISIBLE: a peer whose table_version differs silently loses ARQ
-    // eligibility, §6.2-2 supersession and deadline drops on this stream, and
-    // the three counters that would hint at it (nacks_sent, dropped_*) simply
-    // read 0 — indistinguishable from a healthy link with nothing to recover.
-    // best_effort is STICKY: nothing clears it but stream teardown, so
-    // re-aligning the two tables does not heal a stream that already latched
-    // under the mismatch — it must re-latch. table_mismatch counts PACKETS,
-    // not transitions, so it doubles as the rate at which the peer is still
-    // disagreeing.
+    // INVISIBLE: a peer whose table_version differs silently loses §6.2-2
+    // supersession and deadline drops on this stream, and the counters that
+    // would hint at it (dropped_*) simply read 0 — indistinguishable from a
+    // healthy link with nothing to drop. best_effort is STICKY: nothing clears
+    // it but stream teardown, so re-aligning the two tables does not heal a
+    // stream that already latched under the mismatch — it must re-latch.
+    // table_mismatch counts PACKETS, not transitions, so it doubles as the
+    // rate at which the peer is still disagreeing.
     bool best_effort = false;
     uint64_t table_mismatch = 0;
     // §15.3 (Pass 198) LIVE loss, over a short trailing window rather than the
@@ -216,28 +204,11 @@ struct StreamStats {
     // the norm. This is the loss on the ear currently hearing best: what the
     // air is actually doing on the path carrying the link.
     uint32_t loss_best_ear_window_milli = 0;
-    // §17 gate-3 estimator: cumulative NACK→RETRANSMIT latency histograms,
-    // ms upper bounds 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK
-    // anchor (pure round-trip); arq_rec = first-NACK anchor (recovery vs
-    // the I-frame deadline).
-    std::array<uint64_t, 8> nack_rtt_hist{};
-    uint64_t nack_rtt_max_ms = 0;
-    uint16_t nack_rtt_samples = 0;
-    uint32_t nack_rtt_p95_us = 0;
-    std::array<uint64_t, 8> arq_rec_hist{};
-    uint64_t arq_rec_max_ms = 0;
-    uint64_t resends_sent = 0;
-    // §12 Pass 116: current ARQ lock holder (0 = parked). Was tracked in
-    // SchedulerCounters but never emitted — an invisible arbitration state.
-    uint16_t arq_lock_holder = 0;
-    uint64_t double_send_suppressed = 0;
     uint64_t source_symbols_sent = 0;
     uint64_t repair_symbols_sent = 0;
     uint64_t fec_oversize_frames = 0;
     uint64_t mtu_fec_guard_frames = 0;
     uint64_t idr_frames = 0;
-    uint64_t arq_frames = 0;
-    uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 cadence suppression
     uint64_t fec_enhance_frames = 0;  // §14.1a observed droppable density
     uint64_t decode_errors = 0;
     uint8_t active_profile = 0;
@@ -270,17 +241,6 @@ struct TimingMetricStats {
     uint64_t samples = 0;
     uint32_t p95_us = 0;
     uint32_t max_us = 0;
-};
-
-// Host-local phase timing. Cross-host values are deliberately composed only
-// when the same host observes both endpoints (ground sees NACK TX + resend RX;
-// vehicle sees NACK RX + resend submission), so no clock sync is implied.
-struct ArqTimingStats {
-    TimingMetricStats eob_to_nack_build;
-    TimingMetricStats nack_build_to_inject;
-    TimingMetricStats nack_inject_to_retransmit;
-    TimingMetricStats nack_build_to_retransmit;
-    TimingMetricStats nack_receive_to_resend;
 };
 
 struct LinkStats {
@@ -382,7 +342,6 @@ struct LinkStats {
     uint32_t venc_p_frame_target_bytes = 0;
     std::string venc_fps_ladder_state = "DISABLED";
     // §11.7 command surface — role-neutral defaults on every node (§15.3).
-    bool cmd_arq = true;               // craft: applied ARQ command state
     bool cmd_selector_frozen = false;  // craft: applied SELECTOR command
     bool cmd_fps_ladder = false;       // craft: ladder running (unconfigured = false)
     uint32_t cmd_last_nonce = 0;       // craft: last consumed nonce (0 = never)
@@ -393,7 +352,6 @@ struct LinkStats {
     uint8_t cmd_framing_select = 0;     // staged
     std::string vcmd_state = "idle";   // issuer: §15.5 GET campaign state
     uint32_t vcmd_nonce = 0;           // issuer: last campaign nonce
-    bool arq_rx_enabled = true;        // rx: §6.4 NACK-emission gate
     // §9.3a Pass 122 complete-DATA-packet budgets (bytes).
     std::string mtu_mode = "default";  // ground preference; "remote" on craft
     uint16_t mtu_requested = kDefaultMaxPayload;
@@ -433,8 +391,6 @@ struct CacheRepairStatsOut {
     uint64_t blocks_repaired = 0;
     uint64_t blocks_futile = 0;
     uint64_t requests_suppressed = 0;
-    uint64_t nack_graces_armed = 0;
-    uint64_t blocks_repaired_before_nack = 0;
     uint32_t caches_fresh = 0;  // gauge
     TimingMetricStats request_to_first_reply;
     TimingMetricStats request_to_completion;
@@ -479,7 +435,6 @@ struct StatsSnapshot {
     std::optional<CacheRepairStatsOut> cache_repair;
     std::optional<CacheStoreStatsOut> cache_store;
     ReturnStats ret;
-    ArqTimingStats arq_timing;
     LinkStats link;
 };
 

@@ -36,28 +36,16 @@ uint16_t FrameFramer::class_rate(FrameFecClass cls) const {
     return cfg_.fec.p_rate_permille;
 }
 
-uint16_t FrameFramer::repair_count(uint16_t k, FrameFecClass cls,
-                                   bool arq_eligible) {
-    // §14.1 adaptive policy.
+uint16_t FrameFramer::repair_count(uint16_t k, FrameFecClass cls) {
+    // §14.1 adaptive policy. Pass 205 (O1): the min_k ARQ-only gate is gone —
+    // every referenced frame gets max(ceil(k·rate), min_r), so small frames
+    // are no longer shipped bare on the strength of a removed ARQ.
     if (cfg_.fec.scheme != FecScheme::kRlc256) {
         return 0;
     }
-    // §14.1 (Pass 94): the min_k gate is an OPTIMISATION — don't spend parity
-    // where ARQ will recover the frame anyway — so it holds only where that
-    // ARQ exists. Under arq_mode idr-only a P-frame has none, and an
-    // unconditional gate handed it neither FEC nor ARQ. That was B11: at the
-    // §9.8 floor rung, derived_bitrate/fps lands frames under min_k*s and they
-    // shipped bare. Above the §4.1 cadence cutoff nothing is eligible and the
-    // gate is inert for every class.
-    if (k <= cfg_.fec.min_k && arq_eligible) {
-        return 0;  // ARQ-only at small k
-    }
-    // §14.1a: the gate above is inert for kEnhance (never ARQ-eligible), so a
-    // small non-referenced frame falls through to its own rate here. With
-    // e_rate=0 it ships bare — intended, and tested rather than discovered.
     const uint32_t rate = class_rate(cls);
     if (rate == 0) {
-        return 0;
+        return 0;  // e_rate=0 / fec off: deliberately bare
     }
     uint32_t r = (static_cast<uint32_t>(k) * rate + 999u) / 1000u;  // ceil
     // §14.1 (Pass 98) minimum repair floor: never fewer than min_r symbols on
@@ -82,9 +70,7 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     // §14.2 enforcement (Pass 38): the override is one-shot — consumed (and
     // cleared) by this frame regardless of outcome.
     const std::optional<uint16_t> ov_parity = override_parity_;
-    const bool ov_allow_parq = override_allow_parq_;
     override_parity_.reset();
-    override_allow_parq_ = true;
     if (blob == nullptr || len < kVencFrameMetaSize) {
         ++stats_.malformed_frame;  // no VencFrameMeta prefix — drop, never send
         return false;
@@ -120,39 +106,15 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
 
     const uint32_t block_id = block_id_++;
     const uint32_t base_seq = next_seq_;
-    // §4.1 Pass 40: above the cadence cutoff nothing is ARQ-class; §14.2
-    // rule 3: a valid enforced decision may additionally clear PFRAME_ARQ
-    // for this frame. The IDR ARQ bit is only ever removed by the cutoff.
-    // §14.1a: a non-referenced frame is NEVER ARQ-eligible, under any
-    // arq_mode. Structural, not tuning: a referenced frame's late retransmit
-    // still repairs the DPB and truncates the cascade, but nothing predicts
-    // from this one, so a repair past its display deadline is worth exactly
-    // zero. Excluded from arq_class too, else arq_cutoff_frames counts frames
-    // that had no ARQ to cut.
-    const bool arq_class =
-        is_idr || (cfg_.arq_mode == FrameArqMode::kAllFrames && !is_enhance);
-    const bool idr_arq = is_idr && !arq_suppressed_ && arq_enabled_;
-    const bool pframe_arq = !is_idr && !is_enhance &&
-                            cfg_.arq_mode == FrameArqMode::kAllFrames &&
-                            ov_allow_parq && !arq_suppressed_ && arq_enabled_;
-    const uint8_t base_flags = static_cast<uint8_t>(
-        (idr_arq ? data_flags::kArq
-                 : (pframe_arq ? data_flags::kPframeArq : 0)) |
-        extra_flags_);
+    // §3.2 (Pass 205): no ARQ flag is ever stamped; extra_flags_ carries only
+    // §11.6 CSA_ARMED.
+    const uint8_t base_flags = extra_flags_;
 
-    uint16_t r = repair_count(k, cls, idr_arq || pframe_arq);
+    uint16_t r = repair_count(k, cls);
     // §14.2 rule 1: a valid enforced decision replaces the fixed rate, still
-    // GF(256)-clamped and still subject to the min_k ARQ-only rule.
-    // §14.2 rule 1 keeps the override "subject to the §14.1 min_k ARQ-only
-    // rule", so it inherits Pass 94's condition: the gate blocks the override
-    // only where ARQ could have carried the frame instead.
-    // §14.2 (Pass 149): kEnhance is exempt from enforcement ENTIRELY. Without
-    // this, making the class ARQ-ineligible above flips the `!(idr_arq ||
-    // pframe_arq)` term permanently true, so the override would repaint parity
-    // onto exactly the frames e_rate exists to leave bare — at every k, where
-    // it is blocked below min_k for every other class.
-    if (ov_parity && !is_enhance && cfg_.fec.scheme == FecScheme::kRlc256 &&
-        (k > cfg_.fec.min_k || !(idr_arq || pframe_arq))) {
+    // GF(256)-clamped. §14.2 (Pass 149): kEnhance is exempt from enforcement
+    // ENTIRELY — e_rate exists to leave those frames alone.
+    if (ov_parity && !is_enhance && cfg_.fec.scheme == FecScheme::kRlc256) {
         const uint32_t cap =
             k < kFecMaxSymbols ? kFecMaxSymbols - k : 0;
         r = static_cast<uint16_t>(std::min<uint32_t>(*ov_parity, cap));
@@ -162,16 +124,13 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     // §14.2 override so the robustness floor cannot be silently bypassed.
     if (jumbo_fec_guard) {
         const uint32_t rate = class_rate(cls);
-        const bool arq_only =
-            k <= cfg_.fec.min_k && (idr_arq || pframe_arq);
         const uint32_t cap = kFecMaxSymbols - k;
         const uint16_t guard_r = static_cast<uint16_t>(std::max<uint32_t>(
             cfg_.fec.min_r,
             (mtu_tier::kFecProtectionK * rate + 999u) / 1000u));
-        // The guard is subordinate to §14.1's ARQ-only min_k gate and its
-        // absolute GF(256) capacity check. In particular, do not resurrect a
-        // block which repair_count() rejected because min_r was impossible.
-        if (rate != 0 && !arq_only && guard_r <= cap && r < guard_r) {
+        // The guard is subordinate to §14.1's absolute GF(256) capacity check:
+        // do not resurrect a block repair_count() rejected as impossible.
+        if (rate != 0 && guard_r <= cap && r < guard_r) {
             r = guard_r;
             ++stats_.mtu_fec_guard_frames;
         }
@@ -183,12 +142,6 @@ bool FrameFramer::on_frame(const uint8_t* blob, size_t len, uint64_t now_ms,
     }
     if (is_enhance) {
         ++stats_.fec_enhance_frames;  // §14.1a observed droppable density
-    }
-    if (idr_arq || pframe_arq) {
-        ++stats_.arq_frames;
-    }
-    if (arq_suppressed_ && arq_class) {
-        ++stats_.arq_cutoff_frames;
     }
 
     // --- source symbols: k DATA packets, tail unpadded (§5.1a). EOB closes

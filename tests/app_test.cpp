@@ -856,7 +856,7 @@ void test_uplink_json_matches_effective() {
 // cross-checks. A name that encodes but does not decode is a command the
 // §15.5 endpoint accepts and the stats surface then cannot label.
 void test_vcmd_name_id_roundtrip() {
-    for (const char* n : {"arq", "selector", "fps_ladder", "fps_select",
+    for (const char* n : {"selector", "fps_ladder", "fps_select",
                           "resolution", "framing", "mode", "calibrate",
                           "mtu_tier", "tx_power"}) {
         const uint8_t id = vcmd_id_for(n);

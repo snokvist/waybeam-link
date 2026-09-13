@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Deterministic-PRNG property test: random field populations for every packet
 // type must encode -> decode back to identical fields, including min/max
-// boundary values, payload_len 0/1424 and bitmap_len 0/255.
+// boundary values and payload_len 0/1424. Pass 205 retired NACK; type 0x2 is
+// checked as the reserved decode-only swallow instead.
 #include <cstring>
 #include <variant>
 
@@ -42,7 +43,6 @@ int main() {
     Rng rng;
     uint8_t buf[kDataHeaderSize + kMaxDataPayload];
     uint8_t payload[kMaxDataPayload];
-    uint8_t bitmap[255];
 
     for (int i = 0; i < kIters; ++i) {
         // DATA — payload length sweeps boundaries then randoms.
@@ -80,34 +80,20 @@ int main() {
     }
 
     for (int i = 0; i < kIters; ++i) {
-        // NACK — bitmap length sweeps boundaries then randoms.
-        NackHeader h;
-        h.prefix = random_prefix(rng);
-        h.target_originator = rng.u16();
-        h.target_session = rng.u32();
-        h.target_stream_id = rng.u8();
-        h.base_seq = rng.u32();
-        uint8_t blen;
-        if (i == 0) {
-            blen = 0;
-        } else if (i == 1) {
-            blen = 255;
-        } else {
-            blen = static_cast<uint8_t>(rng.range(0, 255));
-        }
-        for (uint8_t j = 0; j < blen; ++j) {
-            bitmap[j] = rng.u8();
-        }
-        const size_t n =
-            encode_nack(h, blen ? bitmap : nullptr, blen, buf, sizeof(buf));
-        CHECK_EQ_U(n, kNackFixedSize + blen);
-        const Decoded d = decode(buf, n);
-        const NackView* v = std::get_if<NackView>(&d);
+        // §3.1/§3.3 (Pass 205): type 0x2 is reserved. Any body decodes to an
+        // ignorable ReservedNack carrying the common prefix — never a fault.
+        Heartbeat hb;
+        hb.prefix = random_prefix(rng);
+        const size_t n = encode_heartbeat(hb, buf, sizeof(buf));
+        CHECK_EQ_U(n, kHeartbeatSize);
+        for (size_t j = 0; j < 12; ++j) buf[n + j] = rng.u8();
+        const size_t len = n + 12;
+        buf[2] = static_cast<uint8_t>((kProtocolVersion << 4) | 0x2);
+        const Decoded d = decode(buf, len);
+        const ReservedNack* v = std::get_if<ReservedNack>(&d);
         CHECK(v != nullptr);
         if (v != nullptr) {
-            CHECK(v->hdr == h);
-            CHECK_EQ_U(v->bitmap_len, blen);
-            CHECK(blen == 0 || std::memcmp(v->bitmap, bitmap, blen) == 0);
+            CHECK(v->prefix == hb.prefix);
         }
     }
 

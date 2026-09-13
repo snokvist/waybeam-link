@@ -11,19 +11,7 @@
 //    (§6.2-2); EOB is an accelerator (return-window anchor, §7.2), not
 //    load-bearing for boundaries. Unparseable payloads on an RTP stream fall
 //    back to one-datagram-one-block.
-//  - Non-RTP streams: one datagram = one block, EOB set, ARQ=0.
-//
-// ARQ classifier (§4.1), selected per stream by FramerConfig::classifier:
-//
-//  - kH264 / kH265: the NAL-type classifier (nal.h) — IDR/parameter-set NALs
-//    mark the block important, stamped from the FIRST packet of the block
-//    (FU fragments carry the type in every fragment). Importance is sticky
-//    for the rest of the block (a STAP(SPS,PPS) opener flags the whole AU).
-//  - kSize (fallback): once a block's cumulative payload crosses
-//    classifier_size_threshold, this and subsequent packets are stamped
-//    ARQ=1. Earlier packets of the same block stay unstamped — acceptable
-//    because any surviving flagged packet reveals the block's eligibility
-//    (§3.2 redundant-metadata rule).
+//  - Non-RTP streams: one datagram = one block, EOB set.
 //
 // Pure tick-free logic: time is injected, emission is a callback. No sockets,
 // no clocks, no allocation on the datagram path (encode into a caller-scoped
@@ -34,7 +22,6 @@
 #include <cstdint>
 #include <functional>
 
-#include "wblink/nal.h"
 #include "wblink/types.h"
 #include "wblink/wire.h"
 
@@ -46,10 +33,6 @@ struct FramerConfig {
     uint8_t stream_id = 0;
     uint8_t stream_type = stream_type::kUnknown;
     uint16_t destination = 0;  // §3.1 advisory; 0 = broadcast
-    // §4.1 classifier for RTP streams; ignored for other profiles.
-    RtpClassifier classifier = RtpClassifier::kSize;
-    // kSize mode: cumulative block bytes above this => important.
-    uint32_t classifier_size_threshold = 8 * 1024;
 };
 
 struct FramerStats {
@@ -79,10 +62,6 @@ class Framer {
     // §11.6 CSA_ARMED (the craft's implicit, diversity-carried campaign ACK).
     void set_extra_flags(uint8_t f) { extra_flags_ = f; }
 
-    // §11.7 ARQ command: off ⇒ stamp no ARQ flag (receivers then never NACK,
-    // §6.4); on restores the boot-configured classifier behaviour.
-    void set_arq_enabled(bool on) { arq_enabled_ = on; }
-
     // Returns false iff the datagram was dropped (oversize).
     bool on_datagram(const uint8_t* data, size_t len, uint64_t now_ms,
                      const Emit& emit);
@@ -100,13 +79,10 @@ class Framer {
     uint8_t active_profile_ = 0;
     uint8_t table_version_ = 0;
     uint8_t extra_flags_ = 0;
-    bool arq_enabled_ = true;  // §11.7 ARQ command
 
     uint32_t next_seq_ = 0;
     uint32_t block_id_ = 0;
     bool block_open_ = false;   // first datagram starts block 0
-    uint32_t block_bytes_ = 0;
-    bool block_arq_ = false;
 
     // RTP boundary state.
     bool have_rtp_ts_ = false;

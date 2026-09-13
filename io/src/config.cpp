@@ -569,42 +569,6 @@ Result<Config> load_config_json(const std::string& json_text) {
             if (s.contains("originator")) {
                 sc.originator = s.at("originator").get<uint16_t>();
             }
-            if (s.contains("classifier")) {
-                if (sc.stream_type != stream_type::kRtp) {
-                    return Result<Config>::fail(
-                        "stream " + std::to_string(sid) +
-                        ": classifier is RTP-profile-only (§4.1)");
-                }
-                const std::string c = s.at("classifier").get<std::string>();
-                if (c == "size") {
-                    sc.classifier = RtpClassifier::kSize;
-                } else if (c == "h264") {
-                    sc.classifier = RtpClassifier::kH264;
-                } else if (c == "h265") {
-                    sc.classifier = RtpClassifier::kH265;
-                } else {
-                    return Result<Config>::fail(
-                        "stream " + std::to_string(sid) +
-                        ": classifier must be \"size\", \"h264\" or \"h265\"");
-                }
-            }
-            if (s.contains("arq_mode")) {
-                if (sc.bind.kind != BindKind::kFrameShm || sc.dir != Dir::kIn) {
-                    return Result<Config>::fail(
-                        "stream " + std::to_string(sid) +
-                        ": arq_mode is only valid on frame-shm ingress");
-                }
-                const std::string mode = s.at("arq_mode").get<std::string>();
-                if (mode == "idr-only") {
-                    sc.arq_mode = FrameArqMode::kIdrOnly;
-                } else if (mode == "all-frames") {
-                    sc.arq_mode = FrameArqMode::kAllFrames;
-                } else {
-                    return Result<Config>::fail(
-                        "stream " + std::to_string(sid) +
-                        ": arq_mode must be \"idr-only\" or \"all-frames\"");
-                }
-            }
             // §14.1 per-stream FEC (frame-shm only).
             if (s.contains("fec")) {
                 const json& f = s.at("fec");
@@ -614,7 +578,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                 sc.fec.scheme = *scheme.value;
                 sc.fec.i_rate_permille = f.value("i_rate_permille", uint16_t{250});
                 sc.fec.p_rate_permille = f.value("p_rate_permille", uint16_t{100});
-                sc.fec.min_k = f.value("min_k", uint16_t{3});
                 sc.fec.min_r = f.value("min_r", uint16_t{2});
                 // §14.1a: optional third class. Absent (or explicit null) =>
                 // inherit p_rate_permille, byte-identical to a pre-Pass-149
@@ -670,10 +633,8 @@ Result<Config> load_config_json(const std::string& json_text) {
                 JsccShadowCfg jc;
                 jc.fec_floor_permille = js.at("fec_floor_permille").get<uint16_t>();
                 jc.fec_cap_permille = js.at("fec_cap_permille").get<uint16_t>();
-                jc.arq_guard_us = js.at("arq_guard_us").get<uint32_t>();
                 jc.feedback_timeout_ms =
                     js.at("feedback_timeout_ms").get<uint32_t>();
-                jc.min_rtt_samples = js.at("min_rtt_samples").get<uint16_t>();
                 jc.enforce = js.value("enforce", jc.enforce);
                 if (jc.fec_floor_permille > jc.fec_cap_permille ||
                     jc.fec_cap_permille > 4000) {
@@ -681,10 +642,10 @@ Result<Config> load_config_json(const std::string& json_text) {
                         "stream " + std::to_string(sid) +
                         ": jscc_shadow FEC rates require floor <= cap <= 4000");
                 }
-                if (jc.feedback_timeout_ms == 0 || jc.min_rtt_samples == 0) {
+                if (jc.feedback_timeout_ms == 0) {
                     return Result<Config>::fail(
                         "stream " + std::to_string(sid) +
-                        ": jscc_shadow timeout and min_rtt_samples must be positive");
+                        ": jscc_shadow feedback_timeout_ms must be positive");
                 }
                 if (jc.enforce && sc.fec.scheme != FecScheme::kRlc256) {
                     return Result<Config>::fail(
@@ -844,33 +805,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                     }
                 }
             }
-            if (p.contains("arq")) {
-                const json& pa = p.at("arq");
-                ArqPolicy& arq = cfg.policy.arq;
-                arq.airtime_frac = pa.value("airtime_frac", arq.airtime_frac);
-                arq.attempt_cap = pa.value("attempt_cap", arq.attempt_cap);
-                arq.holddown_ms = pa.value("holddown_ms", arq.holddown_ms);
-                arq.fwd_clamp_blocks =
-                    pa.value("fwd_clamp_blocks", arq.fwd_clamp_blocks);
-                arq.ring_window_ms =
-                    pa.value("ring_window_ms", arq.ring_window_ms);
-                arq.ring_byte_budget =
-                    pa.value("ring_byte_budget", arq.ring_byte_budget);
-                arq.classifier_size_threshold =
-                    pa.value("classifier_size_threshold",
-                             arq.classifier_size_threshold);
-                arq.release_timeout_ms =
-                    pa.value("release_timeout_ms", arq.release_timeout_ms);
-                arq.min_recoverable_ms =
-                    pa.value("min_recoverable_ms", arq.min_recoverable_ms);
-                arq.budget_interval_ms =
-                    pa.value("budget_interval_ms", arq.budget_interval_ms);
-                arq.budget_floor_bytes =
-                    pa.value("budget_floor_bytes", arq.budget_floor_bytes);
-                arq.max_block_pkts =
-                    pa.value("max_block_pkts", arq.max_block_pkts);
-                arq.arq_max_fps = pa.value("arq_max_fps", arq.arq_max_fps);
-            }
             if (p.contains("rx")) {
                 const json& pr = p.at("rx");
                 RxCfgPolicy& rx = cfg.policy.rx;
@@ -881,14 +815,14 @@ Result<Config> load_config_json(const std::string& json_text) {
                 rx.admit_n = pr.value("admit_n", rx.admit_n);
                 rx.admit_window_ms =
                     pr.value("admit_window_ms", rx.admit_window_ms);
-                rx.renack_attempts =
-                    pr.value("renack_attempts", rx.renack_attempts);
-                rx.renack_backoff_ms =
-                    pr.value("renack_backoff_ms", rx.renack_backoff_ms);
                 rx.idle_teardown_ms =
                     pr.value("idle_teardown_ms", rx.idle_teardown_ms);
                 rx.fwd_clamp_pkts =
                     pr.value("fwd_clamp_pkts", rx.fwd_clamp_pkts);
+                // §15.2 (Pass 205): relocated from policy.arq — the §6.6
+                // block clamp is not ARQ.
+                rx.fwd_clamp_blocks =
+                    pr.value("fwd_clamp_blocks", rx.fwd_clamp_blocks);
                 rx.clamp_resync_ms =
                     pr.value("clamp_resync_ms", rx.clamp_resync_ms);
             }
@@ -1174,8 +1108,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                 cr.hard_close_ms = r.value("hard_close_ms", cr.hard_close_ms);
                 cr.request_timeout_ms =
                     r.value("request_timeout_ms", cr.request_timeout_ms);
-                cr.nack_grace_ms =
-                    r.value("nack_grace_ms", cr.nack_grace_ms);
                 cr.repair_fraction_permille = r.value(
                     "repair_fraction_permille", cr.repair_fraction_permille);
                 cr.absolute_symbol_limit = r.value("absolute_symbol_limit",
@@ -1209,10 +1141,6 @@ Result<Config> load_config_json(const std::string& json_text) {
                     if (cr.repair_fraction_permille > 1000) {
                         return Result<Config>::fail(
                             "cache.repair: repair_fraction_permille is 0..1000");
-                    }
-                    if (cr.nack_grace_ms > 6) {
-                        return Result<Config>::fail(
-                            "cache.repair: nack_grace_ms is 0..6");
                     }
                     if (cr.assignment_interval_ms == 0) {
                         return Result<Config>::fail(
@@ -1834,12 +1762,6 @@ std::string dump_config_summary(const Config& cfg) {
         ss << "  id=" << unsigned(s.stream_id) << " type=" << unsigned(s.stream_type)
            << " " << (s.dir == Dir::kIn ? "in  <- " + s.bind.listen
                                         : "out -> " + s.bind.send);
-        if (s.stream_type == stream_type::kRtp && s.dir == Dir::kIn) {
-            ss << " classifier="
-               << (s.classifier == RtpClassifier::kH264   ? "h264"
-                   : s.classifier == RtpClassifier::kH265 ? "h265"
-                                                          : "size");
-        }
         // §15.2 streams[].originator. Printed because it is otherwise
         // invisible: it is a legitimate key so --check --strict says nothing,
         // and a stale pin makes every OTHER craft unlatchable at boot with no
@@ -1856,7 +1778,7 @@ std::string dump_config_summary(const Config& cfg) {
     }
     ss << "policy: report_hz=" << cfg.policy.report_hz
        << " demote_milli=" << cfg.policy.select.demote_milli
-       << " fwd_clamp_blocks=" << cfg.policy.arq.fwd_clamp_blocks
+       << " fwd_clamp_blocks=" << cfg.policy.rx.fwd_clamp_blocks
        << " csa_psk=" << (cfg.policy.csa.psk.empty() ? "(unset)" : "(set, redacted)")
        << "\n";
     ss << "stats: hz=" << cfg.stats.hz

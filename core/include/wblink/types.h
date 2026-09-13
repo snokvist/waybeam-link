@@ -15,7 +15,9 @@ inline constexpr uint8_t kProtocolVersion = 0x0;
 // §3.1 packet types (ver_type low nibble).
 enum class PacketType : uint8_t {
     kData = 0x1,
-    kNack = 0x2,
+    // §3.1 (Pass 205): the retired NACK type. Reserved and MUST NOT be
+    // renumbered; decodes to an ignorable, non-fault value (ReservedNack).
+    kReservedNack = 0x2,
     kLinkReport = 0x3,
     kHeartbeat = 0x4,
     kCsa = 0x5,
@@ -45,11 +47,13 @@ inline constexpr uint8_t kAudio = 0x04;  // §3.4 Opus/RTP audio; best-effort, n
 // §3.2 data_flags bits.
 namespace data_flags {
 inline constexpr uint8_t kEndOfBlock = 0x01;
-inline constexpr uint8_t kArq = 0x02;
+// bit 1 was ARQ — retired Pass 205; reserved, MUST be sent 0 and ignored.
+// bit 2 was RETRANSMIT — retired Pass 205. Kept as a decode-only swallow so
+// the §3.7 note_adapter_seq exclusion survives mixed-version peers (O8).
 inline constexpr uint8_t kRetransmit = 0x04;
 inline constexpr uint8_t kFecRepair = 0x08;
 inline constexpr uint8_t kCsaArmed = 0x10;
-inline constexpr uint8_t kPframeArq = 0x20;
+// bit 5 was PFRAME_ARQ — retired Pass 205; reserved, MUST be sent 0.
 }  // namespace data_flags
 
 // §3.12 ANNOUNCE flags. Unknown bits are a decode error (like cache flags).
@@ -69,9 +73,9 @@ inline constexpr uint8_t kRejected = 0x02;  // echo only: understood, won't do
 inline constexpr uint8_t kKnownMask = kAck | kRejected;
 }  // namespace vcmd_flags
 
-// §11.7 command registry. 0x0B–0x1F reserved.
+// §11.7 command registry. 0x01 was ARQ — retired Pass 205 and kept reserved
+// (MUST NOT be renumbered). 0x0B–0x1F reserved.
 namespace vcmd_id {
-inline constexpr uint8_t kArq = 0x01;        // arg 0=off 1=on
 inline constexpr uint8_t kSelector = 0x02;   // arg 0=run 1=freeze (§9.7 pin)
 inline constexpr uint8_t kFpsLadder = 0x03;  // arg 0=off 1=on (§9.11)
 inline constexpr uint8_t kFpsSelect = 0x04;   // arg = preset index (Pass 71)
@@ -98,12 +102,9 @@ inline constexpr bool vcmd_arg_in_wire_range(uint8_t cmd_id, uint8_t cmd_arg) {
     return cmd_id == vcmd_id::kMode || cmd_arg <= kVcmdMaxArg;
 }
 
-enum class FrameArqMode : uint8_t { kIdrOnly, kAllFrames };
-
 // Exact wire sizes (§3.1–3.8, §11.1).
 inline constexpr size_t kCommonPrefixSize = 11;
 inline constexpr size_t kDataHeaderSize = 26;
-inline constexpr size_t kNackFixedSize = 23;
 inline constexpr size_t kLinkReportSize = 39;
 inline constexpr size_t kHeartbeatSize = 11;
 inline constexpr size_t kCsaSize = 32;
