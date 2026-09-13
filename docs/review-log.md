@@ -24,6 +24,45 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 205 — the NACK/retransmit plane is DELETED; repair is FEC + cache + concealment (2026-09-13)
+
+**Verdict.** Remove ARQ entirely — NACK generation, resend ring, scheduler, §12
+repair arbitration, the `ARQ`/`RETRANSMIT`/`PFRAME_ARQ` flags, the `ARQ` cmd,
+the `arq_mode`/`policy.arq`/`renack_*`/`nack_grace`/`jscc arq_guard`/`fec.min_k`
+config, and every ARQ stat. Repair is FEC (§14.1), cache (§14.3),
+RECOVERY_REQUEST (§3.9), diversity (§6), concealment (§6.3b).
+
+**Why.** GDR/intra-refresh video has no DPB value for a late retransmit.
+Measured 2026-09-13, 100 fps GDR craft at 120 ‰ loss: ARQ gave **115 frames vs
+FEC's 3,687**, and 1,179 NACKs bought 174 gap fills (`recovered_arq` is gaps,
+not frames). The useful deadline is the ~10 ms frame period, not the authored
+25/80 ms; NACK RTT p95 is 7 ms, no headroom — and a receiver-only node cannot
+use ARQ at all.
+
+**Wire.** `0x2 NACK` reserved (not renumbered), decoded to an ignorable value
+and dropped. DATA bits 1/5 reserved (send 0, ignore); bit 2 a decode-only
+swallow so the §3.7 `note_adapter_seq` exclusion survives mixed peers. No DATA
+layout change, no `ver_type` bump. `loss_postdiv_prearq` keeps its name/value.
+
+**Table/config.** The two per-class deadline fields stay byte-identical in the
+§3.6 canonical form (`kCanonicalProfileSize` 27), so `table_version` does
+**not** rotate (Pass-82 posture); one budget, `min(iframe, pframe)`, now governs
+a block. `arq_reserve_frac` is freed to the §14.1 re-tune.
+
+**Behaviour to bench.** (1) The `k ≤ min_k` ARQ-only gate goes: every referenced
+frame gets `r = max(ceil(k·rate), min_r)` (`rate = 0` still 0), closing the
+Pass-94/B11 cliff. (2) §14.2 rule 3 and the JSCC RTT gate go; FEC comes from
+`repair_demand` + floor/cap + airtime. (3) A declared-lost gap is FEC-pending,
+not dropped immediately.
+
+**Spec sections:** §0–§2, §3.0–§3.7, §3.9/§3.10, §3.16, §4/§4.1, §5.1/§5.1a,
+§5.2–§5.3 (deleted), §6.1–§6.4 (retitled), §6.6, §7/§8, §9.0, §9.3/§9.3a,
+§9.4, §10.6, §11.6/§11.7, §12/§13, §14–§14.3, §15.1–§15.5, §16–§19.
+
+**Evidence:** `docs/findings.md` 2026-09-13; `specs/2026-09-13-arq-removal/plan.md`.
+Merge precondition: FEC-only vs ARQ-on at ~120 ‰/~300 ‰, healthy and weak
+uplink, matched airtime. Code follows in separate commits.
+
 ## Pass 204 — §11.2's dt is ONE generous value, and T_switch is the ack deadline (2026-09-13)
 
 **Verdict.** The class-0 / class-1 `dt_to_switch_ms` split (300 / 500 ms) is
