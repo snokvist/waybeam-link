@@ -2303,16 +2303,26 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                 if (vissuer.active()) {
                     return err(409, "vehicle command campaign active");
                 }
+                // Aborting a bi-directional calibration sends a §11.7
+                // CALIBRATE=0 over air, i.e. it STARTS a vehicle-command
+                // campaign — which a move must then not retune out from under.
+                // Refuse while the sequence engine owns the radio; a plain
+                // uplink calibration has no downlink phase and is cancelled
+                // below.
+                if (calib_seq.active()) {
+                    return err(409, "calibration campaign active");
+                }
                 const uint16_t chan = static_cast<uint16_t>(mhz);
                 cancel_calibration("move");
-                if (scout.scanning()) {
-                    scout.abandon(now_ms());
-                }
-                // Retune first: it is the only fallible step, and a 400 must
-                // not leave the engine un-pinned while the RF is still on the
-                // old channel (tx /move orders it the same way).
+                // The retune is the only fallible step, so it runs before any
+                // detach: a 400 must not leave the engine un-pinned, or a scout
+                // sweep stranded on its last dwell with the filter still widened
+                // (tx /move orders it the same way).
                 if (!air.value->retune_all(chan, op_bw_mhz, false)) {
                     return err(400, "retune failed");
+                }
+                if (scout.scanning()) {
+                    scout.abandon(now_ms());
                 }
                 air.value->set_stamp_net_id(l.cfg.node.net_id.value_or(0));
                 air.value->set_filter_net_id(l.cfg.node.net_id);
@@ -3286,6 +3296,13 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                         apply_selection(*previous_selection);
                         operating_chan = previous_selection->chan;
                         selection_state = previous_selection_state;
+                        // §15.5 Pass 206: a spectating prior state is un-pinned
+                        // by definition, but apply_selection just re-pinned
+                        // every want. Re-drop the pin, or teardown of the
+                        // adopted craft can never re-resolve.
+                        if (previous_selection_state == "spectating") {
+                            rx.unpin_originator();
+                        }
                         scout.set_rest_chan(active_selection.chan);
                         scout.set_rest_filter(active_selection.net_id);
                     }
@@ -3399,6 +3416,11 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     apply_selection(*previous_selection);
                     operating_chan = previous_selection->chan;
                     selection_state = previous_selection_state;
+                    // §15.5 Pass 206: re-drop the pin for a spectating prior
+                    // state (apply_selection re-pinned every want).
+                    if (previous_selection_state == "spectating") {
+                        rx.unpin_originator();
+                    }
                     scout.set_rest_chan(active_selection.chan);
                     scout.set_rest_filter(active_selection.net_id);
                 }
