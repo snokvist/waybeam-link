@@ -249,6 +249,18 @@ int main() {
         channel_state = mhz;
         return "";
     };
+    // §15.5 Pass 206: local detach-and-retune (any channel) on either role.
+    int move_state = 0;
+    bool move_conflict = false;
+    h.move = [&](int mhz) -> std::pair<int, std::string> {
+        if (move_conflict)
+            return {409,
+                    "{\"ok\":false,\"error\":\"CSA campaign active (issuer)\"}"};
+        if (mhz <= 0)
+            return {400, "{\"ok\":false,\"error\":\"mhz required\"}"};
+        move_state = mhz;
+        return {200, "{\"ok\":true}"};
+    };
     int psk_state = -1;
     h.psk_enable = [&](bool enabled) -> std::string {
         psk_state = enabled ? 1 : 0;
@@ -748,6 +760,33 @@ int main() {
         const std::string req =
             "POST /api/v1/channel HTTP/1.0\r\nContent-Length: 2\r\n\r\n{}";
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    // §15.5 Pass 206: /move is a local detach-and-retune to ANY valid channel
+    // (operator override; not channel_allowlist-restricted like /channel).
+    {  // off-allowlist channel → 200, handler sees it.
+        const std::string body = "{\"mhz\":2412}";
+        const std::string req =
+            "POST /api/v1/move HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 200);
+        CHECK(body_of(roundtrip(s, port, req)).find("\"ok\":true") !=
+              std::string::npos);
+        CHECK_EQ_U(move_state, 2412);
+    }
+    {  // missing mhz → 400.
+        const std::string req =
+            "POST /api/v1/move HTTP/1.0\r\nContent-Length: 2\r\n\r\n{}";
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
+    {  // an in-flight issuer campaign refuses the move with 409.
+        move_conflict = true;
+        const std::string body = "{\"mhz\":5805}";
+        const std::string req =
+            "POST /api/v1/move HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 409);
+        CHECK_EQ_U(move_state, 2412);  // unchanged
+        move_conflict = false;
     }
     // §11.4a Pass 113: runtime pairing gate.
     {  // open pairing → 200, handler sees false.

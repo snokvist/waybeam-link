@@ -674,4 +674,17 @@ std::optional<uint16_t> RxEngine::selected_originator() const {
     return selected;
 }
 
+void RxEngine::unpin_originator() {
+    // §15.5 Pass 206: clear the pin on every want and drop the current
+    // subscription unconditionally. Unlike select_originator, no "changed"
+    // guard — a move detaches even when the wants were already unpinned (the
+    // common ground that names no preferred_originator), so a live latch must
+    // still tear down for §2 admission to resolve afresh.
+    for (WantSpec& want : wants_) {
+        want.originator = std::nullopt;
+    }
+    streams_.clear();
+    discovery_.clear();
+}
+
 }  // namespace wblink

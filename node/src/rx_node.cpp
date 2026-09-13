@@ -345,6 +345,11 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
     // default until a claim commits, then the committed target. The scout returns
     // all ears here, and a failed claim rolls back here.
     uint16_t operating_chan = op_chan;
+    // §15.5 Pass 206: /api/v1/move leaves this node in the "spectating"
+    // selection_state — detached from any craft, tuning the channel blind,
+    // adopting the first craft to clear §2 admission (sticky) and re-resolving
+    // when that stream tears down. It lives in `selection_state` rather than a
+    // parallel flag so the CSA revert/abort paths restore it faithfully.
     // Tier 2: a persisted artifact, applied only when the local adapter, the
     // craft, and the band/bandwidth all match. A mismatch is surfaced as
     // stale and never applied — the hardware stays at the higher-precedence
@@ -2270,6 +2275,70 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                            "rejected (active campaign, PSK, allowlist, or "
                            "rate-limit)");
             };
+            // §15.5 Pass 206: the operator's manual detach-and-retune. Unlike
+            // /csa (which moves the CRAFT and lets the ground follow), this only
+            // moves THIS ground's radio, to any channel (operator override, not
+            // allowlist-restricted). It drops the §11.5a binding and any
+            // follower campaign, un-pins the engine's wants so the first craft
+            // to clear §2 admission is adopted, and reports "spectating".
+            h.move = [&](int mhz) -> std::pair<int, std::string> {
+                const auto err = [](int code, const char* msg) {
+                    return std::pair<int, std::string>{
+                        code, std::string("{\"ok\":false,\"error\":\"") + msg +
+                                  "\"}"};
+                };
+                if (mhz <= 0) {
+                    return err(400, "mhz required");
+                }
+                if (mhz > 0xFFFF) {
+                    return err(400, "mhz out of range");
+                }
+                // The rx node has no campaign-cancel API, so a move cannot
+                // preempt an issuer campaign in flight — refuse rather than
+                // retune out from under a campaign that is still re-keying the
+                // channel we already left.
+                if (issuer.active()) {
+                    return err(409, "CSA campaign active (issuer)");
+                }
+                if (vissuer.active()) {
+                    return err(409, "vehicle command campaign active");
+                }
+                const uint16_t chan = static_cast<uint16_t>(mhz);
+                cancel_calibration("move");
+                if (scout.scanning()) {
+                    scout.abandon(now_ms());
+                }
+                // Retune first: it is the only fallible step, and a 400 must
+                // not leave the engine un-pinned while the RF is still on the
+                // old channel (tx /move orders it the same way).
+                if (!air.value->retune_all(chan, op_bw_mhz, false)) {
+                    return err(400, "retune failed");
+                }
+                air.value->set_stamp_net_id(l.cfg.node.net_id.value_or(0));
+                air.value->set_filter_net_id(l.cfg.node.net_id);
+                follower.release_binding();
+                follower.clear_campaign();
+                rx.unpin_originator();
+                for (FrameOut& fo : frame_outs) {
+                    fo.reasm->reset_stream();
+                    fo.source.reset();
+                }
+                selected_craft_session = 0;
+                pending_selection.reset();
+                previous_selection.reset();
+                active_selection = LinkSelection{0, chan, bw_code(op_bw_mhz),
+                                                 l.cfg.node.net_id};
+                operating_chan = chan;
+                selection_state = "spectating";
+                desired_cache_assignment.reset();
+                next_cache_assignment_ms = 0;
+                if (cache_ctl) cache_ctl->reset_link();
+                scout.set_rest_chan(operating_chan);
+                scout.set_rest_filter(active_selection.net_id);
+                wb_logf("move: detach + local retune -> %u MHz, spectating "
+                        "(Pass 206)\n", chan);
+                return {200, "{\"ok\":true}"};
+            };
         }
         h.video_recover = [&](int stream_id) {
             return rx.request_recovery(stream_id, inject_return);
@@ -3013,6 +3082,31 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                             "selection bound\n",
                             *latched, operating_chan);
                 }
+            }
+        } else if (selection_state == "spectating" && !scout.scanning()) {
+            // §15.5 Pass 206: a spectating node adopts the first craft to clear
+            // §2 admission (sticky first-admitted) and, when that stream tears
+            // down, drops the pin so the next craft on the channel is heard.
+            // The state stays "spectating" throughout: unlike a configured
+            // latch this is an unbound, non-terminal watch, and "latched" is
+            // reserved for an explicit selection. A sweep pauses adoption so a
+            // craft heard on a swept channel is not adopted out from under it.
+            if (const auto latched = rx.latched_originator()) {
+                if (*latched != 0 && *latched != active_selection.originator) {
+                    active_selection.originator = *latched;
+                    active_selection.chan = static_cast<uint16_t>(operating_chan);
+                    selected_craft_session = 0;  // §3.16 craft-scoped state
+                    assign_caches(active_selection);
+                    wb_logf("link: spectating adopted originator=%u (%u MHz)\n",
+                            *latched, operating_chan);
+                }
+            } else if (active_selection.originator != 0) {
+                active_selection.originator = 0;
+                desired_cache_assignment.reset();
+                next_cache_assignment_ms = 0;
+                if (cache_ctl) cache_ctl->reset_link();
+                wb_logf("link: spectating — craft lost, re-resolving "
+                        "(%u MHz)\n", operating_chan);
             }
         }
         // §11.6 (Pass 199): a PARKED acquire promotes when its craft turns up.

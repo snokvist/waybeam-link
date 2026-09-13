@@ -100,6 +100,25 @@ int main() {
         CHECK_EQ_U(h.engine.streams()[0].key.originator, 18);
     }
 
+    // --- §15.5 Pass 206 unpin_originator detaches unconditionally ----------
+    {
+        Harness h;
+        h.latch();
+        CHECK(h.engine.selected_originator() == kTxOrig);
+        CHECK_EQ_U(h.engine.streams().size(), 1);
+        // Unlike select_originator(0), which is a no-op, this clears the pin.
+        h.engine.unpin_originator();
+        CHECK(!h.engine.selected_originator().has_value());
+        CHECK_EQ_U(h.engine.streams().size(), 0);
+        // Sticky first-admitted: a different craft now passes normal admission.
+        h.feed(0, 0, 0, 0, 20, kTv, {}, 55, 18);
+        h.feed(0, 1, 0, 0, 21, kTv, {}, 55, 18);
+        CHECK_EQ_U(h.engine.streams().size(), 0);
+        h.feed(0, 2, 0, 0, 22, kTv, {}, 55, 18);
+        CHECK_EQ_U(h.engine.streams().size(), 1);
+        CHECK_EQ_U(h.engine.streams()[0].key.originator, 18);
+    }
+
     // --- admission control + latch + startup floor --------------------------
     {
         Harness h;

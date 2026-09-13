@@ -727,6 +727,17 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         }
         return done(h_.channel_set(j.value("mhz", 0)));
     }
+    if (path == "/api/v1/move") {  // §15.5 Pass 206
+        if (!h_.move) return na();
+        if (!j.contains("mhz")) {
+            return reply(400, "Bad Request", json_err("mhz required"));
+        }
+        const auto [code, jbody] = h_.move(j.value("mhz", 0));
+        return reply(code,
+                     code == 200 ? "OK"
+                                 : (code == 409 ? "Conflict" : "Bad Request"),
+                     jbody);
+    }
     if (path == "/api/v1/psk") {  // §11.4a Pass 113
         if (!h_.psk_enable) return na();
         if (!j.contains("enabled") || !j["enabled"].is_boolean()) {
