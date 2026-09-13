@@ -19,9 +19,9 @@
 namespace wblink {
 namespace node {
 
-// §15.5 vehicle/command REST names ↔ §11.7 registry ids.
+// §15.5 vehicle/command REST names ↔ §11.7 registry ids. 0x01 (was "arq") is
+// retired and reserved (Pass 205): the name resolves to 0, an unknown command.
 inline uint8_t vcmd_id_for(const std::string& name) {
-    if (name == "arq") return vcmd_id::kArq;
     if (name == "selector") return vcmd_id::kSelector;
     if (name == "fps_ladder") return vcmd_id::kFpsLadder;
     if (name == "fps_select") return vcmd_id::kFpsSelect;
@@ -36,7 +36,6 @@ inline uint8_t vcmd_id_for(const std::string& name) {
 
 inline const char* vcmd_name_for(uint8_t id) {
     switch (id) {
-        case vcmd_id::kArq: return "arq";
         case vcmd_id::kSelector: return "selector";
         case vcmd_id::kFpsLadder: return "fps_ladder";
         case vcmd_id::kFpsSelect: return "fps_select";

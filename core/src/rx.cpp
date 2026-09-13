@@ -20,25 +20,6 @@ uint64_t pack_key(const CommonPrefix& p, uint8_t stream_id) {
     return pack_key(StreamKey{p.originator, p.session_id, stream_id});
 }
 
-// §17 gate-3 histogram bucket for a latency in ms: upper bounds
-// 1,2,4,8,16,32,64,+inf (index 0..7).
-size_t rtt_bucket(uint64_t ms) {
-    size_t b = 0;
-    while (b < RxStreamCounters::kRttBuckets - 1 && ms > (1ull << b)) {
-        ++b;
-    }
-    return b;
-}
-
-uint32_t p95_us(const std::deque<uint32_t>& samples) {
-    if (samples.empty()) return 0;
-    std::deque<uint32_t> ordered = samples;
-    std::sort(ordered.begin(), ordered.end());
-    const size_t rank = std::max<size_t>(
-        1, (ordered.size() * 950u + 999u) / 1000u);
-    return ordered[rank - 1] * 1000u;
-}
-
 }  // namespace
 
 RxEngine::RxEngine(const RxPolicy& policy, std::vector<WantSpec> wants,
@@ -77,17 +58,17 @@ std::optional<uint32_t> RxEngine::min_live_adapter_seq(const Stream& s,
     return min_seq;
 }
 
-uint64_t RxEngine::block_deadline(const Stream& s, uint64_t first_seen_ms,
-                                  bool arq) const {
-    // §8: budget(profile, importance). ARQ-class blocks (I-frame) get the
-    // longer budget (§4.1 deadline coupling).
-    uint16_t budget = arq ? policy_.default_deadline_iframe_ms
-                          : policy_.default_deadline_pframe_ms;
+uint64_t RxEngine::block_deadline(const Stream& s,
+                                  uint64_t first_seen_ms) const {
+    // §8 (Pass 205): one uniform budget per block, min(iframe, pframe) of the
+    // retained profile fields — the class split left with ARQ.
+    uint16_t budget = std::min(policy_.default_deadline_iframe_ms,
+                               policy_.default_deadline_pframe_ms);
     if (table_ != nullptr) {
         for (const Profile& p : table_->profiles) {
             if (p.id == s.active_profile) {
-                budget = arq ? p.arq_deadline_iframe_ms
-                             : p.arq_deadline_pframe_ms;
+                budget = std::min(p.arq_deadline_iframe_ms,
+                                  p.arq_deadline_pframe_ms);
                 break;
             }
         }
@@ -269,6 +250,9 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
     }
     s->first_clamp_ms = 0;  // any accepted packet ends the storm window
 
+    // §3.7 (Pass 205 O8): a decode-only RETRANSMIT swallow — an old mixed-
+    // version TX's retransmits are excluded from per-adapter loss accounting,
+    // exactly as before. New TXs never set the bit.
     if ((v.hdr.data_flags & data_flags::kRetransmit) == 0) {
         note_adapter_seq(*s, adapter_id, v.hdr.seq);
     }
@@ -281,34 +265,8 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         return;
     }
 
-    // A declared-lost gap filled late (normally by a RETRANSMIT).
+    // A declared-lost gap filled late — a late original or FEC symbol.
     if (const auto git = s->gaps.find(v.hdr.seq); git != s->gaps.end()) {
-        if (git->second.declared_lost) {
-            ++s->counters.recovered_arq;
-            // §17 gate-3 samples: only a RETRANSMIT-flagged fill of a seq
-            // we actually NACKed measures the loop; a late original closes
-            // the gap without sampling. Injected time may step backward
-            // between build_nacks and here — clamp to zero.
-            const Gap& g = git->second;
-            if (g.last_nack_ms != 0 &&
-                (v.hdr.data_flags & data_flags::kRetransmit) != 0) {
-                const uint64_t rtt =
-                    now_ms > g.last_nack_ms ? now_ms - g.last_nack_ms : 0;
-                const uint64_t rec =
-                    now_ms > g.first_nack_ms ? now_ms - g.first_nack_ms : 0;
-                ++s->counters.nack_rtt_hist[rtt_bucket(rtt)];
-                s->counters.nack_rtt_max_ms =
-                    std::max(s->counters.nack_rtt_max_ms, rtt);
-                s->nack_rtt_ms.push_back(static_cast<uint32_t>(
-                    std::min<uint64_t>(rtt, UINT32_MAX)));
-                if (s->nack_rtt_ms.size() > 120) {
-                    s->nack_rtt_ms.pop_front();
-                }
-                ++s->counters.arq_rec_hist[rtt_bucket(rec)];
-                s->counters.arq_rec_max_ms =
-                    std::max(s->counters.arq_rec_max_ms, rec);
-            }
-        }
         s->gaps.erase(git);
     }
 
@@ -330,12 +288,7 @@ void RxEngine::on_data(uint8_t adapter_id, const DataView& v, uint64_t now_ms,
         if (b.first_seen_ms == 0) {
             b.first_seen_ms = now_ms;
         }
-        b.arq = b.arq ||
-                (v.hdr.data_flags &
-                 (data_flags::kArq | data_flags::kPframeArq)) != 0;
-        b.iframe_class =
-            b.iframe_class || (v.hdr.data_flags & data_flags::kArq) != 0;
-        b.deadline_ms = block_deadline(*s, b.first_seen_ms, b.iframe_class);
+        b.deadline_ms = block_deadline(*s, b.first_seen_ms);
     }
 
     Held h;
@@ -376,43 +329,6 @@ void RxEngine::complete_frame(uint8_t local_stream_id, uint32_t block_id,
         advance_cursor(s, now_ms, deliver);
         return;
     }
-}
-
-bool RxEngine::defer_first_nack(uint8_t local_stream_id, uint32_t block_id,
-                                uint64_t not_before_ms) {
-    for (auto& [key, s] : streams_) {
-        (void)key;
-        if (s.local_stream_id != local_stream_id) continue;
-        const auto bit = s.blocks.find(block_id);
-        if (bit == s.blocks.end()) return false;
-        if (bit->second.nack_attempted) return false;
-        BlockInfo& block = bit->second;
-        const uint64_t bounded = block.deadline_ms != 0
-                                     ? std::min(not_before_ms,
-                                                block.deadline_ms)
-                                     : not_before_ms;
-        block.first_nack_not_before_ms =
-            std::max(block.first_nack_not_before_ms, bounded);
-        for (auto& [seq, gap] : s.gaps) {
-            const auto owner = gap_block(s, seq);
-            if (owner && *owner == block_id && gap.nack_attempts == 0) {
-                gap.next_nack_ms = std::max(gap.next_nack_ms, bounded);
-            }
-        }
-        return true;
-    }
-    return false;
-}
-
-bool RxEngine::block_had_nack(uint8_t local_stream_id,
-                              uint32_t block_id) const {
-    for (const auto& [key, s] : streams_) {
-        (void)key;
-        if (s.local_stream_id != local_stream_id) continue;
-        const auto bit = s.blocks.find(block_id);
-        return bit != s.blocks.end() && bit->second.nack_attempted;
-    }
-    return false;
 }
 
 void RxEngine::note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq) {
@@ -513,7 +429,6 @@ void RxEngine::mark_frame_complete(Stream& s, uint32_t block_id) {
         const auto owner = gap_block(s, seq);
         if (owner && *owner == block_id) {
             gap.fec_satisfied = true;
-            gap.nack_eligible = false;
         }
     }
 }
@@ -522,7 +437,6 @@ void RxEngine::evaluate_gaps(Stream& s, uint64_t now_ms) {
     const std::optional<uint32_t> min_live = min_live_adapter_seq(s, now_ms);
     for (auto& [m, g] : s.gaps) {
         if (g.fec_satisfied) {
-            g.nack_eligible = false;
             continue;
         }
         // §6.2-2 supersession: the nearest received seq above bounds the
@@ -536,7 +450,6 @@ void RxEngine::evaluate_gaps(Stream& s, uint64_t now_ms) {
         if (!s.best_effort && !g.superseded && block_above &&
             *block_above < s.max_block) {
             g.superseded = true;
-            g.nack_eligible = false;
         }
 
         // Declaration short-circuits, priority order (§6.2):
@@ -552,32 +465,6 @@ void RxEngine::evaluate_gaps(Stream& s, uint64_t now_ms) {
         if (declare) {
             g.declared_lost = true;
             ++s.counters.lost_declared;
-            if (!s.best_effort && !g.superseded) {
-                // §6.4 eligibility: ARQ-flagged block, within deadline.
-                bool arq = false;
-                uint64_t deadline = 0;
-                const uint32_t probe_block =
-                    block_above ? *block_above : s.max_block;
-                if (const auto bit = s.blocks.find(probe_block);
-                    bit != s.blocks.end()) {
-                    arq = bit->second.arq;
-                    deadline = bit->second.deadline_ms;
-                }
-                if (const auto bb = s.blocks.find(s.last_delivered_block);
-                    bb != s.blocks.end()) {
-                    arq = arq || bb->second.arq;
-                }
-                if (arq && (deadline == 0 || now_ms < deadline)) {
-                    g.nack_eligible = true;
-                    g.next_nack_ms = now_ms;
-                    if (const auto bit = s.blocks.find(probe_block);
-                        bit != s.blocks.end()) {
-                        g.next_nack_ms = std::max(
-                            g.next_nack_ms,
-                            bit->second.first_nack_not_before_ms);
-                    }
-                }
-            }
         }
     }
 }
@@ -645,11 +532,12 @@ void RxEngine::advance_cursor(Stream& s, uint64_t now_ms,
                     deadline = bit->second.deadline_ms;
                 }
             }
+            // §6.4 (Pass 205): a declared-lost gap is NOT dropped on
+            // declaration — it stays FEC-pending until its block completes
+            // (fec_satisfied, handled above) or its deadline passes, so a
+            // late FEC symbol can still complete the block.
             if (deadline && now_ms >= *deadline) {
                 ++s.counters.dropped_deadline;
-                skip = true;
-            } else if (g.declared_lost && !g.nack_eligible) {
-                ++s.counters.dropped_unrecoverable;
                 skip = true;
             }
         } else if (g.declared_lost) {
@@ -691,66 +579,6 @@ void RxEngine::tick(uint64_t now_ms, const Deliver& deliver) {
     }
 }
 
-std::vector<NackRequest> RxEngine::build_nacks(uint64_t now_ms) {
-    std::vector<NackRequest> out;
-    for (auto& [key, s] : streams_) {
-        if (s.best_effort) {
-            continue;  // §3.4: never NACK
-        }
-        // Collect due, eligible seqs.
-        std::vector<uint32_t> due;
-        for (auto& [m, g] : s.gaps) {
-            if (g.declared_lost && g.nack_eligible && !g.superseded &&
-                !g.fec_satisfied &&
-                g.nack_attempts < policy_.renack_attempts &&
-                g.next_nack_ms <= now_ms) {
-                due.push_back(m);
-            }
-        }
-        if (due.empty()) {
-            continue;
-        }
-        // One coalesced bitmap per stream per return window (§6.4).
-        const uint32_t base = due.front();
-        NackRequest req;
-        req.target_originator = s.key.originator;
-        req.target_session = s.key.session_id;
-        req.target_stream_id = s.key.stream_id;
-        req.base_seq = base;
-        for (const uint32_t m : due) {
-            const uint32_t bit = m - base;
-            if (bit >= 255u * 8u) {
-                break;  // bitmap_len is u8; the rest goes next window
-            }
-            if (req.bitmap.size() <= bit / 8) {
-                req.bitmap.resize(bit / 8 + 1, 0);
-            }
-            req.bitmap[bit / 8] =
-                static_cast<uint8_t>(req.bitmap[bit / 8] | (1u << (bit % 8)));
-            Gap& g = s.gaps[m];
-            ++g.nack_attempts;
-            if (const auto owner = gap_block(s, m); owner) {
-                if (const auto block_it = s.blocks.find(*owner);
-                    block_it != s.blocks.end()) {
-                    block_it->second.nack_attempted = true;
-                }
-            }
-            g.next_nack_ms =
-                now_ms + policy_.renack_backoff_ms * g.nack_attempts;
-            // §17 gate-3 anchors. Build time, not air time: the §7.2 pacer
-            // may hold the batch up to one return window, and that hold is
-            // part of the recovery latency being measured.
-            if (g.first_nack_ms == 0) {
-                g.first_nack_ms = now_ms;
-            }
-            g.last_nack_ms = now_ms;
-        }
-        ++s.counters.nacks_sent;
-        out.push_back(std::move(req));
-    }
-    return out;
-}
-
 std::vector<RxStreamInfo> RxEngine::streams() const {
     std::vector<RxStreamInfo> out;
     for (const auto& [key, s] : streams_) {
@@ -762,9 +590,6 @@ std::vector<RxStreamInfo> RxEngine::streams() const {
         info.active_profile = s.active_profile;
         info.peer_table_version = s.peer_table_version;
         info.counters = s.counters;
-        info.counters.nack_rtt_samples = static_cast<uint16_t>(
-            std::min<size_t>(s.nack_rtt_ms.size(), UINT16_MAX));
-        info.counters.nack_rtt_p95_us = p95_us(s.nack_rtt_ms);
         for (const auto& [adapter, a] : s.adapter_seq) {
             info.counters.prediv_expected += a.expected;
             info.counters.prediv_lost += a.expected - a.received;
@@ -813,7 +638,6 @@ void RxEngine::reset_stats() {
     // reset mid-flight cannot perturb delivery or the §6.5 stall verdict.
     for (auto& [key, s] : streams_) {
         s.counters = {};
-        s.nack_rtt_ms.clear();
         for (auto& [adapter, a] : s.adapter_seq) {
             (void)adapter;
             a.expected = 0;

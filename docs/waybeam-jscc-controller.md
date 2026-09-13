@@ -4,6 +4,12 @@
 to frame the problem precisely enough that the open questions become answerable by
 measurement rather than argument.
 
+> **ARQ removed (Pass 205, 2026-09-13).** The ARQ knob, retry budget, RTT-vs-ARQ
+> switch and NACK-based timing budget discussed below are historical: there is no
+> retransmit plane, so the JSCC controller allocates FEC alone (RTT readiness gate
+> removed — its only source was the NACK RTT estimator). Read the ARQ/vs-FEC
+> trade-off sections as a rejected design branch, not an open knob.
+
 **Scope:** the joint source–channel control loop between the waybeam link layer (consumer)
 and the SSC338Q video encoder (producer), over RTL8812AU/EU raw injection.
 

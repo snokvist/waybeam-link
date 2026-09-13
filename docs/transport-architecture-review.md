@@ -2,6 +2,13 @@
 
 Date: 2026-07-12. Branch: `audit/transport-parity-bench`.
 
+> **ARQ removed (Pass 205, 2026-09-13).** This review describes the
+> `ResendRing`/`ResendScheduler`/NACK topology as it then stood. Those are
+> deleted; the ring, scheduler, NACK packet and `arq_mode` no longer exist, and
+> the `nacks_sent`/`recovered_arq`/`resends_sent` counters are no longer
+> emitted. FEC, diversity, spatial cache repair and slice concealment are the
+> repair plane. Keep the rest as an architecture record.
+
 ## Scope and verdict
 
 The application has two separate interface planes:

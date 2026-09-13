@@ -363,14 +363,12 @@ CacheController::ReplyVerdict CacheController::on_reply(
     return ReplyVerdict::kAccept;
 }
 
-void CacheController::note_completed(uint32_t block_id, uint64_t now_us,
-                                     bool before_nack) {
+void CacheController::note_completed(uint32_t block_id, uint64_t now_us) {
     ++stats_.blocks_repaired;
     const auto bit = blocks_.find(block_id);
     if (bit != blocks_.end() && bit->second.first_request_us &&
         now_us >= *bit->second.first_request_us) {
         completion_timing_.observe(now_us - *bit->second.first_request_us);
-        if (before_nack) ++stats_.blocks_repaired_before_nack;
     }
     blocks_.erase(block_id);
     for (auto it = outstanding_.begin(); it != outstanding_.end();) {

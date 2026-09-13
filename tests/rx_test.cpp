@@ -78,8 +78,6 @@ struct Harness {
 };
 
 constexpr uint8_t EOB = data_flags::kEndOfBlock;
-constexpr uint8_t ARQ = data_flags::kArq;
-constexpr uint8_t PARQ = data_flags::kPframeArq;
 
 }  // namespace
 
@@ -121,22 +119,6 @@ int main() {
         h2.feed(0, 1, 0, 0, 500);
         h2.feed(0, 2, 0, 0, 2000);  // window expired between 2nd and 3rd
         CHECK_EQ_U(h2.engine.streams().size(), 0);
-    }
-
-    // --- opt-in P-frame ARQ is eligible but keeps the short deadline --------
-    {
-        Harness h;
-        h.latch();
-        h.feed(0, 4, 1, PARQ, 10);
-        h.feed(1, 5, 1, PARQ | EOB, 11);
-        h.feed(0, 5, 1, PARQ | EOB, 12);
-        h.feed(1, 4, 1, PARQ, 13);
-        CHECK_EQ_U(h.engine.build_nacks(14).size(), 1);
-        h.engine.tick(25, h.sink());
-        CHECK_EQ_U(h.counters().dropped_deadline, 0);
-        h.engine.tick(26, h.sink());  // first seen 10 + P deadline 16
-        CHECK_EQ_U(h.counters().dropped_deadline, 1);
-        CHECK_EQ_U(h.engine.build_nacks(27).size(), 0);
     }
 
     // --- non-matching originator never latches ------------------------------
@@ -205,14 +187,13 @@ int main() {
             return {/*handled=*/true, /*block_complete=*/true};
         };
         // seq 3 is absent, but seq 4 reaches the equation-oriented consumer
-        // immediately and declares block 1 complete before NACK construction.
-        h.feed(0, 4, 1, ARQ | EOB, 10, kTv, early);
-        h.feed(1, 4, 1, ARQ | EOB, 11, kTv, early);  // diversity duplicate
+        // immediately and declares block 1 complete.
+        h.feed(0, 4, 1, 0 | EOB, 10, kTv, early);
+        h.feed(1, 4, 1, 0 | EOB, 11, kTv, early);  // diversity duplicate
         CHECK_EQ_U(early_seq.size(), 1);
         CHECK_EQ_U(early_seq[0], 4);
         CHECK_EQ_U(h.counters().diversity, 1);
         CHECK_EQ_U(h.counters().lost_declared, 0);
-        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
         // Ordered payload delivery did not duplicate the early symbol.
         CHECK_EQ_U(h.delivered.size(), 1);  // admission floor only
         CHECK_EQ_U(h.counters().delivered, 2);  // floor + early seq 4
@@ -224,81 +205,34 @@ int main() {
     {
         Harness h;
         h.latch();
-        h.feed(0, 4, 1, ARQ | EOB, 10);  // seq 3 declared lost
+        h.feed(0, 4, 1, 0 | EOB, 10);  // seq 3 declared lost
         CHECK_EQ_U(h.counters().lost_declared, 1);
         h.engine.complete_frame(0, 1, 11, h.sink());
-        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
         CHECK_EQ_U(h.counters().dropped_deadline, 0);
         CHECK_EQ_U(h.counters().dropped_superseded, 0);
         // The satisfied hole no longer holds the generic cursor.
         CHECK_EQ_U(h.delivered.size(), 2);  // floor 2, then held seq 4
     }
 
-    // --- cache grace defers only the first NACK for the exact block ---------
-    {
-        Harness h;
-        h.latch();
-        h.feed(0, 4, 1, ARQ | EOB, 10);  // seq 3 is immediately eligible
-        CHECK(h.engine.defer_first_nack(0, 1, 13));
-        CHECK(!h.engine.block_had_nack(0, 1));
-        CHECK_EQ_U(h.engine.build_nacks(12).size(), 0);
-        CHECK_EQ_U(h.engine.build_nacks(13).size(), 1);
-        CHECK(h.engine.block_had_nack(0, 1));
-        // Once the first request fired, a later cache attempt cannot postpone
-        // its retry lane.
-        CHECK(!h.engine.defer_first_nack(0, 1, 100));
-        h.feed(0, 3, 1, ARQ | data_flags::kRetransmit, 14);
-        CHECK(h.engine.block_had_nack(0, 1));  // durable after gap removal
-    }
-    {
-        Harness h;
-        h.latch();
-        h.feed(0, 4, 1, ARQ | EOB, 10);
-        CHECK(h.engine.defer_first_nack(0, 1, 13));
-        h.engine.complete_frame(0, 1, 12, h.sink());
-        CHECK_EQ_U(h.engine.build_nacks(13).size(), 0);
-        CHECK(!h.engine.block_had_nack(0, 1));
-    }
-
     // --- §6.2-1: all live adapters advanced => lost immediately -------------
     {
         Harness h;
         h.latch();
-        // Two adapters both deliver past seq 3 (never seen, ARQ block).
-        h.feed(0, 4, 1, ARQ, 10);
-        h.feed(1, 5, 1, ARQ | EOB, 11);
-        h.feed(0, 5, 1, ARQ | EOB, 12);
-        h.feed(1, 4, 1, ARQ, 13);
-        // seq 3 is now behind both adapters' last (4,5... wait adapter0 last=5,
-        // adapter1 last=5) -> declared lost, NACK-eligible immediately.
-        auto nacks = h.engine.build_nacks(14);
-        CHECK_EQ_U(nacks.size(), 1);
-        if (!nacks.empty()) {
-            CHECK_EQ_U(nacks[0].base_seq, 3);
-            CHECK_EQ_U(nacks[0].target_originator, kTxOrig);
-            CHECK_EQ_U(nacks[0].target_session, kTxSession);
-            CHECK_EQ_U(nacks[0].bitmap.size(), 1);
-            CHECK_EQ_U(nacks[0].bitmap[0], 0x01);
-        }
+        // Two adapters both deliver past seq 3 (never seen).
+        h.feed(0, 4, 1, 0, 10);
+        h.feed(1, 5, 1, EOB, 11);
+        h.feed(0, 5, 1, EOB, 12);
+        h.feed(1, 4, 1, 0, 13);
+        // seq 3 is now behind both adapters' last -> declared lost.
         CHECK_EQ_U(h.counters().lost_declared, 1);
-        // Delivery is blocked at the gap (in-deadline, recoverable).
+        // Delivery is blocked at the gap (in-deadline, FEC-pending).
         CHECK_EQ_U(h.delivered.size(), 1);  // just the floor (2)
 
-        // The RETRANSMIT arrives: recovered, delivery resumes in order.
-        h.feed(0, 3, 1, ARQ | data_flags::kRetransmit, 20);
-        CHECK_EQ_U(h.counters().recovered_arq, 1);
+        // A late original fills the gap; delivery resumes in order. With no
+        // ARQ there is no NACK and no recovery counter.
+        h.feed(0, 3, 1, 0, 20);
         CHECK_EQ_U(h.delivered.size(), 4);  // 2,3,4,5
         CHECK_EQ_U(h.delivered[1].second[0], 3);
-        // Quiesce: no further NACKs for it.
-        CHECK_EQ_U(h.engine.build_nacks(21).size(), 0);
-        // §17 gate-3 sample: NACK built at 14, RETRANSMIT at 20 → 6 ms.
-        // Single NACK ⇒ both anchors agree (bucket 3 = ≤8 ms).
-        CHECK_EQ_U(h.counters().nack_rtt_hist[3], 1);
-        CHECK_EQ_U(h.counters().nack_rtt_max_ms, 6);
-        CHECK_EQ_U(h.counters().nack_rtt_samples, 1);
-        CHECK_EQ_U(h.counters().nack_rtt_p95_us, 6000);
-        CHECK_EQ_U(h.counters().arq_rec_hist[3], 1);
-        CHECK_EQ_U(h.counters().arq_rec_max_ms, 6);
     }
 
     // --- §6.2-1 must NOT fire while one live adapter lags --------------------
@@ -306,28 +240,26 @@ int main() {
         Harness h;
         h.latch();
         h.feed(1, 2, 0, 0, 5);   // adapter 1 latches onto the stream, last=2
-        h.feed(0, 4, 1, ARQ, 10);  // adapter 0 ahead; gap at 3
+        h.feed(0, 4, 1, 0, 10);  // adapter 0 ahead; gap at 3
         // adapter 1 (live, last=2) has not advanced past 3 -> not lost yet.
-        CHECK_EQ_U(h.engine.build_nacks(11).size(), 0);
         CHECK_EQ_U(h.counters().lost_declared, 0);
         // adapter 1 catches up past the gap -> now lost.
-        h.feed(1, 5, 1, ARQ, 12);
+        h.feed(1, 5, 1, 0, 12);
         CHECK_EQ_U(h.counters().lost_declared, 1);
     }
 
-    // --- §6.2-2 supersession: newer block => older gaps dropped, no NACK ----
+    // --- §6.2-2 supersession: newer block => older gaps dropped -------------
     {
         Harness h;
         h.latch();
-        h.feed(0, 3, 1, ARQ, 10);          // block 1 starts
-        h.feed(0, 5, 2, ARQ | EOB, 12);    // block 2 seen; gap at 4 (block<=2)
+        h.feed(0, 3, 1, 0, 10);          // block 1 starts
+        h.feed(0, 5, 2, EOB, 12);        // block 2 seen; gap at 4 (block<=2)
         // seq 4's nearest-above is seq 5 (block 2 == max_block): NOT
         // superseded (could belong to the live block).
-        h.feed(0, 6, 3, ARQ | EOB, 14);    // block 3; now nearest-above(4)=5,
+        h.feed(0, 6, 3, EOB, 14);        // block 3; now nearest-above(4)=5,
                                            // block 2 < max_block 3 => superseded
         h.engine.tick(15, h.sink());
-        // Superseded gap: dropped, cursor advanced, never NACKed.
-        CHECK_EQ_U(h.engine.build_nacks(16).size(), 0);
+        // Superseded gap: dropped, cursor advanced.
         CHECK_EQ_U(h.counters().dropped_superseded, 1);
         // Held packets after the hole were delivered (never withheld).
         CHECK_EQ_U(h.delivered.size(), 4);  // 2,3,5,6
@@ -356,7 +288,7 @@ int main() {
         // Introduce a second live adapter lagging at seq 2 BEFORE the gap
         // appears, so SC1 stays blocked and only the dwell timer can fire.
         h.feed(1, 2, 0, 0, 5);
-        h.feed(0, 4, 1, ARQ, 100);  // gap at 3
+        h.feed(0, 4, 1, 0, 100);  // gap at 3
         CHECK_EQ_U(h.counters().lost_declared, 0);
         h.engine.tick(105, h.sink());
         CHECK_EQ_U(h.counters().lost_declared, 0);  // dwell not reached
@@ -368,102 +300,27 @@ int main() {
     {
         RxPolicy p;
         p.default_deadline_iframe_ms = 50;
-        p.renack_attempts = 100;  // don't run out before the deadline
         Harness h(p);
         h.latch();
-        h.feed(0, 4, 1, ARQ, 100);
-        h.feed(1, 5, 1, ARQ | EOB, 101);  // gap 3 declared via SC1
+        h.feed(0, 4, 1, 0, 100);
+        h.feed(1, 5, 1, EOB, 101);  // gap 3 declared via SC1
         CHECK_EQ_U(h.counters().lost_declared, 1);
-        CHECK(h.engine.build_nacks(102).size() == 1);
         // Past block-1 deadline (first_seen 100 + 50): dropped, cursor moves.
         h.engine.tick(151, h.sink());
         CHECK_EQ_U(h.counters().dropped_deadline, 1);
         CHECK_EQ_U(h.delivered.size(), 3);  // 2,4,5
-        CHECK_EQ_U(h.engine.build_nacks(152).size(), 0);
-    }
-
-    // --- re-NACK backoff + attempt cap ---------------------------------------
-    {
-        RxPolicy p;
-        p.renack_attempts = 3;
-        p.renack_backoff_ms = 15;
-        p.default_deadline_iframe_ms = 10000;  // deadline out of the way
-        Harness h(p);
-        h.latch();
-        h.feed(0, 4, 1, ARQ, 10);
-        h.feed(1, 5, 1, ARQ, 11);  // gap 3 declared, first NACK due now
-        CHECK_EQ_U(h.engine.build_nacks(12).size(), 1);   // attempt 1
-        CHECK_EQ_U(h.engine.build_nacks(13).size(), 0);   // backoff holds
-        CHECK_EQ_U(h.engine.build_nacks(27).size(), 1);   // attempt 2 (+15)
-        CHECK_EQ_U(h.engine.build_nacks(90).size(), 1);   // attempt 3
-        CHECK_EQ_U(h.engine.build_nacks(500).size(), 0);  // cap reached
-        CHECK_EQ_U(h.counters().nacks_sent, 3);
-    }
-
-    // --- §17 gate-3: re-NACK splits the two anchors ---------------------------
-    {
-        RxPolicy p;
-        p.renack_attempts = 3;
-        p.renack_backoff_ms = 15;
-        p.default_deadline_iframe_ms = 10000;
-        Harness h(p);
-        h.latch();
-        h.feed(0, 4, 1, ARQ, 10);
-        h.feed(1, 5, 1, ARQ, 11);                        // gap 3 declared
-        CHECK_EQ_U(h.engine.build_nacks(12).size(), 1);  // first NACK @12
-        CHECK_EQ_U(h.engine.build_nacks(27).size(), 1);  // re-NACK @27
-        h.feed(0, 3, 1, ARQ | data_flags::kRetransmit, 30);
-        // round-trip = 30-27 = 3 ms (bucket 2 = ≤4);
-        // recovery   = 30-12 = 18 ms (bucket 5 = ≤32).
-        CHECK_EQ_U(h.counters().nack_rtt_hist[2], 1);
-        CHECK_EQ_U(h.counters().nack_rtt_max_ms, 3);
-        CHECK_EQ_U(h.counters().nack_rtt_samples, 1);
-        CHECK_EQ_U(h.counters().nack_rtt_p95_us, 3000);
-        CHECK_EQ_U(h.counters().arq_rec_hist[5], 1);
-        CHECK_EQ_U(h.counters().arq_rec_max_ms, 18);
-    }
-
-    // --- §17 gate-3: a late ORIGINAL closes the gap without sampling ----------
-    {
-        Harness h;
-        h.latch();
-        h.feed(0, 4, 1, ARQ, 10);
-        h.feed(1, 5, 1, ARQ, 11);                        // gap 3 declared
-        CHECK_EQ_U(h.engine.build_nacks(12).size(), 1);  // NACKed
-        h.feed(1, 3, 1, ARQ, 20);  // late copy, no RETRANSMIT flag
-        CHECK_EQ_U(h.counters().recovered_arq, 1);
-        CHECK_EQ_U(h.counters().nack_rtt_hist[3], 0);
-        CHECK_EQ_U(h.counters().nack_rtt_max_ms, 0);
-        CHECK_EQ_U(h.counters().arq_rec_max_ms, 0);
-    }
-
-    // --- coalescing: several gaps -> one bitmap -------------------------------
-    {
-        Harness h;
-        h.latch();
-        h.feed(0, 3, 1, ARQ, 10);
-        h.feed(0, 7, 1, ARQ, 11);
-        h.feed(1, 7, 1, ARQ, 12);  // gaps 4,5,6 all behind both adapters
-        auto nacks = h.engine.build_nacks(13);
-        CHECK_EQ_U(nacks.size(), 1);
-        if (!nacks.empty()) {
-            CHECK_EQ_U(nacks[0].base_seq, 4);
-            CHECK_EQ_U(nacks[0].bitmap.size(), 1);
-            CHECK_EQ_U(nacks[0].bitmap[0], 0x07);  // bits 0,1,2 = seqs 4,5,6
-        }
     }
 
     // --- §3.4 best-effort fallback on table_version mismatch -----------------
     {
         Harness h;
         h.latch();
-        h.feed(0, 3, 1, ARQ, 10, /*table_version=*/0x99);  // mismatch
+        h.feed(0, 3, 1, 0, 10, /*table_version=*/0x99);  // mismatch
         CHECK(h.engine.streams()[0].best_effort);
-        // Gap at 4 (mismatched stream): declared but never NACKed.
-        h.feed(0, 5, 1, ARQ, 11, 0x99);
-        h.feed(1, 5, 1, ARQ, 12, 0x99);
+        // Gap at 4 (mismatched stream): declared but never requested.
+        h.feed(0, 5, 1, 0, 11, 0x99);
+        h.feed(1, 5, 1, 0, 12, 0x99);
         h.engine.tick(50, h.sink());
-        CHECK_EQ_U(h.engine.build_nacks(51).size(), 0);
         // Lost gap skipped, later packets still delivered by diversity.
         CHECK_EQ_U(h.delivered.size(), 3);  // 2,3,5
         CHECK_EQ_U(h.counters().table_mismatch, 3);
@@ -474,14 +331,19 @@ int main() {
         RxPolicy p;
         p.stall_timeout_ms = 200;
         p.dwell_ceiling_ms = 100000;  // keep SC3 out of the way
+        // Pass 205: one unified deadline is min(iframe, pframe), so hold both
+        // far out of the way or the gap would be deadline-dropped before the
+        // stall is observed.
+        p.default_deadline_iframe_ms = 60000;
+        p.default_deadline_pframe_ms = 60000;
         Harness h(p);
         h.latch();
         h.feed(1, 2, 0, 0, 5);       // adapter 1 heard the stream, last=2
-        h.feed(0, 4, 1, ARQ, 10);    // gap at 3; adapter 1 lags -> no SC1
+        h.feed(0, 4, 1, 0, 10);    // gap at 3; adapter 1 lags -> no SC1
         h.engine.tick(50, h.sink());
         CHECK_EQ_U(h.counters().lost_declared, 0);
         // Adapter 1 goes silent while 0 keeps delivering -> stalled at +200ms.
-        h.feed(0, 5, 1, ARQ, 300);
+        h.feed(0, 5, 1, 0, 300);
         CHECK_EQ_U(h.counters().lost_declared, 1);  // SC1 now fires without it
         CHECK_EQ_U(h.engine.live_adapter_count(), 1);
     }
@@ -528,7 +390,7 @@ int main() {
         h.feed(0, 4, 0, 0, 8);  // duplicate does not over-credit
         CHECK_EQ_U(h.counters().prediv_lost, 0);
         h.feed(0, 6, 0, data_flags::kRetransmit, 9);
-        CHECK_EQ_U(h.counters().prediv_expected, 8);  // ARQ excluded
+        CHECK_EQ_U(h.counters().prediv_expected, 8);  // 0 excluded
         h.engine.reset_stats();
         CHECK_EQ_U(h.counters().prediv_expected, 0);
         CHECK_EQ_U(h.counters().prediv_lost, 0);

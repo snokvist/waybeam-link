@@ -32,7 +32,7 @@ if [[ ! -x "$LINK" || ! -x "$FEED" ]]; then
 fi
 
 D0=$BASE_PORT             # video downlink
-RET=$((BASE_PORT + 1))    # NACK/LINK_REPORT return
+RET=$((BASE_PORT + 1))    # LINK_REPORT/JSCC return
 VENCP=$((BASE_PORT + 2))  # fake venc HTTP
 CTRL=$((BASE_PORT + 3))   # RX REST (loss ramp)
 IN_RING="wblink_act_in_$$"
@@ -64,7 +64,7 @@ cat >"$TMP/tx.json" <<EOF
   "streams": [{"stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": {"kind": "frame-shm", "name": "$IN_RING"},
     "fec": {"scheme": "rlc256", "i_rate_permille": 250,
-            "p_rate_permille": 100, "min_k": 3}}],
+            "p_rate_permille": 100}}],
   "air": {"kind": "udp", "tx": ["127.0.0.1:$D0"], "rx": ["127.0.0.1:$RET"]},
   "policy": {"select": $SELECT},
   "venc": {"host": "127.0.0.1:$VENCP", "enabled": true, "fps_hint": $FPS},

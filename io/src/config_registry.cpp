@@ -24,8 +24,8 @@ using json = nlohmann::json;
 // whose gate cannot be pointed at gets NO predicate: reporting a live key as
 // dead is worse than not reporting it at all.
 
-// PROTOCOL.md:4510 — a spectator "generates no ARQ / NACK / LINK_REPORT
-// (return and §3.9 recovery paths no-op with no tx adapter)". The gate is the
+// PROTOCOL.md §15.2 — a spectator "generates no returns" (return and §3.9
+// recovery paths no-op with no tx adapter). The gate is the
 // TX adapter, not the spectator flag: the Ethernet cache archetype is also
 // uplink-free and correctly omits policy.return, which keying on `spectator`
 // would have missed. (Its config, deploy/cache-192.168.2.247.json, was deleted
@@ -263,7 +263,6 @@ const KeyEntry kKeys[] = {
     {"cache.repair.local_quiet_ms",               KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
     {"cache.repair.max_cache_attempts",           KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
     {"cache.repair.min_collect_ms",               KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
-    {"cache.repair.nack_grace_ms",                KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
     {"cache.repair.repair_fraction_permille",     KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
     {"cache.repair.reply_limit",                  KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
     {"cache.repair.request_timeout_ms",           KeyType::kNumber, cache_repair_enabled, kWhyRepairOff},
@@ -309,20 +308,6 @@ const KeyEntry kKeys[] = {
     {"node.role",                                 KeyType::kString},
     {"node.spectator",                            KeyType::kBool},
     {"policy",                                    KeyType::kObject},
-    {"policy.arq",                                KeyType::kObject},
-    {"policy.arq.airtime_frac",                   KeyType::kNumber},
-    {"policy.arq.arq_max_fps",                    KeyType::kNumber},
-    {"policy.arq.attempt_cap",                    KeyType::kNumber},
-    {"policy.arq.budget_floor_bytes",             KeyType::kNumber},
-    {"policy.arq.budget_interval_ms",             KeyType::kNumber},
-    {"policy.arq.classifier_size_threshold",      KeyType::kNumber},
-    {"policy.arq.fwd_clamp_blocks",               KeyType::kNumber},
-    {"policy.arq.holddown_ms",                    KeyType::kNumber},
-    {"policy.arq.max_block_pkts",                 KeyType::kNumber},
-    {"policy.arq.min_recoverable_ms",             KeyType::kNumber},
-    {"policy.arq.release_timeout_ms",             KeyType::kNumber},
-    {"policy.arq.ring_byte_budget",               KeyType::kNumber},
-    {"policy.arq.ring_window_ms",                 KeyType::kNumber},
     {"policy.calibration",                        KeyType::kObject},
     {"policy.calibration.artifact_dir",           KeyType::kString},
     {"policy.calibration.dwell_probe_frames",     KeyType::kNumber},
@@ -377,10 +362,9 @@ const KeyEntry kKeys[] = {
     {"policy.rx.admit_window_ms",                 KeyType::kNumber},
     {"policy.rx.clamp_resync_ms",                 KeyType::kNumber},
     {"policy.rx.dwell_ceiling_ms",                KeyType::kNumber},
+    {"policy.rx.fwd_clamp_blocks",                KeyType::kNumber},
     {"policy.rx.fwd_clamp_pkts",                  KeyType::kNumber},
     {"policy.rx.idle_teardown_ms",                KeyType::kNumber},
-    {"policy.rx.renack_attempts",                 KeyType::kNumber},
-    {"policy.rx.renack_backoff_ms",               KeyType::kNumber},
     {"policy.rx.stall_timeout_ms",                KeyType::kNumber},
     {"policy.select",                             KeyType::kObject},
     {"policy.select.bitrate_lead_s",              KeyType::kNumber},
@@ -430,13 +414,11 @@ const KeyEntry kKeys[] = {
     {"stats.hz",                                  KeyType::kNumber},
     {"stats.stdout",                              KeyType::kBool},
     {"streams",                                   KeyType::kArray},
-    {"streams[].arq_mode",                        KeyType::kString},
     {"streams[].bind",                            KeyType::kObject},
     {"streams[].bind.kind",                       KeyType::kString},
     {"streams[].bind.listen",                     KeyType::kString},
     {"streams[].bind.name",                       KeyType::kString},
     {"streams[].bind.send",                       KeyType::kString},
-    {"streams[].classifier",                      KeyType::kString},
     {"streams[].conceal",                         KeyType::kObject},
     {"streams[].conceal.freeze_frame",            KeyType::kBool},
     {"streams[].conceal.mode",                    KeyType::kString},
@@ -444,17 +426,14 @@ const KeyEntry kKeys[] = {
     {"streams[].fec",                             KeyType::kObject},
     {"streams[].fec.e_rate_permille",             KeyType::kNumber},
     {"streams[].fec.i_rate_permille",             KeyType::kNumber},
-    {"streams[].fec.min_k",                       KeyType::kNumber},
     {"streams[].fec.min_r",                       KeyType::kNumber},
     {"streams[].fec.p_rate_permille",             KeyType::kNumber},
     {"streams[].fec.scheme",                      KeyType::kString},
     {"streams[].jscc_shadow",                     KeyType::kObject},
-    {"streams[].jscc_shadow.arq_guard_us",        KeyType::kNumber},
     {"streams[].jscc_shadow.enforce",             KeyType::kBool},
     {"streams[].jscc_shadow.fec_cap_permille",    KeyType::kNumber},
     {"streams[].jscc_shadow.fec_floor_permille",  KeyType::kNumber},
     {"streams[].jscc_shadow.feedback_timeout_ms", KeyType::kNumber},
-    {"streams[].jscc_shadow.min_rtt_samples",     KeyType::kNumber},
     {"streams[].originator",                      KeyType::kNumber},
     {"streams[].stream_id",                       KeyType::kNumber},
     {"streams[].stream_type",                     KeyType::kStringOrNumber},

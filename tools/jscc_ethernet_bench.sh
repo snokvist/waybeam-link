@@ -22,14 +22,10 @@ RAMP_LEVELS=${RAMP_LEVELS:-"0 25 50 100 150 200 100 50 0"}
 REMOTE_TRACE_DIR=${REMOTE_TRACE_DIR:-/mnt/mmcblk0p1/waybeam-link-traces}
 FEC_I_RATE_PERMILLE=${FEC_I_RATE_PERMILLE:-250}
 FEC_P_RATE_PERMILLE=${FEC_P_RATE_PERMILLE:-100}
-FEC_MIN_K=${FEC_MIN_K:-3}
 UDP_PACE_MBPS=${UDP_PACE_MBPS:-100}
 JSCC_FLOOR_PERMILLE=${JSCC_FLOOR_PERMILLE:-20}
 JSCC_CAP_PERMILLE=${JSCC_CAP_PERMILLE:-400}
-JSCC_ARQ_GUARD_US=${JSCC_ARQ_GUARD_US:-500}
 JSCC_FEEDBACK_TIMEOUT_MS=${JSCC_FEEDBACK_TIMEOUT_MS:-500}
-JSCC_MIN_RTT_SAMPLES=${JSCC_MIN_RTT_SAMPLES:-20}
-ARQ_MODE=${ARQ_MODE:-idr-only}
 VENC_CONTROL_ENABLED=${VENC_CONTROL_ENABLED:-0}
 VEHICLE_MAIN_CPU=${VEHICLE_MAIN_CPU:-1}
 VEHICLE_SHM_CPU=${VEHICLE_SHM_CPU:-0}
@@ -128,14 +124,11 @@ start_supervisor() {
             /usr/bin/env OUT_RING="$OUT_RING" BENCH_CONSUMER="$BENCH_CONSUMER" \
             RX_DROP_PERMILLE="$RX_DROP_PERMILLE" \
             FEC_I_RATE_PERMILLE="$FEC_I_RATE_PERMILLE" \
-            FEC_P_RATE_PERMILLE="$FEC_P_RATE_PERMILLE" FEC_MIN_K="$FEC_MIN_K" \
+            FEC_P_RATE_PERMILLE="$FEC_P_RATE_PERMILLE" \
             UDP_PACE_MBPS="$UDP_PACE_MBPS" \
             JSCC_FLOOR_PERMILLE="$JSCC_FLOOR_PERMILLE" \
             JSCC_CAP_PERMILLE="$JSCC_CAP_PERMILLE" \
-            JSCC_ARQ_GUARD_US="$JSCC_ARQ_GUARD_US" \
             JSCC_FEEDBACK_TIMEOUT_MS="$JSCC_FEEDBACK_TIMEOUT_MS" \
-            JSCC_MIN_RTT_SAMPLES="$JSCC_MIN_RTT_SAMPLES" \
-            ARQ_MODE="$ARQ_MODE" \
             VENC_CONTROL_ENABLED="$VENC_CONTROL_ENABLED" \
             /bin/bash -c "exec '$script' run >>'$SUPERVISOR_LOG' 2>&1"
         pid=$(systemctl --user show -p MainPID --value "$SYSTEMD_UNIT")
@@ -312,19 +305,13 @@ fi
     fail "FEC_I_RATE_PERMILLE must be 0..1000"
 [[ "$FEC_P_RATE_PERMILLE" =~ ^([0-9]{1,3}|1000)$ ]] || \
     fail "FEC_P_RATE_PERMILLE must be 0..1000"
-[[ "$FEC_MIN_K" =~ ^[0-9]+$ ]] || fail "FEC_MIN_K must be non-negative"
 [[ "$UDP_PACE_MBPS" =~ ^[1-9][0-9]*$ ]] || fail "UDP_PACE_MBPS must be positive"
 [[ "$JSCC_FLOOR_PERMILLE" =~ ^[0-9]+$ ]] || fail "invalid JSCC floor"
 [[ "$JSCC_CAP_PERMILLE" =~ ^[0-9]+$ ]] || fail "invalid JSCC cap"
 (( JSCC_FLOOR_PERMILLE <= JSCC_CAP_PERMILLE && JSCC_CAP_PERMILLE <= 4000 )) || \
     fail "JSCC rates require floor <= cap <= 4000"
-[[ "$JSCC_ARQ_GUARD_US" =~ ^[0-9]+$ ]] || fail "invalid JSCC ARQ guard"
 [[ "$JSCC_FEEDBACK_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] || \
     fail "invalid JSCC feedback timeout"
-[[ "$JSCC_MIN_RTT_SAMPLES" =~ ^[1-9][0-9]*$ ]] || \
-    fail "invalid JSCC RTT sample minimum"
-[[ "$ARQ_MODE" == idr-only || "$ARQ_MODE" == all-frames ]] || \
-    fail "ARQ_MODE must be idr-only or all-frames"
 [[ "$VENC_CONTROL_ENABLED" == 0 || "$VENC_CONTROL_ENABLED" == 1 ]] || \
     fail "VENC_CONTROL_ENABLED must be 0 or 1"
 [[ "$VEHICLE_MAIN_CPU" =~ ^[0-9]+$ ]] || fail "VEHICLE_MAIN_CPU must be numeric"
@@ -335,8 +322,8 @@ else
     VENC_ENABLED_JSON=false
 fi
 mkdir -p "$ARTIFACTS"
-printf 'frame_shm=%s\nconsumer=%s\narq_mode=%s\nartifacts=%s\n' \
-    "$OUT_RING" "$BENCH_CONSUMER" "$ARQ_MODE" "$ARTIFACTS" >"$RUNTIME_INFO"
+printf 'frame_shm=%s\nconsumer=%s\nartifacts=%s\n' \
+    "$OUT_RING" "$BENCH_CONSUMER" "$ARTIFACTS" >"$RUNTIME_INFO"
 
 if ! curl -fsS --max-time 1 http://127.0.0.1:8099/api/instances >/dev/null 2>&1; then
     python3 "$ROOT/tools/link_monitor.py" \
@@ -358,14 +345,11 @@ cat >"$ARTIFACTS/tx.json" <<EOF
   "profile_table":"/etc/waybeam-link/table.example.json",
   "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
     "bind":{"kind":"frame-shm","name":"venc_frame"},
-    "arq_mode":"$ARQ_MODE",
     "fec":{"scheme":"rlc256","i_rate_permille":$FEC_I_RATE_PERMILLE,
-           "p_rate_permille":$FEC_P_RATE_PERMILLE,"min_k":$FEC_MIN_K},
+           "p_rate_permille":$FEC_P_RATE_PERMILLE},
     "jscc_shadow":{"fec_floor_permille":$JSCC_FLOOR_PERMILLE,
       "fec_cap_permille":$JSCC_CAP_PERMILLE,
-      "arq_guard_us":$JSCC_ARQ_GUARD_US,
-      "feedback_timeout_ms":$JSCC_FEEDBACK_TIMEOUT_MS,
-      "min_rtt_samples":$JSCC_MIN_RTT_SAMPLES}}],
+      "feedback_timeout_ms":$JSCC_FEEDBACK_TIMEOUT_MS}}],
   "air":{"kind":"udp-broadcast","tx":["$BROADCAST_IP:5801"],
          "rx":["0.0.0.0:5801"],"pace_mbps":$UDP_PACE_MBPS},
   "policy":{"select":{"min_profile":0,"max_profile":0}},
@@ -541,8 +525,6 @@ summary = {
     "frames_fec": stream["recovered_fec"],
     "frames_unrecoverable": stream["frames_unrecoverable"],
     "loss_postdiv_prearq_milli": stream["loss_postdiv_prearq_milli"],
-    "nacks_sent": stream["nacks_sent"],
-    "resends_sent": tx["streams"][0]["resends_sent"],
 }
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 print(json.dumps(summary, indent=2))

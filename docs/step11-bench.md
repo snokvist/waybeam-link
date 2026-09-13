@@ -17,6 +17,13 @@ self-contained punch list; you do not need to re-derive anything in §1–§3 to
 start on it, but read §2 before touching gate-2/3/4 seeds — the numbers explain
 *why* the current seeds are provisional.
 
+> **ARQ removed (Pass 205, 2026-09-13).** The NACK/retransmit plane this report
+> measured is gone. The report is kept as measurement history: read every "ARQ",
+> "NACK", "retransmit" and "resend" below as a retired mechanism, and every
+> `nacks_sent`/`recovered_arq`/`resends_sent`/`nack_rtt_*` counter as no longer
+> emitted. FEC, receive diversity, spatial cache repair and slice concealment are
+> the repair plane now.
+
 ---
 
 ## 1. Bench rig
@@ -56,7 +63,7 @@ stand alone):
     { "name": "cu-craft", "bus": "1-1.1", "role": "tx", "channel": 5805, "bw": 20 }
   ],
   "streams": [
-    { "stream_id": 0, "stream_type": "RTP", "dir": "in", "classifier": "h265",
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
       "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } }
   ],
   "air": { "kind": "radio" },
@@ -139,7 +146,7 @@ wait "$GROUND" "$CRAFT" 2>/dev/null
 kill "$SINK"
 
 # 6. stats are the two *-stats.jsonl files; feed to tools/gate2_rho.py /
-#    tools/gate3_rtt.py per §2 below.
+#    ~~tools/gate3_rtt.py~~ (removed Pass 205) per §2 below.
 ```
 
 `tools/udp_sink.py` is a stand-in name for "whatever counts arrived
@@ -270,7 +277,7 @@ A/B needs a clean re-run before it's a real gate-4 number (§4.2).
    re-plug — the known RTL88x2 USB-wedge failure mode, `CLAUDE.md`). The §6.5
    stall watchdog + 5 s idle-teardown + relatch recovered cleanly at full rate
    once the adapter was back. This run also exposed and fixed a relatch bug in
-   `tools/gate3_rtt.py` (now segment-aware, `6ca10fa`).
+   `~~tools/gate3_rtt.py~~ (removed Pass 205)` (now segment-aware, `6ca10fa`).
 
 ---
 
@@ -287,8 +294,9 @@ for the record:
    (`uniq`/`diversity` stats, `air.rx_drop_permille`, `tools/gate2_rho.py`).
 2. **`impl/step11-gate3-rtt`** —
    Pass 10 spec ruling (§17 gate-3 two-anchor estimator, §15.3 schema) +
-   `nack_rtt_*`/`arq_rec_*` histogram instrumentation + `tools/gate3_rtt.py` +
-   `tools/rtp_feed.py`.
+   `nack_rtt_*`/`arq_rec_*` histogram instrumentation + `~~tools/gate3_rtt.py~~ (removed Pass 205)` +
+   `tools/rtp_feed.py`. (The gate-3 estimator, histograms and analyzer were
+   removed with the ARQ plane, Pass 205.)
 3. **`docs/step11-wrapup`** — this document + `README.md` bench summary +
    `CLAUDE.md` bring-up notes.
 

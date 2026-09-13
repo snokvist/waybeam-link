@@ -143,7 +143,7 @@ Call sites are on the hot path:
   dispatch callback**, and it does **not** consult the shared `no_retry_until_ms_`
   — it has an independent 1 s gate.
 
-While blocked: `service_air` does not run (ARQ NACKs unserved), the §7.2
+While blocked: `service_air` does not run (returns unserved), the §7.2
 quiet-gap guard is meaningless, and — the one that loses the aircraft —
 `csa.tick()` is not called, so a TSF-anchored retune can fire late while the
 ground issuer has already committed. Craft and ground end up on different
@@ -167,7 +167,7 @@ holdoff.
 > record the desired value and a poll()-driven connect/send/recv state machine
 > (zero-timeout poll() per step, hard 500 ms per-transaction wall deadline)
 > spends only microseconds per loop iteration. A wedged-but-accepting venc can
-> no longer stall the flight loop, csa.tick(), ARQ service or the §7.2 quiet
+> no longer stall the flight loop, csa.tick(), return service or the §7.2 quiet
 > gap. The Pass 73 volatile-first fallback, write-on-change, holdoff, IDR rate
 > gate and every §15.3 counter are preserved; test rewritten to pump poll().
 
@@ -200,7 +200,7 @@ Two compounding problems:
    kill the process out of the hang. Nothing in `io/` uses `sigaction`.
 
 During recovery the vehicle transmits nothing, reads nothing, emits no stats and
-services no ARQ — by design, briefly. The unbounded case is the defect.
+services no returns — by design, briefly. The unbounded case is the defect.
 
 Fix direction: `waitpid(WNOHANG)` poll with a hard deadline + `SIGKILL` of the
 child, driven from the event loop; switch to `sigaction` without `SA_RESTART`.
@@ -276,7 +276,7 @@ Fix direction: cap iterations per poll pass (~64) and let the loop breathe.
 `examples/config.radio-rx.sample.json:80` → `"control": {"bind": "0.0.0.0:8091"}`.
 `io/src/control_server.cpp` has no auth of any kind. Exposed writes include
 `POST /api/v1/csa` (moves the whole fleet's channel),
-`/api/v1/vehicle/command` (remote ARQ off, FPS),
+`/api/v1/vehicle/command` (remote selector/mode/FPS),
 `/api/v1/scout/quickconnect` (claim a craft) and `/api/v1/link/profile`.
 
 The `csa_psk` redaction boundary itself holds — but that is irrelevant when the
@@ -755,9 +755,6 @@ walk is also the missing gate-4 range sample (C2).
   today by §14.3 being IP-transport-only in v1.
 - `core/src/rx.cpp` `note_adapter_seq` never re-anchors downward, so
   `loss_prediversity` can freeze for an adapter after a resync. Stats-only.
-- `core/src/ring.cpp` runs the byte-budget eviction loop *before* the
-  `len > byte_budget` sanity check, so one pathological oversized frame flushes
-  the entire resend ring before being rejected.
 - `core/src/rlc.cpp` Gauss-Jordan is O(k²·s) ≈ 268 M byte-ops per decode at
   k=256, unbudgeted, on ARMv7. FEC is default-off, so this is a future cliff.
 - `core/src/csa.cpp` TSF elapsed is unbounded: a garbage/reset TSF delta ≥ `dt_us`
@@ -779,8 +776,8 @@ Recorded so the next audit does not re-derive it:
   iteration; `heartbeat`/`announce` guard against backward steps.
 - **Signal handler**: `on_signal` writes only a `volatile sig_atomic_t` —
   async-signal-safe. (The `SA_RESTART`/`waitpid` interaction is B2.)
-- **Long-flight growth**: every long-lived container is bounded — ARQ maps trim
-  at 4096, `Series::recent_` at 512, `DiscoveryCatalog` at 64 with 5 s ageing, RX
+- **Long-flight growth**: every long-lived container is bounded — `Series::recent_`
+  at 512, `DiscoveryCatalog` at 64 with 5 s ageing, RX
   queues at 512 with drop-oldest accounting, `ControlServer` at 16 conns / 8 KiB
   with a 2 s slow-client drop.
 - **frame-SHM SPSC protocol**: memory ordering, producer-replacement (dev/ino)

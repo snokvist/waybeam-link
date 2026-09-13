@@ -94,7 +94,7 @@ int wblink_c_consumer_check(void) {
             wblink_rx_claim(rx, 1, 0, &generation) != 3 ||
             wblink_rx_vehicle_command(rx, NULL, 0, &generation) != 2 ||
             wblink_rx_vehicle_command(rx, "", 0, &generation) != 2 ||
-            wblink_rx_vehicle_command(rx, "arq", 1, &generation) != 3 ||
+            wblink_rx_vehicle_command(rx, "selector", 1, &generation) != 3 ||
             wblink_rx_command_status(rx, NULL, 0, &required,
                                      &generation) != 3) {
             wblink_rx_destroy(rx);

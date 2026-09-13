@@ -30,6 +30,7 @@
 #include "wblink/air_iface.h"
 #include "wblink/air_udp.h"
 #include "wblink/config.h"
+#include "wblink/endian.h"
 #include "wblink/log.h"
 #include "wblink/stats.h"
 #include "wblink/wire.h"
@@ -76,7 +77,7 @@ class PacketEventTrace {
         buffer_.resize(kBufferBytes);
         std::setvbuf(out_, buffer_.data(), _IOFBF, buffer_.size());
         std::fprintf(out_,
-                     "{\"type\":\"schema\",\"schema\":\"waybeam-packet-events-v1\","
+                     "{\"type\":\"schema\",\"schema\":\"waybeam-packet-events-v2\","
                      "\"role\":\"%s\",\"cap\":%llu}\n",
                      role_, static_cast<unsigned long long>(cap_));
     }
@@ -125,37 +126,13 @@ class PacketEventTrace {
                 "\"originator\":%u,\"session\":%u,\"stream\":%u,"
                 "\"block\":%u,\"seq\":%u,\"kind\":\"%s\","
                 "\"symbol\":%u,\"k\":%u,\"frame_len\":%u,"
-                "\"arq\":%s,\"retransmit\":%s,\"eob\":%s,"
-                "\"bytes\":%zu}\n",
+                "\"eob\":%s,\"bytes\":%zu}\n",
                 static_cast<unsigned long long>(t), direction, outcome, adapter,
                 data->hdr.prefix.originator, data->hdr.prefix.session_id,
                 data->hdr.stream_id, data->hdr.block_id, data->hdr.seq,
                 repair ? "repair" : "source", symbol, k, frame_len,
-                (data->hdr.data_flags & data_flags::kArq) ? "true" : "false",
-                (data->hdr.data_flags & data_flags::kRetransmit) ? "true" : "false",
                 (data->hdr.data_flags & data_flags::kEndOfBlock) ? "true" : "false",
                 len);
-            return;
-        }
-        if (const NackView* nack = std::get_if<NackView>(&dec)) {
-            std::string bitmap;
-            static constexpr char kHex[] = "0123456789abcdef";
-            bitmap.reserve(static_cast<size_t>(nack->bitmap_len) * 2);
-            for (uint8_t i = 0; i < nack->bitmap_len; ++i) {
-                bitmap.push_back(kHex[nack->bitmap[i] >> 4]);
-                bitmap.push_back(kHex[nack->bitmap[i] & 0x0f]);
-            }
-            std::fprintf(
-                out_,
-                "{\"type\":\"packet\",\"t_us\":%llu,\"direction\":\"%s\","
-                "\"outcome\":\"%s\",\"adapter\":%d,\"packet\":\"nack\","
-                "\"originator\":%u,\"session\":%u,\"stream\":%u,"
-                "\"target_originator\":%u,\"target_session\":%u,"
-                "\"base_seq\":%u,\"bitmap\":\"%s\",\"bytes\":%zu}\n",
-                static_cast<unsigned long long>(t), direction, outcome, adapter,
-                nack->hdr.prefix.originator, nack->hdr.prefix.session_id,
-                nack->hdr.target_stream_id, nack->hdr.target_originator,
-                nack->hdr.target_session, nack->hdr.base_seq, bitmap.c_str(), len);
             return;
         }
         // Everything else was collapsed into "other", which made the §3.15 /

@@ -6,14 +6,15 @@
 // Covers: discovery + admission control (§2, §13), latch with startup floor,
 // ingest/dedup with diversity accounting (§6.1), the three gap short-circuits
 // in priority order (§6.2) guarded by the plausible-forward clamp (§6.6),
-// in-order best-effort delivery (§6.3), NACK generation with coalescing and
-// bounded re-NACK backoff (§6.4), the adapter liveness watchdog (§6.5),
+// in-order best-effort delivery (§6.3), the adapter liveness watchdog (§6.5),
 // per-block deadlines from the profile table (§8), the best-effort fallback
 // for unknown stream_type / table_version mismatch (§3.4), and implicit idle
 // teardown (§2).
 //
-// Pure tick-driven logic: time is injected, delivery is a callback, NACKs
-// are returned as build products for the caller to encode/inject. No clocks,
+// Pass 205 removed NACK generation: a declared-lost gap stays FEC-pending
+// until its block is FEC-complete or its deadline passes (§6.4).
+//
+// Pure tick-driven logic: time is injected, delivery is a callback. No clocks,
 // no sockets, no threads. Injected now_ms SHOULD be nondecreasing across
 // calls (take ONE timestamp per event-loop iteration); the destructive paths
 // (idle teardown, §6.6 resync) are additionally guarded so a small backward
@@ -44,8 +45,6 @@ struct RxPolicy {
     uint32_t dwell_ceiling_ms = 20;    // §6.2-3 backstop seed, bench-gated
     uint8_t admit_n = 3;               // §2 N_admit
     uint32_t admit_window_ms = 1000;   // §2 T_admit
-    uint8_t renack_attempts = 3;       // §6.4 bounded retries
-    uint32_t renack_backoff_ms = 6;    // per-attempt backoff step
     uint32_t idle_teardown_ms = 5000;  // §2 implicit teardown
     // §6.6 escape hatch: a stream whose packets are ALL clamp-rejected for
     // this long is desynced by a real outage (the TX ran ahead more than
@@ -71,31 +70,16 @@ struct RxStreamCounters {
     uint64_t uniq = 0;        // unique packets accepted (loss denominator)
     uint64_t diversity = 0;   // duplicate copies across adapters
     uint64_t delivered = 0;
-    uint64_t lost_declared = 0;  // post-diversity, pre-ARQ (§3.7 numerator)
-    uint64_t recovered_arq = 0;
+    uint64_t lost_declared = 0;  // post-diversity, pre-FEC (§3.7 numerator)
     uint64_t dropped_superseded = 0;
     uint64_t dropped_deadline = 0;
-    uint64_t dropped_unrecoverable = 0;  // lost + not ARQ-eligible
-    uint64_t nacks_sent = 0;             // NACK packets built
+    uint64_t dropped_unrecoverable = 0;  // best-effort declared-lost (§8)
     uint64_t clamp_rejected = 0;         // §6.6 hits
     uint64_t resyncs = 0;                // sustained-clamp re-floors
     uint64_t table_mismatch = 0;         // §3.4 fallback packets
     uint64_t prediv_expected = 0;        // §3.7 adapter opportunities
     uint64_t prediv_lost = 0;
     uint32_t highest_seq = 0;
-    // §17 gate-3 estimator: NACK→RETRANSMIT latency samples, taken only when
-    // a RETRANSMIT-flagged arrival fills a NACKed gap (late originals close
-    // the gap but never sample). Cumulative histograms, ms upper bounds
-    // 1,2,4,8,16,32,64,+inf. nack_rtt = most-recent-NACK anchor (pure link
-    // round-trip, the §5 freshness input); arq_rec = first-NACK anchor (the
-    // recovery latency compared against the I-frame deadline).
-    static constexpr size_t kRttBuckets = 8;
-    std::array<uint64_t, kRttBuckets> nack_rtt_hist{};
-    uint64_t nack_rtt_max_ms = 0;
-    uint16_t nack_rtt_samples = 0;
-    uint32_t nack_rtt_p95_us = 0;
-    std::array<uint64_t, kRttBuckets> arq_rec_hist{};
-    uint64_t arq_rec_max_ms = 0;
 };
 
 struct RxAdapterCounters {
@@ -137,15 +121,6 @@ struct RxStreamInfo {
     RxStreamCounters counters;
 };
 
-// A NACK ready for the caller to wrap in its own common prefix and inject.
-struct NackRequest {
-    uint16_t target_originator = 0;
-    uint32_t target_session = 0;
-    uint8_t target_stream_id = 0;
-    uint32_t base_seq = 0;
-    std::vector<uint8_t> bitmap;
-};
-
 class RxEngine {
   public:
     // block_id + data_flags ride along so a frame-shm egress reassembler
@@ -160,7 +135,7 @@ class RxEngine {
     };
     // Frame-SHM reassembly is equation-oriented, not packet-order-oriented:
     // feed each first-admitted symbol immediately after diversity dedup while
-    // RxEngine retains the wire sequence for loss/ARQ accounting.
+    // RxEngine retains the wire sequence for loss accounting.
     using EarlyDeliver = std::function<EarlyDeliverResult(
         const StreamKey& source, uint8_t local_stream_id, uint32_t block_id,
         uint8_t data_flags, const uint8_t* payload, size_t len)>;
@@ -180,23 +155,13 @@ class RxEngine {
                  const EarlyDeliver& early_deliver = {});
 
     // A frame-SHM/cache reassembler completed this block. Retire every
-    // packet gap attributable to it so queued/later ARQ cannot repair an
-    // already-complete frame, and advance the generic sequence cursor.
+    // packet gap attributable to it and advance the generic sequence cursor.
     void complete_frame(uint8_t local_stream_id, uint32_t block_id,
                         uint64_t now_ms, const Deliver& deliver);
-
-    // §14.3 cache ordering: delay only the first NACK for one exact block.
-    // Returns false when the stream/block is not live or a NACK already fired.
-    bool defer_first_nack(uint8_t local_stream_id, uint32_t block_id,
-                          uint64_t not_before_ms);
-    bool block_had_nack(uint8_t local_stream_id, uint32_t block_id) const;
 
     // Timers: dwell-ceiling gaps, deadline expiry, stall watchdog, idle
     // teardown. Call at a few-ms cadence.
     void tick(uint64_t now_ms, const Deliver& deliver);
-
-    // Coalesced NACKs due now (respects per-seq backoff + attempt caps).
-    std::vector<NackRequest> build_nacks(uint64_t now_ms);
 
     // Introspection for stats / LINK_REPORT (step 8).
     std::vector<RxStreamInfo> streams() const;
@@ -223,22 +188,12 @@ class RxEngine {
     struct BlockInfo {
         uint64_t first_seen_ms = 0;
         uint64_t deadline_ms = 0;
-        bool arq = false;
-        bool iframe_class = false;
-        uint64_t first_nack_not_before_ms = 0;
-        bool nack_attempted = false;
     };
     struct Gap {
         uint64_t first_missing_ms = 0;
         bool declared_lost = false;
-        bool superseded = false;  // §6.2-2: lost AND not NACKed
+        bool superseded = false;  // §6.2-2: lost and older than the newest block
         bool fec_satisfied = false;  // completed frame needs no packet repair
-        uint8_t nack_attempts = 0;
-        uint64_t next_nack_ms = 0;
-        bool nack_eligible = false;
-        // §17 gate-3 anchors, stamped at NACK build (0 = never NACKed).
-        uint64_t first_nack_ms = 0;
-        uint64_t last_nack_ms = 0;
     };
     struct AdapterSeq {
         bool have = false;
@@ -268,7 +223,6 @@ class RxEngine {
         // must not mix streams sharing an adapter).
         std::map<uint8_t, uint32_t> adapter_last_seq;
         std::map<uint8_t, AdapterSeq> adapter_seq;
-        std::deque<uint32_t> nack_rtt_ms;  // trailing §3.10 RTT window
         RxStreamCounters counters;
     };
     struct Adapter {
@@ -291,8 +245,7 @@ class RxEngine {
     // nullopt when no live adapter has heard this stream yet.
     std::optional<uint32_t> min_live_adapter_seq(const Stream& s,
                                                  uint64_t now_ms) const;
-    uint64_t block_deadline(const Stream& s, uint64_t first_seen_ms,
-                            bool arq) const;
+    uint64_t block_deadline(const Stream& s, uint64_t first_seen_ms) const;
     void note_gaps(Stream& s, uint64_t now_ms);
     void note_adapter_seq(Stream& s, uint8_t adapter_id, uint32_t seq);
     void evaluate_gaps(Stream& s, uint64_t now_ms);

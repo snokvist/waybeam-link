@@ -29,7 +29,7 @@ const char* kSample = R"({
     { "name": "wlan1", "bus": "1-1.3", "role": "rx", "channel": 5805, "bw": 20 }
   ],
   "streams": [
-    { "stream_id": 0, "stream_type": "RTP", "dir": "in", "classifier": "h265",
+    { "stream_id": 0, "stream_type": "RTP", "dir": "in",
       "bind": { "kind": "udp", "listen": "127.0.0.1:5600" } },
     { "stream_id": 1, "stream_type": "TELEMETRY", "dir": "in",
       "bind": { "kind": "udp", "listen": "127.0.0.1:14650" } }
@@ -45,8 +45,7 @@ const char* kSample = R"({
                 "promote_rssi_hyst_db": 6, "promote_dwell_s": 0.5,
                 "mcs_settle_s": 5.0, "down_cooldown_s": 0.2,
                 "ewma_alpha": 0.3 },
-    "arq":    { "airtime_frac": 0.15, "attempt_cap": 3, "holddown_ms": 20,
-                "fwd_clamp_blocks": 4 },
+    "rx":     { "fwd_clamp_blocks": 4 },
     "fec":    { "scheme": "none", "overhead_frac": 0.0 },
     "return": { "guard_us": 300, "return_window_us": 2000 },
     "csa":    { "psk": "hunter2",
@@ -119,9 +118,7 @@ int main() {
             CHECK_EQ_U(c.streams[0].stream_type, stream_type::kRtp);
             CHECK(c.streams[0].dir == Dir::kIn);
             CHECK(c.streams[0].bind.listen == "127.0.0.1:5600");
-            CHECK(c.streams[0].classifier == RtpClassifier::kH265);
             CHECK_EQ_U(c.streams[1].stream_type, stream_type::kTelemetry);
-            CHECK(c.streams[1].classifier == RtpClassifier::kSize);
 
             CHECK_EQ_U(c.policy.select.demote_milli, 20);
             CHECK_EQ_U(c.policy.select.emergency_loss_milli, 180);
@@ -133,7 +130,7 @@ int main() {
             // §9.4 Pass 160: value-visible parse proof (an unknown key
             // would be silently ignored — the loader never enumerates).
             CHECK(c.policy.select.verdict_ttl_s == 4.5);
-            CHECK_EQ_U(c.policy.arq.fwd_clamp_blocks, 4);
+            CHECK_EQ_U(c.policy.rx.fwd_clamp_blocks, 4);
             CHECK(c.policy.fec.scheme == FecScheme::kNone);
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK_EQ_U(c.policy.ret.return_window_us, 2000);
@@ -194,8 +191,6 @@ int main() {
             CHECK(c.policy.select.rung_lockout_s == 30.0);
             CHECK_EQ_U(c.policy.select.rung_lockout_latch_count, 4);
             CHECK(c.policy.select.ewma_alpha == 0.3);
-            CHECK_EQ_U(c.policy.arq.holddown_ms, 20);
-            CHECK_EQ_U(c.policy.rx.renack_backoff_ms, 6);
             CHECK_EQ_U(c.policy.rx.clamp_resync_ms, 500);  // §6.6 seed
             CHECK_EQ_U(c.policy.ret.guard_us, 300);
             CHECK(!c.policy.ret.quiet_gap);   // §7.1 baseline ships default
@@ -545,31 +540,20 @@ int main() {
           "node": {"originator": 7, "role": "tx"},
           "streams": [{ "stream_id": 0, "stream_type": "RTP", "dir": "in",
             "bind": { "kind": "frame-shm", "name": "venc_frame" },
-            "arq_mode": "all-frames",
             "fec": { "scheme": "rlc256", "i_rate_permille": 300,
-                     "p_rate_permille": 120, "min_k": 4 } }]})");
+                     "p_rate_permille": 120 } }]})");
         CHECK(bool(r));
         if (r) {
             CHECK_EQ_U(r.value->streams.size(), 1u);
             const StreamCfg& s = r.value->streams[0];
             CHECK(s.bind.kind == BindKind::kFrameShm);
             CHECK(s.bind.name == "venc_frame");
-            CHECK(s.arq_mode == FrameArqMode::kAllFrames);
             CHECK(s.fec.scheme == FecScheme::kRlc256);
             CHECK_EQ_U(s.fec.i_rate_permille, 300u);
             CHECK_EQ_U(s.fec.p_rate_permille, 120u);
-            CHECK_EQ_U(s.fec.min_k, 4u);
             // §14.1a: absent e_rate_permille => unset (inherit p_rate).
             CHECK(!s.fec.e_rate_permille.has_value());
         }
-        expect_error(R"({"node":{"originator":7,"role":"tx"},
-          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
-            "bind":{"kind":"udp","listen":"127.0.0.1:5600"},
-            "arq_mode":"all-frames"}]})", "frame-shm ingress");
-        expect_error(R"({"node":{"originator":7,"role":"tx"},
-          "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
-            "bind":{"kind":"frame-shm","name":"venc_frame"},
-            "arq_mode":"sometimes"}]})", "idr-only");
     }
 
     // §14.2 Pass 143: the authored calibration is a transport-efficiency
@@ -749,8 +733,7 @@ int main() {
         "bind":{"kind":"frame-shm","name":"venc_frame"},
         "fec":{"scheme":"none"},
         "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
-          "arq_guard_us":500,"feedback_timeout_ms":500,
-          "min_rtt_samples":20,"enforce":true}}]})",
+          "feedback_timeout_ms":500,"enforce":true}}]})",
                  "requires fec.scheme=rlc256");
     // §11.5/§15.2 (Pass 92): the shipped verify window is DERIVED from the
     // engine seed, never restated here. Pass 89 raised the engine default to
@@ -853,19 +836,6 @@ int main() {
       CHECK(bool(r));
       if (r) CHECK_EQ_U(r.value->streams[0].stream_type, stream_type::kAudio);
     }
-    // classifier on a non-RTP stream (§4.1: RTP-profile-only).
-    expect_error(R"({"node":{"originator":1,"role":"rx"},
-      "streams":[{"stream_id":0,"stream_type":"TELEMETRY","dir":"in",
-        "classifier":"h265",
-        "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
-                 "RTP-profile-only");
-    // unknown classifier value.
-    expect_error(R"({"node":{"originator":1,"role":"rx"},
-      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
-        "classifier":"av1",
-        "bind":{"kind":"udp","listen":"127.0.0.1:1"}}]})",
-                 "classifier");
-
     // --- §6.6 clamp_resync_ms is config-overridable (§17) -------------------
     {
         auto r = load_config_json(
@@ -942,30 +912,25 @@ int main() {
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
             "bind":{"kind":"frame-shm","name":"venc_frame"},
             "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
-              "arq_guard_us":500,"feedback_timeout_ms":500,
-              "min_rtt_samples":20}}]})");
+              "feedback_timeout_ms":500}}]})");
         CHECK(bool(r));
         if (r) {
             CHECK(r.value->streams[0].jscc_shadow.has_value());
             const auto& js = *r.value->streams[0].jscc_shadow;
             CHECK_EQ_U(js.fec_floor_permille, 20);
             CHECK_EQ_U(js.fec_cap_permille, 400);
-            CHECK_EQ_U(js.arq_guard_us, 500);
             CHECK_EQ_U(js.feedback_timeout_ms, 500);
-            CHECK_EQ_U(js.min_rtt_samples, 20);
         }
         expect_error(R"({"node":{"originator":17,"role":"tx"},
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
             "bind":{"kind":"udp","listen":"127.0.0.1:5600"},
             "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
-              "arq_guard_us":500,"feedback_timeout_ms":500,
-              "min_rtt_samples":20}}]})", "frame-shm ingress");
+              "feedback_timeout_ms":500}}]})", "frame-shm ingress");
         expect_error(R"({"node":{"originator":17,"role":"tx"},
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
             "bind":{"kind":"frame-shm","name":"venc_frame"},
             "jscc_shadow":{"fec_floor_permille":500,"fec_cap_permille":400,
-              "arq_guard_us":500,"feedback_timeout_ms":500,
-              "min_rtt_samples":20}}]})", "floor <= cap");
+              "feedback_timeout_ms":500}}]})", "floor <= cap");
     }
 
     // --- profile table -------------------------------------------------------
@@ -1085,8 +1050,7 @@ int main() {
             "bind":{"kind":"frame-shm","name":"venc_frame"},
             "fec":{"scheme":"rlc256"},
             "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
-              "arq_guard_us":500,"feedback_timeout_ms":500,
-              "min_rtt_samples":5,"enforce":true}}]})");
+              "feedback_timeout_ms":500,"enforce":true}}]})");
         CHECK(bool(r));
         if (r) {
             CHECK(r.value->streams[0].jscc_shadow.has_value());
@@ -1096,8 +1060,7 @@ int main() {
           "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
             "bind":{"kind":"frame-shm","name":"venc_frame"},
             "jscc_shadow":{"fec_floor_permille":20,"fec_cap_permille":400,
-              "arq_guard_us":500,"feedback_timeout_ms":500,
-              "min_rtt_samples":5}}]})");
+              "feedback_timeout_ms":500}}]})");
         CHECK(bool(d) && !d.value->streams[0].jscc_shadow->enforce);
     }
 
@@ -1265,15 +1228,6 @@ int main() {
               ok.value->policy.calibration.offset_seek_step_qdb == 2);
     }
 
-    // --- §4.1 Pass 40 ARQ cadence cutoff: seed + parse ----------------------
-    {
-        auto d = load_config_json(R"({"node":{"originator":9,"role":"tx"}})");
-        CHECK(bool(d) && d.value->policy.arq.arq_max_fps == 100);
-        auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
-          "policy":{"arq":{"arq_max_fps":0}}})");
-        CHECK(bool(r) && r.value->policy.arq.arq_max_fps == 0);
-    }
-
     // --- §9.11 fps ladder (Pass 39, corrected Pass 53) ----------------------
     {
         auto r = load_config_json(R"({"node":{"originator":9,"role":"tx"},
@@ -1363,7 +1317,6 @@ int main() {
             CHECK_EQ_U(c.cache.repair.repair_fraction_permille, 200);
             CHECK_EQ_U(c.cache.repair.max_cache_attempts, 2);
             CHECK_EQ_U(c.cache.repair.health_floor_permille, 800);
-            CHECK_EQ_U(c.cache.repair.nack_grace_ms, 3);
             CHECK_EQ_U(c.cache.repair.assignment_interval_ms, 500);
             CHECK(c.cache.store.enabled);
             CHECK_EQ_U(c.cache.store.blocks, 96);
@@ -1387,13 +1340,6 @@ int main() {
       "cache":{"repair":{"enabled":true,"listen":"127.0.0.1:5802",
         "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
         "frame-shm");
-    expect_error(R"({"node":{"originator":9,"role":"rx"},
-      "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
-                  "bind":{"kind":"frame-shm","name":"venc_out"}}],
-      "cache":{"repair":{"enabled":true,"stream_id":0,
-        "listen":"127.0.0.1:5802","nack_grace_ms":7,
-        "caches":[{"originator":33,"endpoint":"127.0.0.1:5801"}]}}})",
-        "nack_grace_ms");
     expect_error(R"({"node":{"originator":9,"role":"rx"},
       "streams":[{"stream_id":0,"stream_type":"RTP","dir":"out",
                   "bind":{"kind":"frame-shm","name":"venc_out"}}],

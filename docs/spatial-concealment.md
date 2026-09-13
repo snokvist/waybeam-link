@@ -55,8 +55,8 @@ freeze additionally requires the last two P pictures' RPS bits to agree
   decode; next IDR resyncs exactly. Holds for first/middle/last slice, pairs,
   scattered pairs, all-four, at 512×512 and 1080p, WPP and no-WPP, SAO on and
   off, TMVP on and off.
-- Full production chain (`tools/spatial_conceal_bench`, IDR loss exempt as
-  ARQ would make it): 16% symbol loss → 0/40 frames dropped (23 salvaged,
+- Full production chain (`tools/spatial_conceal_bench`, IDR loss exempt —
+  concealment never applies to intra): 16% symbol loss → 0/40 frames dropped (23 salvaged,
   3 frozen); 31% → 0/40 (27 salvaged, 11 frozen). Every output decodes to
   full frame count on every decoder tried.
 - Cost: salvage (assembly + scan + synthesis) avg **97 µs**, max 211 µs per

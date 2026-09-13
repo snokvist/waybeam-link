@@ -5,9 +5,9 @@
 // VencFrameMeta prefix (§15.4), which FrameFramer fragments into k source
 // symbols and (per the §14.1 adaptive policy) r Cauchy-RS repair symbols.
 //
-// One frame = one block_id (§4). IDR importance is taken directly from the
-// metadata flag; optional all-frame P-ARQ is an explicit config mode (§4.1).
-// No NAL parsing: the [VencFrameMeta][Annex-B] blob remains opaque.
+// One frame = one block_id (§4). FEC class (IDR / enhance / P) is taken
+// directly from the metadata flags. No NAL parsing: the
+// [VencFrameMeta][Annex-B] blob remains opaque.
 //
 // Pure logic: time injected, emission is a callback, no sockets/clocks. A
 // reusable scratch buffer holds the zero-padded source symbols for the repair
@@ -37,7 +37,6 @@ struct FrameFecConfig {
     // the moment a producer switched preset. Note the min_r trap — 0 is the
     // only value that yields genuinely zero parity (see repair_count()).
     std::optional<uint16_t> e_rate_permille;
-    uint16_t min_k = 3;              // k <= min_k => ARQ-only (r = 0)
     // §14.1 (Pass 98) minimum repair floor: a FEC'd frame gets at least this
     // many repair symbols, so small frames are not left on r = ceil(k·rate)=1
     // (one loss from death). `ceil(1·rate)=1` for any rate ≤ 1000‰, so the
@@ -52,7 +51,6 @@ struct FrameFramerConfig {
     uint8_t stream_id = 0;
     uint8_t stream_type = stream_type::kRtp;
     uint16_t destination = 0;  // §3.1 advisory; 0 = broadcast
-    FrameArqMode arq_mode = FrameArqMode::kIdrOnly;
     FrameFecConfig fec;
 };
 
@@ -64,8 +62,6 @@ struct FrameFramerStats {
     uint64_t fec_oversize_k = 0;    // k + r_target > 256 => FEC disabled (§14.1)
     uint64_t mtu_fec_guard_frames = 0;  // §9.3a 16-equivalent repair guard
     uint64_t idr_frames = 0;
-    uint64_t arq_frames = 0;
-    uint64_t arq_cutoff_frames = 0;  // §4.1 Pass 40 high-cadence suppression
     // §14.1a: frames carrying the non-referenced flag. Its ratio to `frames`
     // is the observed droppable density — the only detector for producer/link
     // preset drift — so it counts whether or not e_rate is configured.
@@ -80,8 +76,8 @@ enum class FrameFecClass : uint8_t { kP = 0, kEnhance = 1, kIdr = 2 };
 class FrameFramer {
   public:
     // emit(frame, frame_len, hdr, now_ms): frame is valid only during the call;
-    // hdr carries the stamped fields for resend-ring bookkeeping (§5.2). Same
-    // contract as Framer::Emit.
+    // hdr carries the stamped fields for block bookkeeping. Same contract as
+    // Framer::Emit.
     using Emit = std::function<void(const uint8_t* frame, size_t frame_len,
                                     const DataHeader& hdr, uint64_t now_ms)>;
 
@@ -113,18 +109,16 @@ class FrameFramer {
 
     // §14.1 live FEC-rate retune (control plane §15.5). The scheme is fixed at
     // construction (rlc256 vs none is structural); only the per-mille repair
-    // overheads and the ARQ-only threshold move. Effective on the next frame.
+    // overheads and the minimum repair floor move. Effective on the next frame.
     void set_fec_rates(uint16_t i_permille, uint16_t p_permille,
-                       uint16_t min_k, uint16_t min_r,
+                       uint16_t min_r,
                        std::optional<uint16_t> e_permille = std::nullopt) {
         cfg_.fec.i_rate_permille = i_permille;
         cfg_.fec.p_rate_permille = p_permille;
         cfg_.fec.e_rate_permille = e_permille;  // §14.1a full replacement
-        cfg_.fec.min_k = min_k;
         cfg_.fec.min_r = min_r;
     }
     const FrameFecConfig& fec() const { return cfg_.fec; }
-    FrameArqMode arq_mode() const { return cfg_.arq_mode; }
 
     // §15.5 stats/reset: zero the cumulative counters (fresh measurement
     // window). State (seq, block id, operating point) is untouched.
@@ -143,30 +137,15 @@ class FrameFramer {
     uint16_t symbol_size() const;
 
     // §14.2 enforcement (Pass 38): one-shot override consumed by the NEXT
-    // on_frame. parity_symbols replaces the fixed §14.1 rate (GF(256)- and
-    // min_k-clamped); allow_pframe_arq=false clears PFRAME_ARQ stamping for
-    // that frame only. The IDR ARQ bit is never affected.
-    void set_next_frame_override(uint16_t parity_symbols,
-                                 bool allow_pframe_arq) {
+    // on_frame. parity_symbols replaces the fixed §14.1 rate (GF(256)-clamped).
+    void set_next_frame_override(uint16_t parity_symbols) {
         override_parity_ = parity_symbols;
-        override_allow_parq_ = allow_pframe_arq;
     }
 
-    // §4.1 Pass 40 high-cadence ARQ cutoff: while set, frames are stamped
-    // with neither ARQ nor PFRAME_ARQ (counted in arq_cutoff_frames).
-    // Sticky, driven from the TX cadence estimate each tick.
-    void set_arq_suppressed(bool on) { arq_suppressed_ = on; }
-
-    // §11.7 ARQ command — an independent cause from the Pass 40 cutoff so
-    // off/on composes with (never clears) the cadence suppression. Off ⇒
-    // neither ARQ nor PFRAME_ARQ is stamped; on restores boot behaviour.
-    void set_arq_enabled(bool on) { arq_enabled_ = on; }
-
   private:
-    // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off,
-    // ARQ-only (k <= min_k), or the k+r>256 cap trips (records fec_oversize_k).
-    // §14.1: arq_eligible gates the min_k ARQ-only rule (Pass 94).
-    uint16_t repair_count(uint16_t k, FrameFecClass cls, bool arq_eligible);
+    // r for a frame of k symbols per the §14.1 adaptive policy; 0 if FEC off
+    // or the k+r>256 cap trips (records fec_oversize_k).
+    uint16_t repair_count(uint16_t k, FrameFecClass cls);
 
     // §14.1/§14.1a per-class repair rate; kEnhance falls back to the P rate
     // when e_rate is unset. Shared by repair_count() and the §9.3a guard so
@@ -184,9 +163,6 @@ class FrameFramer {
     uint32_t next_seq_ = 0;
     uint32_t block_id_ = 0;
     std::optional<uint16_t> override_parity_;  // §14.2 one-shot (Pass 38)
-    bool override_allow_parq_ = true;
-    bool arq_suppressed_ = false;  // §4.1 Pass 40 (sticky)
-    bool arq_enabled_ = true;      // §11.7 ARQ command
 
     // Reusable scratch (amortised across frames): zero-padded source symbols
     // (k*s) for the repair computation, and one encode buffer.
@@ -194,7 +170,7 @@ class FrameFramer {
     std::vector<const uint8_t*> src_ptrs_;
     std::vector<uint8_t> src_payload_;     // 4-B source subheader + chunk
     std::vector<uint8_t> repair_payload_;  // 11-B subheader + s coded bytes
-    uint8_t frame_buf_[kDataHeaderSize + kMaxDataPayload];
+    uint8_t frame_buf_[kDataHeaderSize + kMaxDataPayload]{};
 };
 
 }  // namespace wblink

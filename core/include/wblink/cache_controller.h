@@ -57,8 +57,6 @@ struct CacheRepairStats {
     uint64_t blocks_repaired = 0;  // via note_completed()
     uint64_t blocks_futile = 0;    // §14.3 rule 4
     uint64_t requests_suppressed = 0;  // no eligible cache at attempt time
-    uint64_t nack_graces_armed = 0;
-    uint64_t blocks_repaired_before_nack = 0;
     uint32_t caches_fresh = 0;         // gauge
     CacheTimingStats request_to_first_reply;
     CacheTimingStats request_to_completion;
@@ -87,7 +85,6 @@ class CacheController {
     // Stamp only successfully submitted requests. This keeps local transport
     // failures out of the §15.3 latency distribution.
     void note_request_sent(uint32_t request_id, uint64_t now_us);
-    void note_nack_grace_armed() { ++stats_.nack_graces_armed; }
 
     enum class ReplyVerdict : uint8_t {
         kAccept,
@@ -104,8 +101,7 @@ class CacheController {
                           const DataView& wrapped, uint64_t now_us);
 
     // Attribution: the caller observed the block emit during a cache merge.
-    void note_completed(uint32_t block_id, uint64_t now_us,
-                        bool before_nack);
+    void note_completed(uint32_t block_id, uint64_t now_us);
 
     CacheRepairStats stats() const;
     void reset_stats();

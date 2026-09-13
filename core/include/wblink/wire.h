@@ -4,8 +4,8 @@
 // Every multi-byte field is big-endian (§0). Encoders write into a caller
 // buffer and return bytes written (0 = capacity/argument error). decode()
 // validates structure and returns either a typed packet or a DecodeError —
-// no exceptions, no allocation; DATA payload and NACK bitmap are returned as
-// views into the caller's buffer, valid only as long as that buffer.
+// no exceptions, no allocation; DATA payload is returned as a view into the
+// caller's buffer, valid only as long as that buffer.
 //
 // Policy checks (bitmap popcount clamp §5.3/§13, the 1424 B payload budget
 // §3.2/§5.1, the plausible-forward clamp §6.6) live in the consumers, not
@@ -48,21 +48,13 @@ struct DataView {
     uint16_t payload_len = 0;
 };
 
-// §3.3 NACK fixed part — prefix = the asking RX; target = the TX repaired.
-struct NackHeader {
+// §3.1/§3.3 (Pass 205): the retired NACK type's decode-only swallow. Type 0x2
+// is reserved; an old peer's NACK decodes here and every consumer drops it, so
+// it is neither a fault nor an alarm. No body fields are surfaced — the former
+// layout is no longer a wire contract.
+struct ReservedNack {
     CommonPrefix prefix;
-    uint16_t target_originator = 0;
-    uint32_t target_session = 0;
-    uint8_t target_stream_id = 0;
-    uint32_t base_seq = 0;
-    friend bool operator==(const NackHeader&, const NackHeader&) = default;
-};
-
-// Decoded NACK: fixed part + SACK bitmap view (bit i => base_seq+i missing).
-struct NackView {
-    NackHeader hdr;
-    const uint8_t* bitmap = nullptr;  // nullptr iff bitmap_len == 0
-    uint8_t bitmap_len = 0;
+    friend bool operator==(const ReservedNack&, const ReservedNack&) = default;
 };
 
 // §3.5 LINK_REPORT (fixed 39 bytes).
@@ -315,7 +307,7 @@ enum class DecodeError : uint8_t {
 };
 
 // index 0 = error; otherwise one decoded packet.
-using Decoded = std::variant<DecodeError, DataView, NackView, LinkReport,
+using Decoded = std::variant<DecodeError, DataView, ReservedNack, LinkReport,
                              Heartbeat, CsaPacket, RecoveryRequest,
                              JsccFeedback, CacheStatus, CacheRequestView,
                              CacheReplyView, Announce, CacheAssign, VehicleCmd,
@@ -330,8 +322,6 @@ Decoded decode(const uint8_t* buf, size_t len);
 // argument is inconsistent (e.g. payload == nullptr with payload_len > 0).
 size_t encode_data(const DataHeader& hdr, const uint8_t* payload,
                    uint16_t payload_len, uint8_t* out, size_t cap);
-size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
-                   uint8_t bitmap_len, uint8_t* out, size_t cap);
 size_t encode_link_report(const LinkReport& pkt, uint8_t* out, size_t cap);
 
 // Rewrite `report_epoch` in an already-encoded LINK_REPORT frame. §3.5 says

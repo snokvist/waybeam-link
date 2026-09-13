@@ -13,6 +13,11 @@
 > walk now supports a 100/100-per-mille N=2 monitor campaign profile; the
 > normative adaptive seeds remain independently configurable. Sections below
 > are the original planning text, kept for provenance.
+>
+> **Pass 205 (2026-09-13):** the ARQ fallback and the `k <= min_k` ARQ-only
+> gate described below were removed. Every referenced frame now carries its
+> class FEC rate at every `k` (`r = max(ceil(k·rate), min_r)`); `rate = 0`
+> still means bare. Read the ARQ halves of this plan as historical.
 
 Plan for frame-sized FEC block emissions with ARQ fallback for small frames.
 This document was a planning artifact — the PROTOCOL.md amendment and code

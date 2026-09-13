@@ -237,13 +237,10 @@ int main() {
         // Allowance (deficit 2) exhausted.
         CHECK(cc.on_reply(33, rid, view_of(ok), 111300) ==
               CacheController::ReplyVerdict::kOverAllowance);
-        cc.note_nack_grace_armed();
-        cc.note_completed(10, 112500, true);
+        cc.note_completed(10, 112500);
         CHECK_EQ_U(cc.stats().blocks_repaired, 1);
         CHECK_EQ_U(cc.stats().symbols_accepted, 2);
         CHECK_EQ_U(cc.stats().symbols_rejected, 5);
-        CHECK_EQ_U(cc.stats().nack_graces_armed, 1);
-        CHECK_EQ_U(cc.stats().blocks_repaired_before_nack, 1);
         CHECK_EQ_U(cc.stats().request_to_first_reply.samples, 1);
         CHECK_EQ_U(cc.stats().request_to_first_reply.p95_us, 1000);
         CHECK_EQ_U(cc.stats().request_to_first_reply.max_us, 1000);

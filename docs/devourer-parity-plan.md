@@ -163,7 +163,7 @@ H1 below.
 setters did nothing on radio, so a sweep never widened (a craft on another
 net_id was never discovered, while the scout reported clean) and a claim left
 the ground stamping its **boot** net_id, which the craft's §3.0 filter then
-dropped — breaking ARQ and the CSA campaign with no error at either end. The
+dropped — breaking the return path (then ARQ, now LINK_REPORT/JSCC) and the CSA campaign with no error at either end. The
 `if (mon)`-with-no-`else` shape was removed by Pass 140; Pass 142 supplied the
 answer behind the declaration.
 

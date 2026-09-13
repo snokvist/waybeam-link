@@ -43,6 +43,12 @@
 > leaving the ranking alone closes every checkbox and changes nothing. The
 > ranking move is now explicit in that issue.
 
+> **ARQ removed (Pass 205, 2026-09-13):** the importance-gated ARQ referenced in
+> §5 and the NACK-triggered hardware-ACK loop in §2's analysis are historical.
+> The hardware-ACK hybrid (`air.ack_responder` + `return.unicast`) stays — it is
+> the §3.0 return-path plane, not the deleted NACK/retransmit plane — but there
+> is no application NACK to arm it now.
+
 **Investigation only. No spec ruling is made here**, so there is no
 `docs/review-log.md` Pass entry attached. Every item under "Open decisions" is
 deferred to an operator ruling; when one is made it commits first as a spec

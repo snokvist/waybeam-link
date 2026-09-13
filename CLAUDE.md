@@ -4,7 +4,8 @@ A best-effort, latency-first broadcast video + telemetry link over raw
 injection WiFi (RTL8812AU/CU/EU, plus RTL8733BU minus TX-power actuation and
 CCX wedge detection — §10.5 Pass 171 / §9.10 Pass 170 — via vendored OpenIPC
 devourer), with per-adapter
-RX diversity as primary redundancy, opt-in importance-gated ARQ, an adaptive
+RX diversity as primary redundancy, FEC plus spatial cache repair and slice
+concealment, an adaptive
 link layer, and a follow-me channel switch. See `README.md` for the full pitch
 and current status.
 
@@ -64,7 +65,7 @@ before merge instead of stacking a correction on top.
   is **silently ignored**. `--check` passing proves the config parses, not that
   it says what you meant. See "Authoring configs" below.
   `waybeam-link config-schema --json` prints the declared key surface
-  (`io/src/config_registry.cpp`, 283 keys) so a key can be checked without
+  (`io/src/config_registry.cpp`, 262 keys) so a key can be checked without
   reading the loader. The registry is not a second source of truth:
   `tests/config_registry_test.py` reconstructs every accessor site in
   `config.cpp` and fails the build if the two disagree in either direction.
@@ -121,7 +122,7 @@ Current phase order (operator direction, 2026-08-06): **consolidate → expand
 
 ## Authoring configs
 
-Node configs are dense (283 registered keys, `config-schema --json`) and
+Node configs are dense (262 registered keys, `config-schema --json`) and
 **coupled across nodes**: the
 cache's `store.controller.endpoint` must equal the owning ground's
 `cache.repair.listen`, the ground's `cache.repair.caches[]` must name the
@@ -162,7 +163,7 @@ scripts/gates.sh            # EVERY merge gate; what CI runs. --quick = dev + ct
 ```
 
 Run that rather than a remembered checklist. It covers the eight presets, the
-71-suite `ctest`, the B7 embed check, the B10 node link check (built AND run), the install/`find_package` round trip and
+84-suite `ctest`, the B7 embed check, the B10 node link check (built AND run), the install/`find_package` round trip and
 the `deploy/*.json` `--check`s, and it **fails on a diagnostic for our
 targets even when the build exits 0**. Toolchains the host lacks are SKIPPED
 loudly and counted separately — a skip is never a pass. Export
@@ -174,7 +175,7 @@ drift.
 The individual commands, when you want one of them:
 
 ```
-cmake --build --preset dev && ctest --preset dev   # 83 suites, ASan+UBSan
+cmake --build --preset dev && ctest --preset dev   # 84 suites, ASan+UBSan
 cmake --build --preset ssc338q                      # ARMv7 cross (SigmaStar target)
 cmake --build --preset cv610                        # ARMv7 soft-float (HiSilicon target)
 ```
@@ -288,8 +289,8 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
 
 ## Layout
 
-- `core/` — pure protocol logic: wire codec, table hashing, RX engine, ring,
-  scheduler, quiet-gap pacer, adaptive selector, CSA. No sockets/threads/wall
+- `core/` — pure protocol logic: wire codec, table hashing, RX engine,
+  quiet-gap pacer, adaptive selector, CSA. No sockets/threads/wall
   clocks; time is injected. Zero dependencies beyond the C++ stdlib — this is
   the piece vendored whole into consumers (Android `:wifi`), so it must stay
   32-bit-clean and dependency-free.
@@ -344,7 +345,7 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   `rx_core.h` (`RxCore` + `rx_policy()`), `discovery.h` (`DiscoveryCatalog`,
   `ScoutEngine`), `air_backend.h` (`AirBackend`, `PacketEventTrace`),
   `tx_core.h` (`TxCore` + the §15.2->core policy adapters), `stats_fill.h`
-  (`emit_stats`, `ArqTimingTracker`, the §15.5 `/info` + `/health` payloads),
+  (`emit_stats`, the §15.5 `/info` + `/health` payloads),
   `uplink_power.h` (`UplinkPower` — the §10.3/§10.5/§10.7/§11.7 0x0A
   precedence chain), `policy.h` (`csa_params`, `vcmd_params`,
   `quietgap_policy`, `channel_allowed`), `vcmd.h` (§15.5 REST names ↔ §11.7
@@ -380,7 +381,7 @@ is the gate, not the IDE — don't chase a squiggle the build doesn't reproduce.
   (`calibrate`, `calib_dwell`, `uplink_calibrate`) hand-roll their own verdict
   and are named as uncovered rather than folded into a reassuring total.
 - `tools/` — bench analyzers: `gate2_rho.py` (cross-adapter loss correlation),
-  `gate3_rtt.py` (NACK→RETRANSMIT latency), `rtp_feed.py` (synthetic RTP feeder).
+  `rtp_feed.py` (synthetic RTP feeder).
 - `profiles/` — the §9.3 operating-point table (data, not code).
 - `examples/` — sample configs (loopback, udp-air tx/rx, radio tx/rx,
   frame-shm tx/rx).

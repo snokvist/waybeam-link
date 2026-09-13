@@ -32,10 +32,7 @@ add_wb_test(jscc_loss_estimator_test)
 add_wb_test(jscc_runtime_shadow_test)
 add_wb_test(clamp_test)
 add_wb_test(framer_test)
-add_wb_test(nal_test)
-add_wb_test(ring_test)
 add_wb_test(rx_test)
-add_wb_test(scheduler_test)
 add_wb_test(selector_test)
 add_wb_test(selector_state_test)
 add_wb_test(reporter_test)
@@ -177,9 +174,9 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-    add_test(NAME expand_arq_topology_test
+    add_test(NAME expand_udp_topology_test
              COMMAND ${Python3_EXECUTABLE}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/expand_arq_topology_test.py)
+                     ${CMAKE_CURRENT_SOURCE_DIR}/expand_udp_topology_test.py)
     add_test(NAME link_monitor_test
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/link_monitor_test.py)

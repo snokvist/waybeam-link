@@ -115,16 +115,6 @@ void test_fill_stats_on_an_idle_node() {
     rx.fill_stats(snap, 2000);
 }
 
-// §3.4: a block with no NACK against it has none recorded. The accessor is
-// const and takes (stream, block), and an unknown stream must answer false
-// rather than fabricate an entry — the ARQ scheduler reads this to decide
-// whether a repair is already in flight.
-void test_unknown_block_has_no_nack() {
-    RxCore rx(rx_config(), 12345, nullptr, std::nullopt);
-    CHECK(!rx.block_had_nack(0, 0));
-    CHECK(!rx.block_had_nack(7, 4242));
-}
-
 // §15.3 Pass 186: the six probe_* fields describe THIS receiver's own §9.4
 // window, which is fed by our on_data() and owes nothing to the craft's §3.15
 // selector word. They were briefly filled inside the `selector_source_current
@@ -236,7 +226,7 @@ int main() {
     test_select_originator_pins_a_want_but_never_the_latch();
     test_spectator_emits_no_recovery();
     test_fill_stats_on_an_idle_node();
-    test_unknown_block_has_no_nack();
+
     test_probe_fields_do_not_depend_on_the_craft_selector_word();
     test_best_ear_hold_does_not_leak_across_streams();
     return wbtest_finish("node_rx_core_test");

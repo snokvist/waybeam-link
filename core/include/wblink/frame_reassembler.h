@@ -39,14 +39,9 @@ struct FrameReassemblerStats {
     uint64_t frames_fec = 0;       // recovered via FEC
     uint64_t frames_egress_rejected = 0;  // reconstructed, local sink refused
     // Recovery attribution for successfully delivered frames only. A symbol
-    // is counted once, when its block completes; duplicate retransmits do not
-    // inflate these counters.
+    // is counted once, when its block completes.
     uint64_t fec_recovered_source_symbols = 0;
-    uint64_t arq_recovered_source_symbols = 0;
-    uint64_t arq_recovered_repair_symbols = 0;
-    uint64_t frames_with_arq = 0;
     uint64_t frames_fec_only = 0;
-    uint64_t frames_fec_after_arq = 0;
     uint64_t frames_superseded = 0;
     uint64_t frames_deadline = 0;
     uint64_t frames_unrecoverable = 0;  // finalized with < k, no way to decode
@@ -128,8 +123,8 @@ class FrameReassembler {
     // Feed one deduped DATA symbol of this stream. is_repair from
     // data_flags & FEC_REPAIR; eob from data_flags & END_OF_BLOCK.
     // Returns true exactly when this symbol completes and attempts to emit the
-    // block. A rejected local egress still retires packet-level ARQ because
-    // retransmitting an already-complete radio block cannot repair it.
+    // block. A rejected local egress still retires the block: a later copy of
+    // an already-complete radio block cannot repair it.
     bool push(uint32_t block_id, uint8_t flags, const uint8_t* payload,
               size_t payload_len, uint64_t now_ms, const Emit& emit,
               bool air_path = true);
@@ -168,11 +163,6 @@ class FrameReassembler {
         std::map<uint16_t, std::vector<uint8_t>> sources;
         // repair_idx -> s coded bytes.
         std::map<uint8_t, std::vector<uint8_t>> repairs;
-        // Unique rows first admitted with the RETRANSMIT flag. These are kept
-        // separate from packet-sequence recovery so frame completion can
-        // attribute the exact source/repair rows that contributed.
-        std::set<uint16_t> arq_sources;
-        std::set<uint8_t> arq_repairs;
         // Air-only attribution for the §14.2 demand estimator. Cache symbols
         // still complete `sources`/`repairs`, but must remain losses here.
         std::set<uint16_t> air_sources;

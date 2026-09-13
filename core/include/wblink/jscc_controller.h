@@ -9,9 +9,7 @@ namespace wblink {
 enum class JsccReason : uint8_t {
     kDeadlineUnreachable,
     kFecCapacityLimited,
-    kFecAndArq,
     kFecOnly,
-    kArqOnly,
     kUnprotected,
 };
 
@@ -23,16 +21,11 @@ struct JsccInnerInput {
     uint32_t deadline_us = 0;
     uint32_t elapsed_us = 0;
     uint32_t source_tx_remaining_us = 0;
-    uint32_t rtt_p95_us = 0;
-    uint32_t resend_airtime_us = 0;
-    uint32_t arq_guard_us = 0;
-    bool arq_capable = false;
 };
 
 struct JsccInnerDecision {
     uint16_t parity_symbols = 0;
     uint32_t remaining_after_source_us = 0;
-    bool arq_eligible = false;
     bool discard = false;
     bool fec_capacity_limited = false;
     JsccReason reason = JsccReason::kUnprotected;

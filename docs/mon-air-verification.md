@@ -4,8 +4,11 @@
 > deleted in **Pass 164** (2026-08-08, ruling #120 item 3 amended from
 > "relocate" to "drop"); `air.kind: "kernel-monitor"` no longer loads. This
 > file is kept because the **core** ARQ/broadcast verification it reports was
-> backend-independent and still stands. Nothing here describes a live
-> configuration — do not copy a config or a bring-up step out of it.
+> backend-independent and still stands — though its **ARQ half is historical
+> too: the NACK/retransmit plane was removed in Pass 205** (2026-09-13), so the
+> `nack_rtt`/`arq_rec` gates below no longer describe a live mechanism. Nothing
+> here describes a live configuration — do not copy a config or a bring-up step
+> out of it.
 
 Bench report for the `kernel-monitor` air backend (`MonAir`, PR #15) and the
 core ARQ/broadcast verification it enabled. Companion to `docs/step11-bench.md`.
@@ -110,7 +113,7 @@ range may be evaluated, but static 33% is not justified by this result.
 ### Gate 3 — NACK→RETRANSMIT round-trip (RF-proven, PASS)
 Live vehicle→desk link, all-IDR feed (every loss is ARQ-class), 15% synthetic
 ground loss to force gaps. Ground NACKs over RF → craft resends (802) → ground
-recovers; `tools/gate3_rtt.py` over the run:
+recovers; `~~tools/gate3_rtt.py~~ (removed Pass 205)` over the run:
 
 | distribution | P50 | P90 | max | vs deadline |
 |---|---|---|---|---|

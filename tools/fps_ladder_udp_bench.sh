@@ -64,7 +64,7 @@ cat >"$TMP/tx.json" <<EOF
   "streams": [{"stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": {"kind": "frame-shm", "name": "$IN_RING"},
     "fec": {"scheme": "rlc256", "i_rate_permille": 250,
-            "p_rate_permille": 100, "min_k": 3}}],
+            "p_rate_permille": 100}}],
   "air": {"kind": "udp", "tx": ["127.0.0.1:$D0"], "rx": ["127.0.0.1:$RET"]},
   "policy": {"select": $SELECT},
   "venc": {"host": "127.0.0.1:$VENCP", "enabled": true, "fps_hint": $FPS,

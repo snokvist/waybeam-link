@@ -5,7 +5,8 @@ A runbook for turning Pass 198 on. **First bench session ran 2026-08-30**
 is settled, the §6 A/B is measured, and the §7 storm guard is proven. Sections
 carry their results inline; what remains open is named in §9. The §4.4 numbers
 everyone quotes (86.9 % → 99.9 % at 3000 pps) were
-measured with retry 8, a never-expiring latch, and NACK/LINK_REPORT only —
+measured with retry 8, a never-expiring latch, and NACK/LINK_REPORT only (the
+NACK half was removed with the ARQ plane, Pass 205) —
 all three have since changed, so §4.4 is context, not a baseline you can
 compare against.
 
@@ -266,7 +267,8 @@ healthy hybrid (arm D) the difference is inside noise: 5 ‰ @3 vs 6 ‰ @8,
 
 **Watch the channel.** The live ground config's `policy.csa.home_chan` was
 5700, which silently latched craft **19** (`.181`) with `table_version 164`
-against the ground's 242 — that forces §3.4 BEST-EFFORT, which disables ARQ,
+against the ground's 242 — that forces §3.4 BEST-EFFORT, which disables
+supersession and deadline drops (§3.4, Pass 205),
 and the return path measures nothing. Pin `adapters.auto.channel` and
 `node.preferred_originator` to the craft you mean.
 

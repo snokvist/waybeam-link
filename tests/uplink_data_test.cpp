@@ -277,10 +277,10 @@ void wire_round_trip_ground_to_craft() {
     if (dv == nullptr) {
         return;
     }
-    // §7.5 stamps: one-datagram-one-block (EOB, no ARQ), profile fields 0.
+    // §7.5 stamps: one-datagram-one-block (EOB, no repair), profile fields 0.
     CHECK(dv->hdr.stream_type == stream_type::kControl);
     CHECK((dv->hdr.data_flags & data_flags::kEndOfBlock) != 0);
-    CHECK((dv->hdr.data_flags & data_flags::kArq) == 0);
+    CHECK((dv->hdr.data_flags & data_flags::kRetransmit) == 0);
     CHECK(dv->hdr.active_profile == 0 && dv->hdr.table_version == 0);
     CHECK(dv->hdr.prefix.originator == 9);
 

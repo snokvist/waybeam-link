@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// The TX node: framers, the send ring, the §9 selector, §10 power ownership,
+// The TX node: framers, the §9 selector, §10 power ownership,
 // §10.6 calibration and the §11.7 command surface — fourth and largest move of
 // the node/ layer (issue #109 Phase 2a).
 //
@@ -35,7 +35,6 @@
 #include "wblink/mcs_probe.h"
 #include "wblink/frame_shm.h"
 #include "wblink/framer.h"
-#include "wblink/scheduler.h"
 #include "wblink/config.h"
 #include "wblink/node/aim.h"
 #include "wblink/node/clock.h"
@@ -51,20 +50,6 @@ namespace node {
 
 inline uint8_t bw_code(uint8_t width_mhz) {
     return width_mhz >= 80 ? 2 : width_mhz >= 40 ? 1 : 0;
-}
-
-inline SchedulerPolicy scheduler_policy(const Config& cfg) {
-    SchedulerPolicy p;
-    p.holddown_ms = cfg.policy.arq.holddown_ms;
-    p.attempt_cap = cfg.policy.arq.attempt_cap;
-    p.airtime_frac = cfg.policy.arq.airtime_frac;
-    p.preferred_originator = cfg.node.preferred_originator;
-    p.release_timeout_ms = cfg.policy.arq.release_timeout_ms;
-    p.min_recoverable_ms = cfg.policy.arq.min_recoverable_ms;
-    p.interval_ms = cfg.policy.arq.budget_interval_ms;
-    p.max_block_pkts = cfg.policy.arq.max_block_pkts;
-    p.budget_floor_bytes = cfg.policy.arq.budget_floor_bytes;
-    return p;
 }
 
 inline uint32_t s_to_ms(double s) {
@@ -142,8 +127,6 @@ struct TxCore {
         std::optional<Framer> framer;             // udp ingress
         std::optional<FrameFramer> frame_framer;  // frame-shm ingress
         std::optional<JsccRuntimeShadow> jscc_shadow;
-        ResendRing ring;
-        ResendScheduler sched;
         JsccShadowResult jscc_latest;
         uint64_t jscc_decision_frames = 0;
         uint64_t jscc_valid_decisions = 0;
@@ -169,7 +152,6 @@ struct TxCore {
           selector_(selector_policy(cfg), table),
           venc_(cfg.venc),
           venc_knobs_(cfg.venc),
-          arq_max_fps_(cfg.policy.arq.arq_max_fps),
           mtu_supported_(mtu_supported),
           boot_min_profile_(cfg.policy.select.min_profile),
           boot_max_profile_(cfg.policy.select.max_profile),
@@ -233,12 +215,8 @@ struct TxCore {
             if (s.dir != Dir::kIn) {
                 continue;
             }
-            RingConfig rc;
-            rc.window_ms = cfg.policy.arq.ring_window_ms;
-            rc.byte_budget = cfg.policy.arq.ring_byte_budget;
             Stream st{s.stream_id, s.stream_type, std::nullopt, std::nullopt,
-                      std::nullopt, ResendRing(rc),
-                      ResendScheduler(scheduler_policy(cfg), table), {}, 0, 0, 0};
+                      std::nullopt, {}, 0, 0, 0};
             if (s.bind.kind == BindKind::kFrameShm) {
                 // §5.1a: whole-frame ingress from a venc SHM ring. FEC policy
                 // comes from the stream's fec block; MTU from the floor rung.
@@ -247,12 +225,10 @@ struct TxCore {
                 fc.session_id = session;
                 fc.stream_id = s.stream_id;
                 fc.stream_type = s.stream_type;
-                fc.arq_mode = s.arq_mode;
                 fc.fec.scheme = s.fec.scheme;
                 fc.fec.i_rate_permille = s.fec.i_rate_permille;
                 fc.fec.p_rate_permille = s.fec.p_rate_permille;
                 fc.fec.e_rate_permille = s.fec.e_rate_permille;  // §14.1a
-                fc.fec.min_k = s.fec.min_k;
                 fc.fec.min_r = s.fec.min_r;
                 st.frame_framer.emplace(fc);
                 st.frame_framer->set_operating_point(0, table_version,
@@ -263,8 +239,7 @@ struct TxCore {
                     const JsccShadowCfg& jc = *s.jscc_shadow;
                     st.jscc_shadow.emplace(JsccRuntimeShadowConfig{
                         jc.fec_floor_permille, jc.fec_cap_permille,
-                        jc.arq_guard_us, jc.feedback_timeout_ms,
-                        jc.min_rtt_samples});
+                        jc.feedback_timeout_ms});
                     st.jscc_enforce = jc.enforce;  // §14.2 Pass 38
                 }
             } else {
@@ -273,9 +248,6 @@ struct TxCore {
                 fc.session_id = session;
                 fc.stream_id = s.stream_id;
                 fc.stream_type = s.stream_type;
-                fc.classifier = s.classifier;
-                fc.classifier_size_threshold =
-                    cfg.policy.arq.classifier_size_threshold;
                 st.framer.emplace(fc);
                 st.framer->set_operating_point(0, table_version);
             }
@@ -307,13 +279,15 @@ struct TxCore {
                         negotiated_packet_budget_);
     }
 
-    uint32_t frame_deadline_us(bool is_idr) const {
+    // §8 (Pass 205): one uniform budget per block, min(iframe, pframe) of the
+    // retained profile fields — the class split left with ARQ. Fed to JSCC.
+    uint32_t frame_deadline_us() const {
         if (table_ == nullptr) return 0;
         const uint8_t active = selector_.profile_id();
         for (const Profile& p : table_->profiles) {
             if (p.id != active) continue;
-            const uint16_t ms = is_idr ? p.arq_deadline_iframe_ms
-                                       : p.arq_deadline_pframe_ms;
+            const uint16_t ms = std::min(p.arq_deadline_iframe_ms,
+                                         p.arq_deadline_pframe_ms);
             return static_cast<uint32_t>(ms) * 1000u;
         }
         return 0;
@@ -329,9 +303,9 @@ struct TxCore {
                 d, n, now,
                 [&](const uint8_t* frame, size_t len, const DataHeader& hdr,
                     uint64_t t) {
+                    (void)hdr;
+                    (void)t;
                     inject(frame, len);
-                    s.ring.push(frame, len, hdr, t);
-                    s.sched.note_live_bytes(len);
                 });
             return;
         }
@@ -372,27 +346,15 @@ struct TxCore {
                 const size_t source_bytes =
                     len + static_cast<size_t>(k) *
                               (kDataHeaderSize + kFecSourceSubheaderSize);
-                const size_t resend_bytes =
-                    kDataHeaderSize + kFecSourceSubheaderSize + symbol;
                 const uint16_t source_packet_budget = static_cast<uint16_t>(
                     symbol + kDataHeaderSize + kFecSourceSubheaderSize);
                 JsccShadowFrameInput input;
                 input.source_k = k;
-                input.deadline_us = frame_deadline_us(idr);
-                // §14.1a: a non-referenced frame is never ARQ-eligible, so the
-                // shadow must not model an ARQ that cannot occur.
-                input.arq_capable =
-                    (idr || (s.frame_framer->arq_mode() ==
-                                 FrameArqMode::kAllFrames &&
-                             !enhance)) &&
-                    !arq_fps_suppressed_;  // §4.1 Pass 40 cutoff
+                input.deadline_us = frame_deadline_us();
                 input.now_ms = now;
                 if (estimate_airtime) {
                     input.source_tx_remaining_us =
                         estimate_airtime(source_bytes, true,
-                                         source_packet_budget);
-                    input.resend_airtime_us =
-                        estimate_airtime(resend_bytes, false,
                                          source_packet_budget);
                 }
                 s.jscc_latest = s.jscc_shadow->evaluate(input);
@@ -408,18 +370,16 @@ struct TxCore {
                     if (enhance) {
                         // §14.2 (Pass 149, operator ruling): non-referenced
                         // frames are exempt from enforcement ENTIRELY — no
-                        // parity replacement (rule 1), no deadline discard
-                        // (rule 2), and rule 3 is moot since §14.1a makes the
-                        // class ARQ-ineligible. The shadow still evaluated it
-                        // above, so telemetry stays comparable.
+                        // parity replacement (rule 1) and no deadline discard
+                        // (rule 2). The shadow still evaluated it above, so
+                        // telemetry stays comparable.
                         ++s.jscc_exempt_frames;
                     } else if (s.jscc_latest.decision.discard) {
                         ++s.jscc_discarded_frames;  // rule 2: drop, not queue
                         return;
                     } else {
                         s.frame_framer->set_next_frame_override(
-                            s.jscc_latest.decision.parity_symbols,
-                            s.jscc_latest.decision.arq_eligible);
+                            s.jscc_latest.decision.parity_symbols);
                         ++s.jscc_enforced_frames;
                     }
                 }
@@ -428,16 +388,15 @@ struct TxCore {
                 blob, len, now,
                 [&](const uint8_t* frame, size_t flen, const DataHeader& hdr,
                     uint64_t t) {
+                    (void)hdr;
+                    (void)t;
                     inject(frame, flen);
-                    s.ring.push(frame, flen, hdr, t);
-                    s.sched.note_live_bytes(flen);
                 });
             return;
         }
     }
 
-    // Air packets heard back (uplink): NACKs feed the scheduler, LINK_REPORTs
-    // feed the §9 selector.
+    // Air packets heard back (uplink): LINK_REPORTs feed the §9 selector.
     // rx_rssi/rx_mcs are the AirRxMeta of the frame carrying this packet —
     // §3.16 needs both at the accepted-LINK_REPORT point. Defaulted so the
     // loopback path, which has no PHY, stays a one-line call.
@@ -455,22 +414,6 @@ struct TxCore {
                 if (s.stream_id == f->target_stream_id && s.jscc_shadow) {
                     s.jscc_shadow->observe_feedback(*f, now);
                     return false;
-                }
-            }
-            return false;
-        }
-        if (const NackView* nack = std::get_if<NackView>(&dec)) {
-            if (nack->hdr.target_originator != originator_ ||
-                nack->hdr.target_session != session_) {
-                return false;
-            }
-            if (!cmd_arq_enabled_) {
-                return false;  // §11.7 ARQ off: serve no NACKs
-            }
-            for (Stream& s : streams_) {
-                if (s.stream_id == nack->hdr.target_stream_id) {
-                    s.sched.on_nack(*nack, s.ring, now);
-                    return true;
                 }
             }
             return false;
@@ -620,17 +563,10 @@ struct TxCore {
         return false;
     }
 
-    void drain_resends(uint64_t now, const Inject& inject_resend) {
-        for (Stream& s : streams_) {
-            s.ring.evict(now);
-            s.sched.drain(s.ring, now, [&](const uint8_t* f, size_t l) {
-                inject_resend(f, l);
-            });
-        }
-    }
-
-    void tick(uint64_t now, const Inject& inject,
-              const Inject& inject_resend = {}) {
+    void tick(uint64_t now, const Inject& inject) {
+        // Pass 205: the resend scheduler is gone, so tick no longer injects;
+        // the framer callbacks own every emission.
+        (void)inject;
         const SelectorActions act = selector_.tick(now);
         // §9.4 Pass 186/187: re-derive the probe candidate through the live
         // table, the live §9.7 pin and the live §9.2 lockout. Per tick rather
@@ -720,20 +656,6 @@ struct TxCore {
             // command. Cleared when FPS_LADDER on takes back ownership.
             venc_.set_fps(cmd_fps_select_hz_);
         }
-        // §4.1 Pass 40 high-cadence ARQ cutoff, driven by the same cadence
-        // input the §9.6 cadence estimate uses (ladder-commanded, else measured, else
-        // hint). Sticky on the framers until the cadence drops back.
-        {
-            const uint32_t snapped = snap_frame_period_us(cadence_period_us());
-            arq_fps_suppressed_ = arq_max_fps_ != 0 && snapped != 0 &&
-                                  snapped < 1000000u / arq_max_fps_;
-            for (Stream& s : streams_) {
-                if (s.frame_framer) {
-                    s.frame_framer->set_arq_suppressed(arq_fps_suppressed_);
-                }
-            }
-        }
-        drain_resends(now, inject_resend ? inject_resend : inject);
     }
 
     void set_pressure(bool on, uint64_t now) {  // §9.9 gauge (step 9+ feeds it)
@@ -764,19 +686,10 @@ struct TxCore {
     void report_authority_set(uint16_t originator, uint64_t now_ms) {
         report_gate_.force_latch(originator, now_ms);
         feedback_gate_.force_latch(originator, now_ms);
-        // §12 Pass 116: repairs follow the claim too, per-stream — the
-        // scheduler owns one lock each. Soft: an actively-NACKing node
-        // reclaims via contested release, unlike the report latch.
-        for (Stream& s : streams_) {
-            s.sched.force_lock(originator);
-        }
     }
     void report_authority_clear() {
         report_gate_.clear_latch();
         feedback_gate_.clear_latch();
-        for (Stream& s : streams_) {
-            s.sched.release_lock();
-        }
     }
     bool report_authority_overridable() const {
         return report_gate_.overridable();
@@ -863,7 +776,7 @@ struct TxCore {
     // §14.1 live FEC-rate retune for a frame-shm stream. Returns false if the
     // stream_id is unknown or is not a frame-shm (FrameFramer) stream.
     bool set_stream_fec(uint8_t stream_id, uint16_t i_permille,
-                        uint16_t p_permille, uint16_t min_k, uint16_t min_r,
+                        uint16_t p_permille, uint16_t min_r,
                         std::optional<uint16_t> e_permille) {
         for (Stream& s : streams_) {
             if (s.stream_id != stream_id) {
@@ -872,7 +785,7 @@ struct TxCore {
             if (!s.frame_framer) {
                 return false;  // udp stream: no per-stream FEC (§15.2)
             }
-            s.frame_framer->set_fec_rates(i_permille, p_permille, min_k, min_r,
+            s.frame_framer->set_fec_rates(i_permille, p_permille, min_r,
                                           e_permille);
             return true;
         }
@@ -895,18 +808,6 @@ struct TxCore {
     // unknown cmd_id, out-of-range arg, or unconfigured actuator.
     bool apply_command(uint8_t cmd_id, uint8_t arg, uint64_t now) {
         switch (cmd_id) {
-            case vcmd_id::kArq:
-                if (arg > 1) return false;
-                cmd_arq_enabled_ = arg != 0;
-                for (Stream& s : streams_) {
-                    if (s.framer) {
-                        s.framer->set_arq_enabled(cmd_arq_enabled_);
-                    }
-                    if (s.frame_framer) {
-                        s.frame_framer->set_arq_enabled(cmd_arq_enabled_);
-                    }
-                }
-                return true;  // all-off boot config ⇒ acked no-op (§11.7)
             case vcmd_id::kSelector:
                 if (arg > 1) return false;
                 cmd_selector_frozen_ = arg != 0;
@@ -1097,7 +998,6 @@ struct TxCore {
     // return path is bursty by construction — one report per video EOB gap,
     // so gaps are normal and only the aggregate rate is meaningful.
 
-    bool cmd_arq_enabled() const { return cmd_arq_enabled_; }
     bool cmd_selector_frozen() const { return cmd_selector_frozen_; }
     bool cmd_fps_ladder() const {
         return fps_ladder_.has_value() && cmd_fps_enabled_;
@@ -1125,7 +1025,6 @@ struct TxCore {
                 s.jscc_discarded_frames = 0;
                 s.jscc_exempt_frames = 0;
             }
-            s.sched.reset_counters();
         }
         reports_received_ = 0;
     }
@@ -1152,9 +1051,6 @@ struct TxCore {
                 st.mtu_fec_guard_frames =
                     s.frame_framer->stats().mtu_fec_guard_frames;
                 st.idr_frames = s.frame_framer->stats().idr_frames;
-                st.arq_frames = s.frame_framer->stats().arq_frames;
-                st.arq_cutoff_frames =
-                    s.frame_framer->stats().arq_cutoff_frames;
                 st.fec_enhance_frames =
                     s.frame_framer->stats().fec_enhance_frames;  // §14.1a
             }
@@ -1174,13 +1070,9 @@ struct TxCore {
                 st.jscc_input_cap_symbols = js.input.fec_cap_symbols;
                 st.jscc_input_deadline_us = js.input.deadline_us;
                 st.jscc_input_source_tx_us = js.input.source_tx_remaining_us;
-                st.jscc_input_rtt_p95_us = js.input.rtt_p95_us;
-                st.jscc_input_resend_us = js.input.resend_airtime_us;
-                st.jscc_input_guard_us = js.input.arq_guard_us;
                 st.jscc_output_parity_symbols = js.decision.parity_symbols;
                 st.jscc_output_remaining_us =
                     js.decision.remaining_after_source_us;
-                st.jscc_output_arq_eligible = js.decision.arq_eligible;
                 st.jscc_output_discard = js.decision.discard;
                 st.jscc_feedback_epoch = js.feedback_epoch;
                 st.jscc_feedback_age_ms = js.feedback_age_ms;
@@ -1188,10 +1080,6 @@ struct TxCore {
                 st.jscc_discarded_frames = s.jscc_discarded_frames;
                 st.jscc_exempt_frames = s.jscc_exempt_frames;
             }
-            st.resends_sent = s.sched.counters().resends_sent;
-            st.arq_lock_holder = s.sched.counters().lock_holder;
-            st.double_send_suppressed =
-                s.sched.counters().holddown_suppressed;
             st.active_profile = selector_.profile_id();
             st.table_version = table_version_;
             snap.streams.push_back(std::move(st));
@@ -1229,7 +1117,6 @@ struct TxCore {
         snap.link.venc_persisted_writes = venc_.persisted_writes();
         snap.link.venc_settling = venc_.settling(now);
         snap.link.venc_fps = venc_.commanded_fps();
-        snap.link.cmd_arq = cmd_arq_enabled_;
         snap.link.cmd_selector_frozen = cmd_selector_frozen_;
         snap.link.cmd_fps_ladder = cmd_fps_ladder();
         snap.link.cmd_fps_select = cmd_fps_select_;
@@ -1741,12 +1628,9 @@ struct TxCore {
     VencActuator venc_;
     VencCfg venc_knobs_;            // §9.6 fps_hint + §11.7 presets
     std::optional<FpsLadder> fps_ladder_;  // §9.11 (Pass 39)
-    uint16_t arq_max_fps_ = 100;           // §4.1 Pass 40 cutoff
-    bool arq_fps_suppressed_ = false;
     uint16_t mtu_supported_ = kDefaultMaxPayload;  // §9.3a local adapter min
     uint16_t negotiated_packet_budget_ = kDefaultMaxPayload;
     // §11.7 remote command state (craft-session-volatile).
-    bool cmd_arq_enabled_ = true;
     bool cmd_selector_frozen_ = false;
     // §11.7 v2 FPS_SELECT (Pass 71): stats index (1-based, 0 = none this
     // session) and the re-offer target (cleared when the ladder resumes).

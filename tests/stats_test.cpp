@@ -69,14 +69,9 @@ StatsSnapshot sample_snapshot() {
     st.diversity = 178342;
     st.loss_prediversity_milli = 41;
     st.loss_postdiv_prearq_milli = 6;
-    st.recovered_arq = 220;
     st.recovered_fec = 0;
     st.fec_recovered_source_symbols = 173;
-    st.arq_recovered_source_symbols = 201;
-    st.arq_recovered_repair_symbols = 19;
-    st.frames_with_arq = 187;
     st.frames_fec_only = 91;
-    st.frames_fec_after_arq = 34;
     st.frame_count = 89571;
     st.frame_bytes = 5872391040;
     st.frame_size_last = 65432;
@@ -107,45 +102,30 @@ StatsSnapshot sample_snapshot() {
     st.jscc_fallback_decisions = 371;
     st.jscc_decision_valid = true;
     st.jscc_fallback = "none";
-    st.jscc_reason = "fec_and_arq";
+    st.jscc_reason = "fec_only";
     st.jscc_input_k = 38;
     st.jscc_input_predicted_symbols = 5;
     st.jscc_input_floor_symbols = 1;
     st.jscc_input_cap_symbols = 16;
     st.jscc_input_deadline_us = 16667;
     st.jscc_input_source_tx_us = 5210;
-    st.jscc_input_rtt_p95_us = 2000;
-    st.jscc_input_resend_us = 116;
-    st.jscc_input_guard_us = 500;
     st.jscc_output_parity_symbols = 5;
     st.jscc_output_remaining_us = 11457;
-    st.jscc_output_arq_eligible = true;
     st.jscc_output_discard = false;
     st.jscc_feedback_epoch = 1821;
     st.jscc_feedback_age_ms = 42;
     st.dropped_superseded = 110;
     st.dropped_deadline = 8;
-    st.nacks_sent = 18;
     st.best_effort = false;  // true case asserted separately below
     st.table_mismatch = 4111;
     st.loss_prediversity_window_milli = 137;  // distinct from the cumulative 41
     st.loss_postdiv_window_milli = 29;        // distinct from the cumulative 6
     st.loss_best_ear_window_milli = 11;       // best ear beats the 137 mean
-    st.nack_rtt_hist = {0, 2, 7, 6, 2, 1, 0, 0};
-    st.nack_rtt_max_ms = 34;
-    st.nack_rtt_samples = 24;
-    st.nack_rtt_p95_us = 2000;
-    st.arq_rec_hist = {0, 1, 6, 6, 3, 1, 1, 0};
-    st.arq_rec_max_ms = 61;
-    st.resends_sent = 230;
-    st.arq_lock_holder = 9;
-    st.double_send_suppressed = 5;
     st.source_symbols_sent = 4120300;
     st.repair_symbols_sent = 358944;
     st.fec_oversize_frames = 0;
     st.mtu_fec_guard_frames = 1234;
     st.idr_frames = 17;
-    st.arq_frames = 68342;
     st.decode_errors = 0;
     st.active_profile = 4;
     st.table_version = 178;
@@ -209,7 +189,6 @@ StatsSnapshot sample_snapshot() {
     s.link.venc_fps_ladder_state = "HOLD";
     // §11.7 command surface (§15.3): craft applied state, issuer campaign,
     // rx NACK-emission gate.
-    s.link.cmd_arq = true;
     s.link.cmd_selector_frozen = false;
     s.link.cmd_fps_ladder = true;
     s.link.cmd_last_nonce = 3054418130;
@@ -218,7 +197,6 @@ StatsSnapshot sample_snapshot() {
     s.link.cmd_framing_select = 0;
     s.link.vcmd_state = "acked";
     s.link.vcmd_nonce = 3054418130;
-    s.link.arq_rx_enabled = false;
     s.link.mtu_mode = "auto";
     s.link.mtu_requested = 3072;
     s.link.mtu_effective = 2048;
@@ -262,11 +240,9 @@ const char* kGolden =
     "\"streams\":[{\"stream_id\":0,\"type\":\"RTP\",\"seq\":90233,"
     "\"delivered\":89901,\"uniq\":90100,\"diversity\":178342,"
     "\"loss_prediversity_milli\":41,"
-    "\"loss_postdiv_prearq_milli\":6,\"recovered_arq\":220,"
+    "\"loss_postdiv_prearq_milli\":6,"
     "\"recovered_fec\":0,\"fec_recovered_source_symbols\":173,"
-    "\"arq_recovered_source_symbols\":201,"
-    "\"arq_recovered_repair_symbols\":19,\"frames_with_arq\":187,"
-    "\"frames_fec_only\":91,\"frames_fec_after_arq\":34,"
+    "\"frames_fec_only\":91,"
     "\"frame_count\":89571,"
     "\"frame_bytes\":5872391040,\"frame_size_last\":65432,"
     "\"frame_size_min\":8120,\"frame_size_max\":241810,"
@@ -288,14 +264,12 @@ const char* kGolden =
     "\"jscc_repair_predicted_parity_symbols\":358121,"
     "\"jscc_decision_frames\":89571,\"jscc_valid_decisions\":89200,"
     "\"jscc_fallback_decisions\":371,\"jscc_decision_valid\":true,"
-    "\"jscc_fallback\":\"none\",\"jscc_reason\":\"fec_and_arq\","
+    "\"jscc_fallback\":\"none\",\"jscc_reason\":\"fec_only\","
     "\"jscc_input_k\":38,\"jscc_input_predicted_symbols\":5,"
     "\"jscc_input_floor_symbols\":1,\"jscc_input_cap_symbols\":16,"
     "\"jscc_input_deadline_us\":16667,\"jscc_input_source_tx_us\":5210,"
-    "\"jscc_input_rtt_p95_us\":2000,\"jscc_input_resend_us\":116,"
-    "\"jscc_input_guard_us\":500,\"jscc_output_parity_symbols\":5,"
-    "\"jscc_output_remaining_us\":11457,"
-    "\"jscc_output_arq_eligible\":true,\"jscc_output_discard\":false,"
+    "\"jscc_output_parity_symbols\":5,"
+    "\"jscc_output_remaining_us\":11457,\"jscc_output_discard\":false,"
     "\"jscc_feedback_epoch\":1821,\"jscc_feedback_age_ms\":42,"
     "\"jscc_enforced_frames\":0,\"jscc_discarded_frames\":0,"
     "\"jscc_exempt_frames\":0,"
@@ -304,26 +278,13 @@ const char* kGolden =
     "\"shm_bad_slots\":0,\"shm_ring_full\":0,"
     "\"dropped_superseded\":110,"
     "\"dropped_deadline\":8,"
-    "\"nacks_sent\":18,"
     "\"best_effort\":false,\"table_mismatch\":4111,"
     "\"loss_prediversity_window_milli\":137,"
     "\"loss_postdiv_window_milli\":29,\"loss_best_ear_window_milli\":11,"
-    "\"nack_rtt_hist\":[0,2,7,6,2,1,0,0],\"nack_rtt_max_ms\":34,"
-    "\"nack_rtt_samples\":24,\"nack_rtt_p95_us\":2000,"
-    "\"arq_rec_hist\":[0,1,6,6,3,1,1,0],\"arq_rec_max_ms\":61,"
-    "\"resends_sent\":230,\"arq_lock_holder\":9,"
-    "\"double_send_suppressed\":5,"
     "\"source_symbols_sent\":4120300,\"repair_symbols_sent\":358944,"
     "\"fec_oversize_frames\":0,\"mtu_fec_guard_frames\":1234,"
-    "\"idr_frames\":17,\"arq_frames\":68342,"
-    "\"arq_cutoff_frames\":0,\"fec_enhance_frames\":0,"
+    "\"idr_frames\":17,\"fec_enhance_frames\":0,"
     "\"decode_errors\":0,\"active_profile\":4,\"table_version\":178}],"
-    "\"arq_timing\":{"
-    "\"eob_to_nack_build\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
-    "\"nack_build_to_inject\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
-    "\"nack_inject_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
-    "\"nack_build_to_retransmit\":{\"samples\":0,\"p95_us\":0,\"max_us\":0},"
-    "\"nack_receive_to_resend\":{\"samples\":0,\"p95_us\":0,\"max_us\":0}},"
     "\"return\":{\"reports_expected\":10,\"reports_received\":9,"
     "\"reports_rejected\":0,\"feedback_rejected\":0,"
     "\"report_latch_holder\":9,"
@@ -360,12 +321,11 @@ const char* kGolden =
     "\"venc_fps\":90,\"venc_p_frame_bytes\":12345,"
     "\"venc_p_frame_target_bytes\":10000,"
     "\"venc_fps_ladder_state\":\"HOLD\","
-    "\"cmd_arq\":true,\"cmd_selector_frozen\":false,"
+    "\"cmd_selector_frozen\":false,"
     "\"cmd_fps_ladder\":true,\"cmd_last_nonce\":3054418130,"
     "\"cmd_fps_select\":2,\"cmd_resolution_select\":0,"
     "\"cmd_framing_select\":0,"
     "\"vcmd_state\":\"acked\",\"vcmd_nonce\":3054418130,"
-    "\"arq_rx_enabled\":false,"
     "\"mtu_mode\":\"auto\",\"mtu_requested\":3072,"
     "\"mtu_effective\":2048,\"mtu_supported\":3072,"
     "\"calib_state\":\"running\",\"calib_rung\":5,"
@@ -409,7 +369,7 @@ int main() {
         format_stats_line(s, out);
         CHECK(out.find("\"adapters\":[]") != std::string::npos);
         CHECK(out.find("\"streams\":[]") != std::string::npos);
-        CHECK(out.find("\"arq_timing\":{") != std::string::npos);
+        CHECK(out.find("\"arq_timing\"") == std::string::npos);
         CHECK(out.find("\"return\":{") != std::string::npos);
         CHECK(out.find("\"link\":{") != std::string::npos);
         CHECK(out.back() == '\n');
@@ -494,8 +454,6 @@ int main() {
         cr.blocks_futile = 1;
         cr.requests_suppressed = 2;
         cr.caches_fresh = 2;
-        cr.nack_graces_armed = 8;
-        cr.blocks_repaired_before_nack = 6;
         cr.request_to_first_reply = {10, 1200, 2400};
         cr.request_to_completion = {7, 2300, 4100};
         s.cache_repair = cr;
@@ -515,8 +473,7 @@ int main() {
             "\"symbols_accepted\":18,\"symbols_rejected\":0,"
             "\"blocks_closed_deficit\":9,\"blocks_repaired\":7,"
             "\"blocks_futile\":1,\"requests_suppressed\":2,"
-            "\"caches_fresh\":2,\"nack_graces_armed\":8,"
-            "\"blocks_repaired_before_nack\":6,"
+            "\"caches_fresh\":2,"
             "\"request_to_first_reply\":{\"samples\":10,"
             "\"p95_us\":1200,\"max_us\":2400},"
             "\"request_to_completion\":{\"samples\":7,"

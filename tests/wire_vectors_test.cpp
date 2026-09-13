@@ -80,7 +80,7 @@ int main() {
         c.cmd_nonce = 0x01020304;
         c.cmd_seq = 3;
         c.cmd_flags = 0;
-        c.cmd_id = vcmd_id::kArq;
+        c.cmd_id = 0x01;  // retired ARQ id, reserved (Pass 205)
         c.cmd_arg = 1;
         c.cmd_mac = 0xDEADBEEF;
         const uint8_t want[] = {
@@ -91,7 +91,7 @@ int main() {
             0x01, 0x02, 0x03, 0x04,  // cmd_nonce
             0x03,                    // cmd_seq (copy 3)
             0x00,                    // cmd_flags (command, not echo)
-            0x01,                    // cmd_id ARQ
+            0x01,                    // cmd_id 0x01 (reserved)
             0x01,                    // cmd_arg on
             0xDE, 0xAD, 0xBE, 0xEF,  // cmd_mac
         };
@@ -110,8 +110,8 @@ int main() {
         h.stream_type = stream_type::kRtp;
         h.seq = 5;
         h.block_id = 2;
-        h.data_flags = data_flags::kEndOfBlock | data_flags::kArq |
-                       data_flags::kCsaArmed;  // 0x13
+        h.data_flags = static_cast<uint8_t>(
+            data_flags::kEndOfBlock | 0x02 | data_flags::kCsaArmed);  // 0x13
         h.active_profile = 4;
         h.table_version = 0xB2;
         const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
@@ -126,7 +126,7 @@ int main() {
             0x01,                    // stream_type RTP
             0x00, 0x00, 0x00, 0x05,  // seq
             0x00, 0x00, 0x00, 0x02,  // block_id
-            0x13,                    // EOB|ARQ|CSA_ARMED
+            0x13,                    // EOB|reserved(ARQ)|CSA_ARMED
             0x04,                    // active_profile
             0xB2,                    // table_version
             0x00, 0x04,              // payload_len
@@ -145,39 +145,24 @@ int main() {
         }
     }
 
-    // ---- NACK (§3.3): 23 B fixed + 2 B bitmap -----------------------------
+    // ---- 0x2 reserved (was NACK, retired Pass 205) ------------------------
     {
-        NackHeader h;
-        h.prefix = {0x0009, 0x0011, 0xAABBCCDD};
-        h.target_originator = 0x0011;
-        h.target_session = 0x01020304;
-        h.target_stream_id = 0x00;
-        h.base_seq = 1000;
-        const uint8_t bitmap[] = {0x80, 0x01};
-
+        // The former NACK layout is no longer a wire contract. A node that
+        // still receives type 0x2 decodes it to the ignorable swallow and
+        // drops it — no fault, no alarm.
         const uint8_t want[] = {
             0x57, 0x42,              // magic
-            0x02,                    // ver 0 | type NACK
+            0x02,                    // ver 0 | type 0x2 (reserved)
             0x00, 0x09,              // sender = asking RX node
             0x00, 0x11,              // destination
             0xAA, 0xBB, 0xCC, 0xDD,  // sender session
-            0x00, 0x11,              // target_originator
-            0x01, 0x02, 0x03, 0x04,  // target_session
-            0x00,                    // target_stream_id
-            0x00, 0x00, 0x03, 0xE8,  // base_seq 1000
-            0x02,                    // bitmap_len
-            0x80, 0x01,              // bitmap
+            0x00, 0x11,              // trailing body bytes — ignored
+            0x01, 0x02, 0x03, 0x04,
+            0x00, 0x00, 0x03, 0xE8,
         };
-        CHECK_EQ_U(sizeof(want), 25);
-        const size_t n = encode_nack(h, bitmap, 2, buf, sizeof(buf));
-        CHECK_EQ_U(n, sizeof(want));
-        check_bytes(buf, want, sizeof(want));
-
         const Decoded d = decode(want, sizeof(want));
-        if (const NackView* v = expect<NackView>(d)) {
-            CHECK(v->hdr == h);
-            CHECK_EQ_U(v->bitmap_len, 2);
-            check_bytes(v->bitmap, bitmap, 2);
+        if (const ReservedNack* v = expect<ReservedNack>(d)) {
+            CHECK((v->prefix == CommonPrefix{0x0009, 0x0011, 0xAABBCCDD}));
         }
     }
 

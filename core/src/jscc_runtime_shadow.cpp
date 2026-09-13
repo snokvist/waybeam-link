@@ -50,12 +50,7 @@ JsccShadowResult JsccRuntimeShadow::evaluate(
         out.fallback = JsccShadowFallback::kRepairNotReady;
         return out;
     }
-    if ((feedback_->valid_flags & jscc_feedback_flags::kRttReady) == 0 ||
-        feedback_->rtt_samples < cfg_.min_rtt_samples) {
-        out.fallback = JsccShadowFallback::kRttNotReady;
-        return out;
-    }
-    if (!frame.source_tx_remaining_us || !frame.resend_airtime_us) {
+    if (!frame.source_tx_remaining_us) {
         out.fallback = JsccShadowFallback::kAirtimeUnavailable;
         return out;
     }
@@ -73,10 +68,6 @@ JsccShadowResult JsccRuntimeShadow::evaluate(
         rate_symbols(cfg_.fec_cap_permille, frame.source_k);
     out.input.deadline_us = frame.deadline_us;
     out.input.source_tx_remaining_us = *frame.source_tx_remaining_us;
-    out.input.rtt_p95_us = feedback_->rtt_p95_us;
-    out.input.resend_airtime_us = *frame.resend_airtime_us;
-    out.input.arq_guard_us = cfg_.arq_guard_us;
-    out.input.arq_capable = frame.arq_capable;
     out.decision = jscc_inner_decide(out.input);
     out.valid = true;
     out.fallback = JsccShadowFallback::kNone;
@@ -94,7 +85,6 @@ const char* jscc_shadow_fallback_string(JsccShadowFallback fallback) {
         case JsccShadowFallback::kFeedbackMissing: return "feedback_missing";
         case JsccShadowFallback::kFeedbackStale: return "feedback_stale";
         case JsccShadowFallback::kRepairNotReady: return "repair_not_ready";
-        case JsccShadowFallback::kRttNotReady: return "rtt_not_ready";
         case JsccShadowFallback::kAirtimeUnavailable: return "airtime_unavailable";
         case JsccShadowFallback::kDeadlineUnavailable: return "deadline_unavailable";
     }

@@ -3,6 +3,12 @@
 Aligned to PROTOCOL.md v1 §19 (build order) and §17 (bench gates). Do not start
 code until PROTOCOL.md is signed off.
 
+> **ARQ removed (Pass 205, 2026-09-13).** The NACK/retransmit plan below is
+> historical: there is no resend ring, retransmit scheduler, NACK packet or
+> `arq_mode`, and gate 3 no longer has a subject. FEC, diversity, spatial cache
+> repair and slice concealment are the repair plane. Read the ARQ steps as
+> retired, not pending.
+
 ## Bench gates — the measurements that can change the design
 
 Four gates (PROTOCOL.md §17). Two are premise-critical (2, 3); one is now largely

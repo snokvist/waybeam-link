@@ -3,6 +3,12 @@
 **Survey and planning only. No spec ruling is made here, so there is no
 `docs/review-log.md` Pass entry attached.**
 
+> **ARQ removed (Pass 205, 2026-09-13).** Where this survey names
+> `ArqTimingTracker`, `arq_policy`, or an "ARQ/NACK" contract withheld from a
+> spectator, read it as the deleted NACK/retransmit plane: a spectator withholds
+> return traffic (LINK_REPORT/JSCC) by §3.8, and the gap/drop budget lives on the
+> retained profile deadline fields. The extraction conclusions are unaffected.
+
 **Refreshed 2026-08-08 against `main` at Pass 163 (`56463c0`).** The first
 draft was written against Pass 148. Three of its twelve blockers have since
 been closed outright by work that landed for other reasons and a fourth was
@@ -181,7 +187,7 @@ What blocks a consumer is enumerated in §2. None of it is deep.
 
 This is the whole cost, and it grew. `app/main.cpp` holds `DiscoveryCatalog`
 (`:461`), `ScoutEngine` (`:636`), `AirBackend` (`:1471`), `TxCore` (`:2087`),
-`RxCore` (`:3820`), `PacketEventTrace`, `ArqTimingTracker`, `UplinkPower`, the
+`RxCore` (`:3820`), `PacketEventTrace`, `UplinkPower`, the
 stats emitter, the info/health JSON builders, and the three mode loops:
 `run_tx` (`:4763`, ~980 lines), `run_rx` (`:5741`, **~2,600 lines**) and
 `run_loopback` (`:8345`).
@@ -1189,7 +1195,7 @@ already clean, and that held on inspection: 570 lines referencing no other
 app-layer structure — no `AirBackend`, no `ScoutEngine`, no `UplinkPower`, no
 `TxCore` — only `core/` plus `Config` and `StatsSnapshot` from `io/`.
 `rx_policy()` moved with it because `RxCore`'s constructor was its only
-caller; its siblings (`arq_policy`, `selector_policy`, `quietgap_policy`) have
+caller; its siblings (`selector_policy`, `quietgap_policy`) have
 callers this layer does not and stay behind until the TX half moves.
 
 **Header-only, on purpose.** `RxCore` is entirely inline, so `node/` adds no
@@ -1261,7 +1267,7 @@ been getting transitively — `scheduler.h`, `framer.h`, `frame_framer.h`,
 and it is a one-time tax per move.
 
 **Final move: the §15.3 stats assembly.** `emit_stats()` (177 lines),
-`ArqTimingTracker`, `Loaded`, the two fill helpers and `InfoSelfState`. This
+`Loaded`, the two fill helpers and `InfoSelfState`. This
 one could not go earlier — `emit_stats()` reads `AirBackend`, `RxCore`,
 `TxCore` and `Loaded`, so it is the join point of the whole node and was
 always going to be last. It is also the piece that proves the layer: with it

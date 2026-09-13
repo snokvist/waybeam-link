@@ -22,8 +22,9 @@ cmake --preset dev && cmake --build --preset dev -j
 ```
 
 > **Status: working on real hardware, not yet a shipping product.**
-> The transport, the adaptive link layer, FEC, ARQ, the follow-me channel
-> switch and the discovery/pairing path are implemented, unit-tested and
+> The transport, the adaptive link layer, FEC + receive diversity, spatial
+> cache repair, slice concealment, the follow-me channel switch and the
+> discovery/pairing path are implemented, unit-tested and
 > verified end to end over real RF. Field range validation and the stability of
 > the adaptive loop under sustained flight are still open. See
 > [Maturity](#maturity) for the honest breakdown.
@@ -47,7 +48,7 @@ that can write whole frames into shared memory, or with a plain RTP source.
   - [The video path](#the-video-path)
   - [The return path](#the-return-path)
   - [The adaptive link layer](#the-adaptive-link-layer)
-  - [Loss recovery: diversity, FEC, ARQ](#loss-recovery-diversity-fec-arq)
+  - [Loss recovery: diversity, FEC, cache, concealment](#loss-recovery-diversity-fec-cache-concealment)
   - [Discovery, pairing and the follow-me channel switch](#discovery-pairing-and-the-follow-me-channel-switch)
   - [Operating modes](#operating-modes)
 - [Hardware](#hardware)
@@ -82,16 +83,19 @@ OpenIPC — but it makes a different set of trades:
 | | Typical injection link | waybeam-link |
 |---|---|---|
 | Primary redundancy | Forward error correction | **Multi-adapter receive diversity** |
-| Repair of short fades | More FEC overhead | **Opportunistic, deadline-aware ARQ** |
+| Repair of short fades | More FEC overhead | **FEC + slice concealment** |
 | Unit of transport | Fixed-size packet blocks | **Whole encoded video frames** |
 | Rate control | Radio and encoder tuned separately | **One controller owns MCS + TX power + encoder bitrate** |
 | Kernel WiFi driver | Required (monitor mode) | **Not used** — userspace USB driver |
 | Session model | Keyed, paired | **Open broadcast, anyone may watch** |
 
-The result is a link where the common case — a brief fade — is repaired by a
-targeted retransmission that still arrives in time to be displayed, while the
-hard case — a real drop in signal strength — is absorbed by having more than one
-antenna listening, rather than by paying FEC overhead on every frame forever.
+The result is a link where the common case — a brief fade — is covered by
+forward error correction plus slice concealment, while the hard case — a real
+drop in signal strength — is absorbed by having more than one antenna listening.
+**ARQ was removed (Pass 205):** the fleet runs slice-based / intra-refresh (GDR)
+video, where a late retransmit repairs no decoded-picture-buffer state, so
+spending return-path airtime on resends bought nothing. FEC, receive diversity,
+spatial cache repair and slice concealment are the repair plane.
 
 **Deliberate non-goals.** waybeam-link is not encrypted, not authenticated on
 the data path, and not a general-purpose network device. It broadcasts. It
@@ -113,8 +117,8 @@ capability.
 
 **2. Video is transported as frames, not as packets.**
 Because the transport knows where frame boundaries are, it can decide per
-frame: how much redundancy this one deserves, whether it is worth
-retransmitting, and when it is too late to bother.
+frame: how much redundancy this one deserves, and when it is too late to
+bother.
 
 **3. Everything is broadcast; nothing is negotiated.**
 No handshake, no session setup. A vehicle transmits; any receiver in range may
@@ -153,8 +157,8 @@ role. Nodes see each other's broadcasts; roles describe intent, not permission.
 
 Because the medium is broadcast, extra receivers are first-class — a spectator
 adds no load to the link and needs nobody's permission. What *is* arbitrated is
-repair: the vehicle serves retransmission requests to one receiver at a time, so
-a room full of spectators cannot storm the return path.
+the return path: the vehicle accepts reports and feedback from one receiver at a
+time, so a room full of spectators cannot storm it.
 
 ### The video path
 
@@ -185,8 +189,7 @@ The frame that comes out is byte-identical to the one that went in.
 
 Video can also arrive as ordinary **RTP over UDP**, if you are feeding
 waybeam-link from GStreamer or an existing pipeline. The transport treats RTP as
-opaque — the only codec awareness anywhere in the system is a small classifier
-deciding whether a packet is important enough to be worth retransmitting.
+opaque — there is no codec awareness anywhere in the system.
 
 The same wire also carries **telemetry**, **control** (RC uplink) and **audio**,
 each with its own delivery discipline.
@@ -196,7 +199,7 @@ each with its own delivery discipline.
 The vehicle can only hear the ground while its own radio is not transmitting.
 So the vehicle advertises its quiet gaps, timed against the radio's own clock,
 and the ground aims its return traffic into them. Everything travelling
-upstream — retransmission requests, link reports, channel-switch commands, RC
+upstream — link reports, JSCC feedback, channel-switch commands, RC
 and telemetry uplink — shares that narrow window, in a strict priority order.
 
 This is why one ground adapter is appointed the **uplink transmitter**: while it
@@ -230,27 +233,32 @@ to its most robust setting if the ground's reports stop arriving altogether.
 arbitration — last writer wins — so nothing else in the system may write it
 while waybeam-link is running. This is a hard deployment invariant.
 
-### Loss recovery: diversity, FEC, ARQ
+### Loss recovery: diversity, FEC, cache, concealment
 
-Three mechanisms, deliberately layered, each aimed at a different failure shape:
+Four mechanisms, deliberately layered, each aimed at a different failure shape:
 
 | Mechanism | Repairs | Cost | Role |
 |---|---|---|---|
 | **Receive diversity** | Loss that hits one antenna but not the others | Extra adapters | **Primary.** Load-bearing. |
-| **FEC** (GF(256) Reed–Solomon) | Scattered symbol loss within a frame | Constant airtime overhead | Configurable per stream, higher rate on keyframes |
-| **ARQ** (retransmission) | Brief fades that hit every antenna at once | Return-path airtime, only when needed | **Opportunistic.** Never load-bearing. |
+| **FEC** (GF(256) Reed–Solomon) | Scattered symbol loss within a frame | Constant airtime overhead | Configurable per stream, heavier rate on keyframes |
+| **Spatial cache repair** (§14.3) | A block a remote, spatially-separated listener heard cleanly | A second listener wired back over Ethernet | **Opportunistic.** Request-driven; never load-bearing. |
+| **Slice concealment / GDR** (§6.3b) | A frame that finalized below `k` | A multi-slice producer | **Last resort.** Synthesizes erased slices instead of dropping the frame. |
 
-The ordering matters. ARQ is explicitly *not* a reliability guarantee: it only
-asks for frames worth repairing, it never sends a repair that cannot arrive in
-time, and it quietly does less as the channel fills up. When the link is in real
-trouble, waybeam-link degrades toward pure diversity — the designed floor, not a
-failure.
+**There is no ARQ (Pass 205).** The NACK/retransmit plane was removed — no resend
+ring, no retransmit scheduler, no NACK packet. The fleet runs slice-based /
+intra-refresh (GDR) video, where a late retransmit repairs no decoded-picture-
+buffer state; the picture heals at the next refresh instead. Measured on the
+real link, ARQ contributed 115 delivered frames against FEC's 3,687, and 1,179
+NACKs bought 174 gap fills, so the return-path airtime it cost was not buying
+frames. FEC, receive diversity, spatial cache repair and slice concealment are
+the whole repair plane; the return path carries reports and feedback, not
+repair.
 
-All three have been measured together through a real fade on real hardware. A
-second antenna cut the loss the merge had to deal with by most of it; FEC then
-recovered the large majority of what remained, with ARQ picking up a useful
-remainder. The same run also included a total blackout, which nothing repaired —
-when the link is genuinely gone, no amount of redundancy invents it back.
+All of these have been measured together through a real fade on real hardware. A
+second antenna cut the loss the merge had to deal with by most of it, and FEC
+then recovered the large majority of what remained. The same run also included a
+total blackout, which nothing repaired — when the link is genuinely gone, no
+amount of redundancy invents it back.
 
 ### Discovery, pairing and the follow-me channel switch
 
@@ -334,7 +342,7 @@ path:
 
 With GStreamer installed, `tools/frame_shm_udp_bench.sh` drives the complete
 encode → transport → decode chain and validates the result frame by frame —
-metadata, byte-exactness, timestamp monotonicity, FEC and ARQ counters.
+metadata, byte-exactness, timestamp monotonicity, FEC and cache counters.
 
 ### With radios
 
@@ -424,7 +432,7 @@ Independently of REST, every node emits a newline-delimited JSON statistics
 record at a configurable rate. `tools/link_monitor.py` — stdlib Python, no
 dependencies — turns that stream into a live browser dashboard for a whole
 fleet, with per-adapter signal, per-stream loss before and after diversity, FEC
-and ARQ recovery counts, and return-path health.
+and cache recovery counts, and return-path health.
 
 ```sh
 python3 tools/link_monitor.py     # dashboard on :8099, stats intake on :9110
@@ -440,7 +448,7 @@ than shell out to a daemon. The Android ground station and the C-based
 
 | Layer | Contains | Dependencies |
 |---|---|---|
-| `core/` | Wire format, receive engine, scheduler, FEC, adaptive selector, channel-switch logic. No sockets, no threads, no wall clock. | C++ standard library only |
+| `core/` | Wire format, receive engine, FEC, adaptive selector, channel-switch logic. No sockets, no threads, no wall clock. | C++ standard library only |
 | `io/` | Configuration, UDP and shared-memory bindings, the radio backend, statistics, encoder actuation | devourer, libusb |
 | `node/` | Runnable node behaviour — a complete receiving or transmitting node you can start from your own process | `core` + `io` |
 
@@ -487,9 +495,8 @@ Being straightforward about what is proven and what is not:
 **Proven on real hardware**
 - Video arrives byte-identical to what the encoder produced, at full frame
   rate, with no decode errors — encoder to decoder, over RF.
-- Retransmissions come back fast enough to still matter, under a saturated
-  channel.
-- Diversity and FEC both measurably recover a real fade.
+- FEC, receive diversity, spatial cache repair and slice concealment measurably
+  recover a real fade.
 - Different radio chips injecting and receiving in the same process.
 - The follow-me channel switch, including the automatic back-out.
 - Discovery, pairing, and operating-mode application over both HTTP and RF.
@@ -504,13 +511,13 @@ Being straightforward about what is proven and what is not:
 - One vehicle per channel; two vehicles need real spectral separation.
 - Fleet-wide 20 MHz channels in v1.
 - The vehicle's return-path reception is best-effort, and always will be.
-- No 802.11 MAC-layer retries: application-level resend is the only retry.
+- No 802.11 MAC-layer retries: FEC and diversity are the only repair.
 
 **What is genuinely new here, and what is not.** Multi-adapter same-channel
 receive diversity with deduplication is prior art; this is a clean, FEC-free
-reimplementation of it rather than an invention. What is new is the rest: ARQ
-that is frame-aligned, importance-gated and deadline-aware instead of a
-reliability layer; the open broadcast passive-latch session model with
+reimplementation of it rather than an invention. What is new is the rest:
+whole-frame transport with frame-aligned FEC and a deadline the whole repair
+plane shares; the open broadcast passive-latch session model with
 originator-addressed control; and putting modulation, transmit power and
 encoder bitrate under one controller with a latency-first objective instead of
 an airtime-first one.

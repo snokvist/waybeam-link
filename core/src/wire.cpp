@@ -56,22 +56,12 @@ Decoded decode_data(const uint8_t* buf, size_t len) {
     return v;
 }
 
-Decoded decode_nack(const uint8_t* buf, size_t len) {
-    if (len < kNackFixedSize) {
-        return DecodeError::kTruncated;
-    }
-    const uint8_t bitmap_len = buf[22];
-    if (len != kNackFixedSize + bitmap_len) {
-        return DecodeError::kLengthMismatch;
-    }
-    NackView v;
-    v.hdr.prefix = decode_prefix(buf);
-    v.hdr.target_originator = be16_read(buf + 11);
-    v.hdr.target_session = be32_read(buf + 13);
-    v.hdr.target_stream_id = buf[17];
-    v.hdr.base_seq = be32_read(buf + 18);
-    v.bitmap_len = bitmap_len;
-    v.bitmap = bitmap_len > 0 ? buf + kNackFixedSize : nullptr;
+Decoded decode_reserved_nack(const uint8_t* buf, size_t len) {
+    // §3.1/§3.3 (Pass 205): type 0x2 is reserved. Accept any structurally
+    // valid prefix and surface an ignorable value; the caller drops it.
+    (void)len;  // the prefix length was already validated by decode()
+    ReservedNack v;
+    v.prefix = decode_prefix(buf);
     return v;
 }
 
@@ -485,8 +475,8 @@ Decoded decode(const uint8_t* buf, size_t len) {
     switch (static_cast<PacketType>(buf[2] & 0x0F)) {
         case PacketType::kData:
             return decode_data(buf, len);
-        case PacketType::kNack:
-            return decode_nack(buf, len);
+        case PacketType::kReservedNack:
+            return decode_reserved_nack(buf, len);
         case PacketType::kLinkReport:
             return decode_link_report(buf, len);
         case PacketType::kHeartbeat:
@@ -536,25 +526,6 @@ size_t encode_data(const DataHeader& hdr, const uint8_t* payload,
     be16_write(out + 24, payload_len);
     if (payload_len > 0) {
         std::memcpy(out + kDataHeaderSize, payload, payload_len);
-    }
-    return total;
-}
-
-size_t encode_nack(const NackHeader& hdr, const uint8_t* bitmap,
-                   uint8_t bitmap_len, uint8_t* out, size_t cap) {
-    const size_t total = kNackFixedSize + bitmap_len;
-    if (out == nullptr || cap < total ||
-        (bitmap == nullptr && bitmap_len > 0)) {
-        return 0;
-    }
-    encode_prefix(hdr.prefix, PacketType::kNack, out);
-    be16_write(out + 11, hdr.target_originator);
-    be32_write(out + 13, hdr.target_session);
-    out[17] = hdr.target_stream_id;
-    be32_write(out + 18, hdr.base_seq);
-    out[22] = bitmap_len;
-    if (bitmap_len > 0) {
-        std::memcpy(out + kNackFixedSize, bitmap, bitmap_len);
     }
     return total;
 }

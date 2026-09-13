@@ -69,7 +69,7 @@ std::vector<VehicleCmd> drain_echoes(VcmdCraft& craft, uint64_t& now_us,
 
 int main() {
     CHECK(vcmd_id::typed_endpoint_only(vcmd_id::kMtuTier));
-    CHECK(!vcmd_id::typed_endpoint_only(vcmd_id::kArq));
+    CHECK(!vcmd_id::typed_endpoint_only(vcmd_id::kSelector));
     const VcmdParams pol = policy_with_psk();
     const CommonPrefix craft_self{kCraftOrig, 0, 777};
     const std::optional<uint16_t> bound{kGround};
@@ -84,7 +84,7 @@ int main() {
             applied_arg = arg;
             return true;
         };
-        VehicleCmd c = make_cmd(pol, 10, vcmd_id::kArq, 0);
+        VehicleCmd c = make_cmd(pol, 10, vcmd_id::kSelector, 0);
 
         // Bad MAC → silent drop, nothing applied, no echo.
         VehicleCmd bad = c;
@@ -107,7 +107,7 @@ int main() {
         // MAC-valid, bound → applied; echo burst carries ACK + the fields,
         // re-MAC'd under the craft prefix, addressed to the issuer.
         CHECK(craft.on_cmd(c, now, bound, apply));
-        CHECK_EQ_U(static_cast<unsigned>(applied_id), vcmd_id::kArq);
+        CHECK_EQ_U(static_cast<unsigned>(applied_id), vcmd_id::kSelector);
         CHECK_EQ_U(static_cast<unsigned>(applied_arg), 0u);
         CHECK_EQ_U(craft.last_nonce(), 10u);
         auto echoes = drain_echoes(craft, now, pol);
@@ -116,7 +116,7 @@ int main() {
             CHECK(e.cmd_flags == vcmd_flags::kAck);
             CHECK(e.prefix.originator == kCraftOrig);
             CHECK(e.prefix.destination == kGround);
-            CHECK(e.cmd_nonce == 10 && e.cmd_id == vcmd_id::kArq &&
+            CHECK(e.cmd_nonce == 10 && e.cmd_id == vcmd_id::kSelector &&
                   e.cmd_arg == 0);
             VehicleCmd unmacd = e;
             unmacd.cmd_mac = 0;
@@ -159,7 +159,7 @@ int main() {
         CHECK(!craft.tick(now).has_value());
 
         // A fresh issuer session opens a fresh nonce domain.
-        VehicleCmd resess = make_cmd(pol, 1, vcmd_id::kArq, 1, 5678);
+        VehicleCmd resess = make_cmd(pol, 1, vcmd_id::kSelector, 1, 5678);
         now += static_cast<uint64_t>(pol.min_interval_ms + 1) * 1000;
         CHECK(craft.on_cmd(resess, now, bound, apply));
     }
@@ -234,12 +234,12 @@ int main() {
         // No PSK → refused.
         VcmdIssuer nokey{VcmdParams{}};
         CHECK(!nokey.start({kGround, 0, kGroundSession}, kCraftOrig,
-                           vcmd_id::kArq, 0, now));
+                           vcmd_id::kSelector, 0, now));
         // Bad arg / zero target → refused.
-        CHECK(!issuer.start({kGround, 0, kGroundSession}, 0, vcmd_id::kArq, 0,
+        CHECK(!issuer.start({kGround, 0, kGroundSession}, 0, vcmd_id::kSelector, 0,
                             now));
         CHECK(!issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
-                            vcmd_id::kArq, kVcmdMaxArg + 1, now));
+                            vcmd_id::kSelector, kVcmdMaxArg + 1, now));
         // §11.7 Pass 105: a wide arg the ≤5 bound refuses is accepted for MODE
         // and still refused for any other command (the cmd_id-dependent gate).
         {
@@ -251,11 +251,11 @@ int main() {
         }
 
         CHECK(issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
-                           vcmd_id::kArq, 0, now));
+                           vcmd_id::kSelector, 0, now));
         CHECK_EQ_U(issuer.nonce(), 4000u);
         CHECK(std::string(issuer.state_str()) == "pending");
         CHECK(!issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
-                            vcmd_id::kArq, 1, now));  // active → refused
+                            vcmd_id::kSelector, 1, now));  // active → refused
         // Copies come out spaced copy_interval_ms, cmd_seq N..1, MAC'd.
         std::vector<VehicleCmd> copies;
         for (int i = 0; i < 32 && copies.size() < pol.copies; ++i) {
@@ -280,7 +280,7 @@ int main() {
         echo.prefix = {kCraftOrig, kGround, 777};
         echo.cmd_nonce = 4000;
         echo.cmd_flags = vcmd_flags::kAck;
-        echo.cmd_id = vcmd_id::kArq;
+        echo.cmd_id = vcmd_id::kSelector;
         echo.cmd_arg = 0;
         echo.cmd_mac = mac_for(echo, pol);
         VehicleCmd wrong = echo;
@@ -336,7 +336,7 @@ int main() {
         issuer.seed_nonce(1);
         uint64_t now = 1'000'000;
         CHECK(issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
-                           vcmd_id::kArq, 1, now));
+                           vcmd_id::kSelector, 1, now));
         // retry_cap campaigns of `copies` copies each, all the SAME nonce,
         // then terminal timeout.
         size_t sent = 0;
@@ -365,7 +365,7 @@ int main() {
             return true;
         };
         CHECK(issuer.start({kGround, 0, kGroundSession}, kCraftOrig,
-                           vcmd_id::kArq, 0, now));
+                           vcmd_id::kSelector, 0, now));
         for (int i = 0; i < 64 && std::string(issuer.state_str()) ==
                                       "pending"; ++i) {
             const auto a = issuer.tick(now);

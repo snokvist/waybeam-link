@@ -38,7 +38,9 @@ Sources:
 6. **The 80‰ demote threshold is PRE-FEC and does not transfer (Pass 3).** In
    wfb_ng, 80‰ was raw loss an FEC layer then absorbed before delivery.
    waybeam-link has no FEC, so PROTOCOL v1 §9.1 reacts on `loss_postdiv_prearq`
-   (post-diversity, pre-ARQ) at a seed **~20‰**, RE-DERIVE on bench. The old 80‰ is
+   (post-diversity; `prearq` is historical — Pass 205 removed ARQ, so it is now
+   the boundary before FEC/cache repair) at a seed **~20‰**, RE-DERIVE on bench.
+   The old 80‰ is
    dead. The stats field and the wire field are renamed `loss_postdiv_prearq` to
    prevent a same-name/opposite-meaning transplant bug.
 

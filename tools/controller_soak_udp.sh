@@ -63,12 +63,10 @@ cat >"$TMP/tx.json" <<EOF
   "profile_table": "$TABLE",
   "streams": [{"stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": {"kind": "frame-shm", "name": "$IN_RING"},
-    "arq_mode": "all-frames",
     "fec": {"scheme": "rlc256", "i_rate_permille": 250,
-            "p_rate_permille": 100, "min_k": 3},
+            "p_rate_permille": 100},
     "jscc_shadow": {"fec_floor_permille": 20, "fec_cap_permille": 400,
-      "arq_guard_us": 500, "feedback_timeout_ms": 1000,
-      "min_rtt_samples": 3, "enforce": true}}],
+      "feedback_timeout_ms": 1000, "enforce": true}}],
   "air": {"kind": "udp-broadcast", "tx": ["127.255.255.255:$AIRP"],
           "rx": ["0.0.0.0:$AIRP"], "pace_mbps": 50},
   "venc": {"host": "127.0.0.1:$VENCP", "enabled": true, "fps_hint": $FPS,
@@ -129,7 +127,7 @@ pids+=("$tx_pid")
 # Phase schedule (seconds x SOAK_MULT) and its total for the feeder.
 # Recovery is sized for three spec-seed ladder restores (8 s gate + settle
 # each). The feeder independently changes P-frame size at the same phase
-# boundaries; loss still exercises selector, JSCC, ARQ, FEC, and cache paths.
+# boundaries; loss still exercises selector, JSCC, FEC, and cache paths.
 TOTAL_S=$((158 * SOAK_MULT))
 "$FEED" consume "$OUT_RING" 0 8000 $(( (TOTAL_S + 30) * 1000 )) \
     >"$TMP/consumer.log" 2>&1 &

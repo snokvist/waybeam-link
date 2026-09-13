@@ -28,15 +28,9 @@ inline const char* feature_fec_scheme(FecScheme scheme) {
     return "none";
 }
 
-// `arq_enabled` is the §11.7 operator latch (PROTOCOL.md §15.5). `arq_effective`
-// is whether ARQ can actually run: the §3.4 best-effort fallback switches NACK
-// generation off inside the RX engine, which the latch cannot see, so for two
-// hours on 2026-08-30 this endpoint reported ARQ enabled on a stream that had
-// not sent a NACK since it latched. On a TX node the two are equal — a sender
-// has no receive engine to be downgraded.
-inline std::string build_features_json(const Loaded& l, bool arq_enabled,
-                                       bool fps_ladder_enabled,
-                                       bool arq_effective) {
+// Pass 205 removed the ARQ plane: there is no arq_mode / arq_enabled /
+// arq_effective in the summary. Repair is FEC + cache + recovery + concealment.
+inline std::string build_features_json(const Loaded& l, bool fps_ladder_enabled) {
     const StreamCfg* video = nullptr;
     for (const StreamCfg& stream : l.cfg.streams) {
         if (stream.stream_type == stream_type::kRtp) {
@@ -59,13 +53,9 @@ inline std::string build_features_json(const Loaded& l, bool arq_enabled,
 
     if (video == nullptr) {
         out += "\"present\":false,\"stream_id\":0,\"direction\":\"none\",";
-        out += "\"binding\":\"none\",\"arq_mode\":\"none\",";
-        out += "\"arq_enabled\":";
-        out += arq_enabled ? "true" : "false";
-        out += ",\"arq_effective\":";
-        out += arq_effective ? "true" : "false";
-        out += ",\"fec\":{\"scheme\":\"none\",\"i_permille\":0,";
-        out += "\"p_permille\":0,\"e_permille\":0,\"min_k\":0,\"min_r\":0},";
+        out += "\"binding\":\"none\",";
+        out += "\"fec\":{\"scheme\":\"none\",\"i_permille\":0,";
+        out += "\"p_permille\":0,\"e_permille\":0,\"min_r\":0},";
         out += "\"spatial_recovery\":{\"mode\":\"off\",\"freeze_frame\":false},";
         out += "\"jscc\":{\"configured\":false,\"enforce\":false}";
     } else {
@@ -75,16 +65,7 @@ inline std::string build_features_json(const Loaded& l, bool arq_enabled,
         out += video->dir == Dir::kIn ? "in" : "out";
         out += "\",\"binding\":\"";
         out += video->bind.kind == BindKind::kFrameShm ? "frame-shm" : "udp";
-        out += "\",\"arq_mode\":\"";
-        out += video->dir == Dir::kIn
-                   ? (video->arq_mode == FrameArqMode::kAllFrames
-                          ? "all-frames" : "idr-only")
-                   : "receive";
-        out += "\",\"arq_enabled\":";
-        out += arq_enabled ? "true" : "false";
-        out += ",\"arq_effective\":";
-        out += arq_effective ? "true" : "false";
-        out += ",\"fec\":{\"scheme\":\"";
+        out += "\",\"fec\":{\"scheme\":\"";
         out += feature_fec_scheme(video->fec.scheme);
         out += "\",\"i_permille\":" +
                std::to_string(video->fec.i_rate_permille);
@@ -93,7 +74,6 @@ inline std::string build_features_json(const Loaded& l, bool arq_enabled,
         out += ",\"e_permille\":" +
                std::to_string(video->fec.e_rate_permille.value_or(
                    video->fec.p_rate_permille));
-        out += ",\"min_k\":" + std::to_string(video->fec.min_k);
         out += ",\"min_r\":" + std::to_string(video->fec.min_r) + "},";
         out += "\"spatial_recovery\":{\"mode\":\"";
         out += video->conceal_enabled ? "slice-skip" : "off";

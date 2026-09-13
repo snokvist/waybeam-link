@@ -168,12 +168,13 @@ def main():
         annexb = au.rebuild()
         blob = bytes(META) + annexb  # 8B fake meta prefix
         k = (len(blob) + s - 1) // s
-        # IRAP AUs are modeled as fully protected: production gives IDR frames
-        # i_rate FEC + ARQ retransmission until delivered, and the decoder
-        # gate holds until one arrives. Concealment never applies to intra.
+        # IRAP detection is kept for the POC reset below; FEC is the only
+        # protection modeled. Pass 205 removed the ARQ retransmit plane, so
+        # there is no "retransmit until delivered" for IDR — an incomplete
+        # IRAP is not concealed (see salvage_frame) and FEC alone must carry it.
         irap = any(H.IS_IRAP(H.nal_type(au.nals[i][0])) for i in au.slices)
         # symbol loss
-        src_ok = [irap or rng.random() >= loss for _ in range(k)]
+        src_ok = [rng.random() >= loss for _ in range(k)]
         rep_ok = sum(rng.random() >= loss for _ in range(r_count))
         stats["src_received"] += sum(src_ok)
         stats["src_lost"] += k - sum(src_ok)

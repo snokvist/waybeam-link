@@ -12,9 +12,7 @@ namespace wblink {
 struct JsccRuntimeShadowConfig {
     uint16_t fec_floor_permille = 0;
     uint16_t fec_cap_permille = 0;
-    uint32_t arq_guard_us = 0;
     uint32_t feedback_timeout_ms = 0;
-    uint16_t min_rtt_samples = 0;
 };
 
 enum class JsccShadowFallback : uint8_t {
@@ -22,7 +20,6 @@ enum class JsccShadowFallback : uint8_t {
     kFeedbackMissing,
     kFeedbackStale,
     kRepairNotReady,
-    kRttNotReady,
     kAirtimeUnavailable,
     kDeadlineUnavailable,
 };
@@ -31,8 +28,6 @@ struct JsccShadowFrameInput {
     uint16_t source_k = 0;
     uint32_t deadline_us = 0;
     std::optional<uint32_t> source_tx_remaining_us;
-    std::optional<uint32_t> resend_airtime_us;
-    bool arq_capable = false;
     uint64_t now_ms = 0;
 };
 

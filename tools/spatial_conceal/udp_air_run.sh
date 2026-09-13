@@ -20,7 +20,7 @@ cat > $OUT/tx.json <<EOF
   "streams": [
     { "stream_id": 0, "stream_type": "RTP", "dir": "in",
       "bind": { "kind": "frame-shm", "name": "venc_frame" },
-      "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100, "min_k": 3 } }
+      "fec": { "scheme": "rlc256", "i_rate_permille": 250, "p_rate_permille": 100 } }
   ],
   "air": { "kind": "udp", "tx": ["127.0.0.1:5801"], "rx": ["127.0.0.1:5810"] },
   "stats": { "hz": 1 }

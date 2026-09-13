@@ -177,7 +177,7 @@ is full** and a fresh type does not exist without a version bump.
   byte: **PROBE** (run_id, dwell_id, seq, padded to negotiated MTU; both
   directions) and **TALLY** (~16 bytes per-dwell: run_id, dwell_id,
   received, rssi_sum). Probes are distinct from DATA and exempt from
-  FEC/ARQ accounting (§14.1a class-exemption precedent). Receivers already
+  FEC accounting (§14.1a class-exemption precedent). Receivers already
   ignore unrecognised 0xF layouts, so a mixed-version pair degrades to
   "calibration unavailable", not a fault.
 - **Q2 — RULED: input-starve.** The link node stops reading its

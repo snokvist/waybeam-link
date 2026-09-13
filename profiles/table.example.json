@@ -5,7 +5,7 @@
   "units": {
     "tx_power_level": "PORTABLE power INTENT index (§10.2). NOT absolute. Each TX node resolves (adapter, mcs, level) -> an absolute qdb via that adapter's LOCAL power map. No regulatory clamp (§10.3).",
     "airtime_budget_frac": "fraction of wall-clock airtime this link may occupy",
-    "arq_deadline_ms": "per importance class; iframe class longer (§4.1/§8)",
+    "arq_deadline_ms": "retained fields, importance class retired (Pass 205): one unified runtime deadline = min(iframe, pframe) (§3.6/§4.1/§8)",
     "bitrate_min_kbps": "policy floor >= venc hard floor 1000 (§9.6)",
     "reserve_bps": "guaranteed floor per stream_type (§9.3)",
     "fec_scheme": "none in the base table; 'rlc256' / 'rlc256_iframe' / 'tetrys_reactive' only if §14 bench gate 2 justifies it",

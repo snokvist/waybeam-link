@@ -12,6 +12,68 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — ARQ's marginal value on a GDR craft, and the decision to remove it
+
+**Setup.** Craft `.232` (SSC338Q, single 8812EU) at **100 fps** running a
+slice-based / intra-refresh (GDR) stream, `arq_mode: all-frames`, `fec rlc256
+i=300 p=200 min_k=3`; ground on the RTL8812CU rig, 120 ‰ synthetic loss,
+≈70 s. Both ends on `impl/arq-pressure-selector` base.
+
+**Measured.**
+
+| metric | value |
+|---|---|
+| delivered | 52,713 |
+| recovered_arq | 174 |
+| recovered_fec | 3,687 |
+| frames_unrecoverable | 12 |
+| frames_with_arq / fec_only / fec_after_arq | 115 / 3,597 / 90 |
+| `arq_rec_hist` (≤1,2,4,8,16,32,64,∞ ms) | `[0,3,52,110,9,0,0,0]` |
+| `nack_rtt_hist` | `[9,11,55,96,3,0,0,0]`; p95 **7 ms**, max **13 ms** |
+| nacks_sent | 1,179 |
+
+**What it means.**
+- **ARQ is timely but marginal.** Every gap-fill was ≤16 ms; 165/174 (94.8 %)
+  within the ~10 ms frame period. `recovered_arq` counts packet-sequence gaps,
+  not frames, so it must not be divided by `recovered_fec`: the like-for-like
+  frame attribution is **115 frames with ARQ versus 3,687 FEC-decoded frames**,
+  and 1,179 NACKs bought 174 gap fills — most resends were already FEC-complete
+  ("ARQ races FEC").
+- **The true deadline is the frame period (~10 ms), not the 25/80 ms authored
+  profile deadlines.** NACK RTT p95 (7 ms) leaves almost no headroom at 100 fps;
+  the 9 recoveries in the 8–16 ms bucket were already superseded (§6.3a).
+- **The DPB rationale is gone on this fleet.** The only strong case for ARQ was
+  a late referenced-frame retransmit repairing the DPB; a GDR stream heals at
+  the next refresh. At 300 ‰ ARQ's share rose (573 recoveries) — real, but in
+  the regime where the return path is itself stressed.
+- **It is return-path-dependent:** a receiver-only/spectator node cannot use it,
+  and a single-adapter ground blinds its own RX while sending NACKs.
+
+**Decision.** Remove the NACK/retransmit plane (Tier-1, Pass 205). Repair is
+FEC (§14.1), spatial cache (§14.3), decoder RECOVERY_REQUEST (§3.9), diversity
+and slice concealment. The design and its independent reviews are in
+`specs/2026-09-13-arq-removal/plan.md`.
+
+**Verification (2026-09-13).** Spec `665e81e`, code `0d94149`, sweep `5ff67e9`,
+gate fix `5556b5e`. `scripts/gates.sh` = 33 passed / 0 failed (cv610 + Android
+skipped for absent toolchains). A headless FEC-recovery bench
+(`frame_shm_udp_bench.sh`, `rlc256`, one listener so FEC — not diversity — does
+the repair, 100 ‰ loss, 42 frames) recovered 8 frames by FEC with `decode=ok`
+and 1 unrecoverable: FEC-only repair works with no ARQ present.
+
+**Waived — the hardware A/B.** FEC-only vs the former ARQ-on baseline at
+~120 ‰/~300 ‰ on healthy + weak uplinks (matched airtime) was **waived by the
+operator on 2026-09-13** as not worth the rig time. Consequently the §14.1
+airtime re-tune that this A/B would have sized **remains open**; the freed
+`arq_reserve_frac` airtime is available but unallocated.
+
+**Note (pre-existing, exposed by Pass 205).** A FEC-pending gap's deadline is
+taken from the nearest held block *above* the cursor (`core/src/rx.cpp`
+`advance_cursor`), so an interior gap can be held up to one block budget longer
+than its own block's — bounded, not a stall, and unchanged from before, but the
+"hold instead of drop" rule is what makes it observable. Candidate for a later
+tightening.
+
 ## 2026-09-13 — VERIFIED: the 300 ms dt was the bench blocker, and the final jump now converges 5/5
 
 **Device-verified on `.242` (8812AU ground) + `.232` (SSC338Q craft), both ends

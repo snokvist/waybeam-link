@@ -11,7 +11,7 @@ selector falling back to MCS0 repeatedly, with other (fixed-MCS) venc modes
 looking stable by comparison. Root cause had two parts:
 
 1. Leftover vehicle-command test state from an unrelated hardware sweep
-   (`cmd_arq=false`, `cmd_selector_frozen=true`) — fixed by resetting those
+   (`cmd_selector_frozen=true`; the `cmd_arq` flag was removed in Pass 205) — fixed by resetting those
    flags. Real, but not the whole story.
 2. A genuine, sustained RF condition: on channel 5220 MHz (DFS/UNII-2), the
    top rung (MCS5) measured 2-4% real packet loss despite excellent RSSI

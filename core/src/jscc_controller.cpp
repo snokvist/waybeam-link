@@ -30,19 +30,10 @@ JsccInnerDecision jscc_inner_decide(const JsccInnerInput& in) {
     out.parity_symbols = std::min(desired, cap);
     out.fec_capacity_limited = desired > cap;
 
-    const uint64_t arq_cost = static_cast<uint64_t>(in.rtt_p95_us) +
-                              in.resend_airtime_us + in.arq_guard_us;
-    out.arq_eligible = in.arq_capable &&
-                       arq_cost <= out.remaining_after_source_us;
-
     if (out.fec_capacity_limited) {
         out.reason = JsccReason::kFecCapacityLimited;
-    } else if (out.parity_symbols > 0 && out.arq_eligible) {
-        out.reason = JsccReason::kFecAndArq;
     } else if (out.parity_symbols > 0) {
         out.reason = JsccReason::kFecOnly;
-    } else if (out.arq_eligible) {
-        out.reason = JsccReason::kArqOnly;
     } else {
         out.reason = JsccReason::kUnprotected;
     }
@@ -53,9 +44,7 @@ const char* jscc_reason_string(JsccReason reason) {
     switch (reason) {
         case JsccReason::kDeadlineUnreachable: return "deadline_unreachable";
         case JsccReason::kFecCapacityLimited: return "fec_capacity_limited";
-        case JsccReason::kFecAndArq: return "fec_and_arq";
         case JsccReason::kFecOnly: return "fec_only";
-        case JsccReason::kArqOnly: return "arq_only";
         case JsccReason::kUnprotected: return "unprotected";
     }
     return "unprotected";

@@ -63,9 +63,7 @@
 #include "wblink/recovery.h"
 #include "wblink/report_gate.h"
 #include "wblink/reporter.h"
-#include "wblink/ring.h"
 #include "wblink/rx.h"
-#include "wblink/scheduler.h"
 #include "wblink/scout_sense.h"
 #include "wblink/scout_store.h"
 #include "wblink/selector.h"
@@ -617,13 +615,15 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
             continue;
         }
         FrameReassemblerConfig frc;
-        // Map the drop deadline from the floor rung's I-frame budget when a
-        // table is loaded; otherwise keep the §6.3a default.
+        // Map the drop deadline from the floor rung's unified budget when a
+        // table is loaded; otherwise keep the §6.3a default. §8 (Pass 205):
+        // one uniform budget, min(iframe, pframe).
         if (l.have_table) {
             for (const Profile& p : l.table.profiles) {
-                if (p.id == l.table.floor_profile &&
-                    p.arq_deadline_iframe_ms > 0) {
-                    frc.deadline_ms = p.arq_deadline_iframe_ms;
+                const uint16_t budget =
+                    std::min(p.arq_deadline_iframe_ms, p.arq_deadline_pframe_ms);
+                if (p.id == l.table.floor_profile && budget > 0) {
+                    frc.deadline_ms = budget;
                 }
             }
         }
@@ -926,7 +926,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
         assign_caches(selected);
     };
 
-    // §7.2 ground side: returns (NACK/LINK_REPORT) coalesce and fire at the
+    // §7.2 ground side: returns (LINK_REPORT/uplink) coalesce and fire at the
     // middle of the craft's quiet gap, anchored on the EOB's receive-TSF.
     // Disabled (default) they inject immediately — §7.1 baseline.
     QuietGap qg(quietgap_policy(l.cfg));
@@ -945,24 +945,17 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
     std::optional<uint64_t> csa_copy_fallback_us;
     bool ret_tsf_anchored = false;
     std::optional<uint64_t> report_fallback_us;
-    // If the repair-tail EOB itself is lost, silence after the last received
-    // DATA symbol is the only close signal available. Keep a rolling host-
-    // time fallback at the return-window midpoint so ARQ cannot remain
-    // suppressed forever waiting for an EOB that will never arrive.
-    std::optional<uint64_t> repair_tail_fallback_us;
     uint32_t ret_window_hits = 0;
     uint32_t ret_window_misses = 0;
     uint64_t tsf_fallbacks = 0;
     uint64_t now_us_it = now_us();
-    ArqTimingTracker arq_timing;
     const auto send_return = [&](uint16_t target, const uint8_t* f, size_t n,
                                  bool urgent) {
-        if (urgent) arq_timing.note_nack_injected(f, n, now_us());
         air.value->inject_return(target, f, n, urgent);
     };
     // §7.5: release held uplink DATA. Fired on the coalesced return window
-    // (after NACKs, before reports) or on the blind fallback when no anchored
-    // window opened within uplink.fallback_ms.
+    // (after urgent returns, before reports) or on the blind fallback when no
+    // anchored window opened within uplink.fallback_ms.
     const auto flush_uplink = [&]() {
         for (UplinkDataStream& us : uplink_streams) {
             us.flush([&](const uint8_t* f, size_t n) {
@@ -1007,22 +1000,25 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
             report_fallback_us = now_us() + 100000;
         }
     };
-    const RxCore::Inject inject_nack = [&](const uint8_t* f, size_t n,
-                                           uint16_t target) {
-        arq_timing.note_nack_built(f, n, now_us());
+    // §7.2/§3.9/§3.10: the shared urgent-return injector. Carries
+    // RECOVERY_REQUEST, latch-bootstrap and JSCC_FEEDBACK — the NACK producer
+    // was removed with ARQ (Pass 205). The urgent_ret_held deferral and its
+    // flush queue are the shared quiet-gap pacing; keep them verbatim, or a
+    // recovery/JSCC return would fire immediately into the craft's TX-deaf
+    // window.
+    const RxCore::Inject inject_return = [&](const uint8_t* f, size_t n,
+                                             uint16_t target) {
         if (!qg.enabled() || !ret_tsf_anchored) {
-            // Monitor mode cannot read live TSF. By the time the repair-tail
-            // close is observed, host arrival already includes USB delay;
-            // adding the quiet-gap midpoint again only makes ARQ later.
+            // Monitor mode cannot read live TSF. By the time the frame is
+            // built, host arrival already includes USB delay; adding the
+            // quiet-gap midpoint again only makes the return later.
             send_return(target, f, n, true);
             return;
         }
         urgent_ret_held.emplace_back(std::vector<uint8_t>(f, f + n), target);
     };
-    // Service cache replies and issue fresh-cache requests before RxCore
-    // builds NACKs in this iteration. This ordering lets an accepted reply
-    // complete the block first, while a successfully sent request can arm the
-    // exact block's bounded first-NACK grace (§14.3 rule 8).
+    // Service cache replies and issue fresh-cache requests before the RX
+    // loop's return emission in this iteration.
     const auto service_cache_repair = [&](uint64_t service_ms) {
         if (!cache_ctl) return;
         if (desired_cache_assignment &&
@@ -1099,10 +1095,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                 },
                 /*air_path=*/false);
             if (emitted) {
-                const bool before_nack = !rx.block_had_nack(
-                    l.cfg.cache.repair.stream_id, wv->hdr.block_id);
-                cache_ctl->note_completed(wv->hdr.block_id, reply_us,
-                                          before_nack);
+                cache_ctl->note_completed(wv->hdr.block_id, reply_us);
                 rx.complete_frame(l.cfg.cache.repair.stream_id,
                                   wv->hdr.block_id, service_ms, deliver);
             }
@@ -1120,13 +1113,6 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                     continue;
                 }
                 cache_ctl->note_request_sent(r.request_id, now_us());
-                const uint32_t grace_ms =
-                    l.cfg.cache.repair.nack_grace_ms;
-                if (grace_ms != 0 && rx.defer_first_nack(
-                        l.cfg.cache.repair.stream_id, r.block_id,
-                        service_ms + grace_ms)) {
-                    cache_ctl->note_nack_grace_armed();
-                }
             }
             break;
         }
@@ -1155,7 +1141,6 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
     // domain starts random per session (§3.14 cross-session echo replay).
     VcmdIssuer vissuer(vcmd_params(l.cfg));
     vissuer.seed_nonce(session_nonce());
-    bool arq_rx_enabled = true;  // §6.4 emission gate (POST /api/v1/arq)
     // §9.3a: Automatic is local only. A successfully-created RadioAir means
     // every active adapter is a supported Realtek and may advertise High;
     // unknown backends resolve conservatively to Default.
@@ -1767,11 +1752,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
             return build_info_json(l, session, "rx", nullptr,
                                    air.value ? &*air.value : nullptr);
         };
-        h.features_json = [&] {
-            return build_features_json(l, arq_rx_enabled, false,
-                                       arq_rx_enabled &&
-                                           !rx.video_best_effort());
-        };
+        h.features_json = [&] { return build_features_json(l, false); };
         h.health_json = [&] { return build_health_json(last_snap); };
         h.discovery_json = [&] {
             return discovery.json(now_ms(), rx.stream_keys());
@@ -2291,16 +2272,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
             };
         }
         h.video_recover = [&](int stream_id) {
-            return rx.request_recovery(stream_id, inject_nack);
-        };
-        // §6.4 RX-local NACK-emission gate — this node only (§15.5).
-        h.arq_enable = [&](bool enabled) -> std::string {
-            if (arq_rx_enabled != enabled) {
-                wb_logf("arq: rx NACK emission %s\n",
-                        enabled ? "enabled" : "disabled");
-            }
-            arq_rx_enabled = enabled;
-            return "";
+            return rx.request_recovery(stream_id, inject_return);
         };
         if (air.value->supports_rx_drop()) {
             h.bench_rx_drop_json = [&] {
@@ -2337,7 +2309,6 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
             ret_window_hits = 0;
             ret_window_misses = 0;
             tsf_fallbacks = 0;
-            arq_timing.reset();
         };
         control->set_handlers(std::move(h));
         wb_logf("control: REST on %s (rx)\n",
@@ -2510,7 +2481,7 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                 send_return(target, f.data(), f.size(), true);
             }
             // §7.5: uplink DATA rides the same window, after repair traffic
-            // (NACKs protect video) and before reports.
+            // (repair traffic) and before reports.
             flush_uplink();
             // Pass 78: last window's anchored reports repeat here, before
             // the fresh batch so epochs stay monotonic at the receiver.
@@ -2887,12 +2858,6 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 if (v->hdr.prefix.originator == active_selection.originator) {
                     selected_craft_session = v->hdr.prefix.session_id;
                 }
-                arq_timing.note_retransmit_arrived(*v, now_us_it);
-                if (frame_is_eob(d, n)) arq_timing.note_eob(now_us_it);
-                if (qg.enabled()) {
-                    repair_tail_fallback_us =
-                        qg.return_deadline(now_us_it, 0, std::nullopt);
-                }
                 const bool craft_armed =
                     (v->hdr.data_flags & data_flags::kCsaArmed) != 0;
                 if (craft_armed) {
@@ -2961,19 +2926,9 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 ret_at_us = qg.return_deadline(
                     now_us_it, static_cast<uint32_t>(meta.tsf_us), tsf_now);
-                repair_tail_fallback_us.reset();
             }
         });
-        // With quiet-gap pacing, construct NACKs only after the repair-tail
-        // EOB has closed local FEC collection. LINK_REPORT generation remains
-        // periodic and may queue before that close.
-        const bool repair_tail_closed =
-            ret_at_us.has_value() ||
-            (repair_tail_fallback_us &&
-             now_us_it >= *repair_tail_fallback_us);
         service_cache_repair(now);
-        // §6.4 RX-local emission gate (§15.5 POST /api/v1/arq) composes with
-        // the quiet-gap repair-tail hold.
 #if WBLINK_RADIO
         // §3.16 (Pass 159): the node cause from the shared quality drain;
         // Unknown off the radio backend, and the verdict frame rides its own
@@ -3018,8 +2973,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
             }
         }
-        rx.tick(now, deliver, inject_report, inject_nack,
-                arq_rx_enabled && (!qg.enabled() || repair_tail_closed), lv,
+        rx.tick(now, deliver, inject_report, inject_return, lv,
                 &inject_verdict);
         air.value->heartbeat(l.cfg.node.originator, session, now);
         // §6.3a: drop reassembler blocks past their deadline (unrecoverable),
@@ -3030,7 +2984,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
             });
         }
         // §3.9 Pass 106: bootstrap a decoder behind a freshly latched stream.
-        rx.emit_latch_recovery(now, inject_nack);
+        rx.emit_latch_recovery(now, inject_return);
         // §3.4: one line, once per stream, when the peer's §9.3 table does not
         // match ours. Cheap enough to sit on the tick — it walks the latched
         // streams and returns after the first pass unless something changed.
@@ -3177,7 +3131,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
         for (const FrameOut& fo : frame_outs) {
             feedback.emplace_back(fo.stream_id, fo.reasm->jscc_feedback());
         }
-        rx.emit_jscc_feedback(now, feedback, inject_nack);
+        rx.emit_jscc_feedback(now, feedback, inject_return);
         // §11 campaign engine. The trigger is now POST /api/v1/csa (§15.5);
         // the stdin trigger was removed with the control-plane migration.
         const CsaIssuer::IssuerAction ia = issuer.tick(now_us_it);
@@ -3540,9 +3494,6 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 crs.blocks_futile = s.blocks_futile;
                 crs.requests_suppressed = s.requests_suppressed;
                 crs.caches_fresh = s.caches_fresh;
-                crs.nack_graces_armed = s.nack_graces_armed;
-                crs.blocks_repaired_before_nack =
-                    s.blocks_repaired_before_nack;
                 crs.request_to_first_reply = {
                     s.request_to_first_reply.samples,
                     s.request_to_first_reply.p95_us,
@@ -3563,9 +3514,8 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 css.blocks_held = s.blocks_held;
                 css.health_permille = s.health_permille;
             }
-            const ArqTimingStats timing = arq_timing.snapshot();
             const VcmdStatsFill vfill{0, vissuer.state_str(),
-                                      vissuer.nonce(), arq_rx_enabled,
+                                      vissuer.nonce(),
                                       mtu_mode.c_str(), mtu_requested,
                                       mtu_effective, mtu_supported};
             const UplinkStatsFill ufill = uplink_fill();
@@ -3581,7 +3531,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                        ret_window_hits, ret_window_misses, wedge.wedged(),
                        &frame_stats, &shm_stats,
                        cache_ctl ? &crs : nullptr,
-                       cache_store ? &css : nullptr, &last_snap, &timing,
+                       cache_store ? &css : nullptr, &last_snap,
                        &vfill, operating_chan, &ufill,
                        uplink_streams.empty() ? nullptr : &uplink_data_stats);
 #if WBLINK_CONTROL_SERVER

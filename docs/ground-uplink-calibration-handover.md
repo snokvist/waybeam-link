@@ -470,7 +470,7 @@ driving one with `tools/rtp_feed.py` or a live encoder, per the idle-TX gotcha i
 2. Perform ten consecutive near-bench calibrations. Require 10/10 successful
    completions and placement spread no greater than one 16-qdb seek step.
 3. For every run record duration, samples per dwell, placement, RSSI/loss,
-   bracket, liveness timeouts, report delivery, NACKs, `last_rx_mcs`, and
+   bracket, liveness timeouts, report delivery, JSCC feedback, `last_rx_mcs`, and
    restore result.
 4. **Blacked-out floor:** start a run at a distance/attenuation where `min_qdb`
    delivers nothing, and confirm the seek ascends to a clean placement rather
@@ -483,7 +483,7 @@ driving one with `tools/rtp_feed.py` or a live encoder, per the idle-TX gotcha i
    §11.7 `CALIBRATE` while the uplink runs; confirm both are refused and neither
    strands probe power.
 7. Compare default/driver-auto, a §10.5 manual placement, and the calibrated
-   placement at useful range. Record LINK_REPORT delivery, NACK recovery,
+   placement at useful range. Record LINK_REPORT delivery, JSCC feedback,
    report blackouts, craft RX RSSI, and uplink loss. Calibration must not make
    the return path less robust.
 8. **Guard-cost boundary (automated, case 12).** Case 12 is a `run_tx` loop
@@ -496,7 +496,7 @@ driving one with `tools/rtp_feed.py` or a live encoder, per the idle-TX gotcha i
    ```
 
    It exits non-zero unless every UPLINK_QUALITY was immediately followed by a
-   live (non-repair, non-retransmit) DATA frame **in the same TX opportunity**
+   live (non-repair) DATA frame **in the same TX opportunity**
    (≤ 2000 µs), at or under the 2 Hz cadence. A trace with no quality packets
    reports INCONCLUSIVE and also fails — an empty check must never read green.
    Note it does *not* flag a quality packet following an END_OF_BLOCK in wire
