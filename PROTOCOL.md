@@ -6380,7 +6380,7 @@ is `restart_required` and so is applied out-of-loop by a forked applier:
 | `POST /api/v1/link/fps` | `{ "ladder": true\|false }` | §9.11 ladder toggle (Pass 99); `true` = variable fps (the loop runs), `false` = static (the loop stops, fps holds). Routes through the same §11.7 `FPS_LADDER` transition as the over-air path; **MUT_LIVE**, no restart. `409` off a venc/TX node (TX/craft node) |
 | `POST /api/v1/mode` | `{ "name": "imx335-100fps-mcs0" }` | select a user-facing operating mode (§16 of `docs/venc-mode-matrix.md`). **Not MUT_LIVE** — see below (TX/craft node) |
 | `POST /api/v1/channel` | `{ "mhz": 5805 }` | locally retune the craft to an **allowlisted** channel outside any §11 campaign: retunes all adapters, informs the §9 selector, arms the §11.6 RX-liveness guard, clears any in-flight CSA campaign and drops the §11.5a binding (the ground must re-scout). 400 off-allowlist; **volatile** — a reboot returns to the boot channel (Pass 113, TX/craft node) |
-| `POST /api/v1/move` | `{ "mhz": 5805 }` | detach and locally retune **this node's own** radio to any valid channel: the operator override, **not** restricted to `channel_allowlist` (unlike the TX `/channel` form). Releases every §11.5a/§11.7 binding and any follower campaign; on an rx node it un-pins the §2 selection and enters `spectating`, where the first craft to clear normal admission is adopted (Pass 206). **409 while the issuer, or a vehicle-command campaign, is in flight** — a move is not a silent campaign cancel. 400 on `mhz<=0` or `mhz>65535`; **volatile** (both roles) |
+| `POST /api/v1/move` | `{ "mhz": 5805 }` | detach and locally retune **this node's own** radio to any valid channel: the operator override, **not** restricted to `channel_allowlist` (unlike the TX `/channel` form). Releases every §11.5a/§11.7 binding and any follower campaign; on an rx node it un-pins the §2 selection and enters `spectating`, where the first craft to clear normal admission is adopted (Pass 206). **409 on an rx node while the issuer, a vehicle-command campaign, or a bi-directional calibration is in flight** — a move is not a silent campaign cancel (a tx node's form clears unconditionally, like `/channel`). Not exposed on a receiver-owned cache controller. 400 on `mhz<=0` or `mhz>65535`; **volatile** (both roles) |
 | `POST /api/v1/psk` | `{ "enabled": true\|false }` | §11.4a runtime pairing gate: `false` = re-key with a fresh announced token + drop the §11.5a binding (open pairing), `true` = stop announcing the current key (locked). Craft-session volatile (Pass 113, TX/craft node) |
 | `POST /api/v1/reports/latch` | `{ "clear": true }` or `{ "originator": N }` | §3.5 report-authority override: `clear` releases the LINK_REPORT + JSCC_FEEDBACK latch so the next reporter takes it within `relatch_ms`; `originator` forces it to a specific node (bench). Exactly one of the two per request; 400 otherwise. Refused with 400 when `preferred_originator` is configured — config outranks the override, and the refusal is explicit rather than a silent no-op. Volatile (Pass 115, TX/craft node) |
 | `POST /api/v1/venc/reassert` | `{}` | drop the §9.6 venc-actuator write-on-change cache so the next tick re-asserts bitrate + fps onto the encoder. Called by the §16 applier **after** it restarts venc; closes the stranded-bitrate gap a restart would otherwise leave (Pass 103, TX/craft node) |
@@ -6486,14 +6486,18 @@ announced token is cached for it (secret-mode craft, or one not heard for
 **`POST /api/v1/move` is the operator's manual channel override (Pass 206).**
 It is a detach-and-retune primitive, not a campaign: it moves **this node's
 own** radio to the named channel and establishes no relationship with whatever
-is heard there — it sends nothing and contacts no peer. On an **rx** node the
-sequence is detach → retune → un-pin → `spectating`:
+is heard there — it contacts no peer and starts no campaign of its own. On an
+**rx** node the sequence is retune → detach → un-pin → `spectating`, with the
+retune first because it is the only fallible step (a 400 leaves the node
+untouched):
 
+- an **issuer** campaign, an in-flight vehicle-command campaign, or a
+  bi-directional calibration sequence is not cancelled, and `/move` **409**s
+  while any owns the radio — silently aborting one mid-commit would strand the
+  craft (abort is the campaign's own timeout/revert, and aborting a calibration
+  itself emits a §11.7 `CALIBRATE=0`);
 - any in-flight follower CSA campaign is cleared and every §11.5a/§11.7 binding
-  released; an **issuer** campaign — or an in-flight vehicle-command campaign —
-  is not cancelled, and `/move` **409**s while either owns one, because silently
-  aborting a campaign mid-commit would strand the craft (abort is the campaign's
-  own timeout/revert);
+  released;
 - the §2 selection pin is dropped, so normal §2 admission is free to resolve the
   first tuple heard;
 - every RX adapter is retuned to the channel, the `net_id` stamp/filter is
@@ -6509,8 +6513,11 @@ while the state **stays** `spectating` — it is the engine's stream latch, not 
 selection-state promotion, that holds the craft. Nothing re-selects while that
 stream lives, and only when the stream tears down does the receiver resolve
 again. A craft on the channel is therefore shown without an operator claim —
-moving onto a channel with two craft shows whichever wins admission, and an empty
-channel shows nothing. Seeing is not commanding: §11.7 "no bootstrap" is
+moving onto a channel with two craft shows whichever wins admission (on a
+multi-out-stream node each stream latches independently, so two co-channel
+craft can leave the selection unbound — originator 0, no adoption — rather than
+arbitrarily naming one), and an empty channel shows nothing. Seeing is not
+commanding: §11.7 "no bootstrap" is
 unchanged, so a spectating latch is a valid `/csa` target but never a command
 target until a claim commits.
 

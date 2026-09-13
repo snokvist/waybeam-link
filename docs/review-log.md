@@ -35,22 +35,27 @@ transmitting, the way an analog RX does.
 Ruled:
 
 1. §15.5 — `POST /api/v1/move {mhz}` is a new local primitive on **both** roles:
-   detach → retune → (rx) un-pin → `spectating`. It sends nothing, binds
-   nothing, runs no campaign, and is **not** restricted to
-   `csa.channel_allowlist` (operator override; the TX `/channel` form stays
-   allowlist-respecting). `mhz<=0` or `mhz>65535` is 400. It **409**s while an
-   issuer or vehicle-command campaign is in flight rather than silently
-   cancelling it (a mid-commit abort strands the craft; the campaign's own
-   revert/timeout is the cancellation). It releases every §11.5a/§11.7 binding,
-   so a peer that does not follow is lost until re-scout.
+   retune → detach → (rx) un-pin → `spectating` (the retune runs first so a 400
+   is a no-op). It contacts no peer, binds nothing, and starts no campaign, and
+   is **not** restricted to `csa.channel_allowlist` (operator override; the TX
+   `/channel` form stays allowlist-respecting). `mhz<=0` or `mhz>65535` is 400.
+   On rx it **409**s while an issuer, vehicle-command, or bi-directional
+   calibration campaign is in flight rather than silently cancelling it (a
+   mid-commit abort strands the craft, and a calibration abort emits a §11.7
+   `CALIBRATE=0`); the tx form clears unconditionally like `/channel`. It is not
+   exposed on a receiver-owned cache controller. It releases every §11.5a/§11.7
+   binding, so a peer that does not follow is lost until re-scout.
 2. §15.5/§15.5a — `spectating` is a new selection state: the receiver holds a
    channel, not a craft. It is not bound/latched/committed and not a
    `vehicle/command` target. The §2 latch picker resolves **sticky
    first-admitted**: the first tuple to clear normal admission is adopted while
    the state **stays** `spectating` (the engine stream latch holds the craft,
    not a state promotion); nothing re-selects until that stream tears down. Two
-   craft on one channel → whichever wins admission; an empty channel → nothing.
-   §11.7 "no bootstrap" is unchanged: seeing is not commanding.
+   craft on one channel → whichever wins admission, except on a multi-out-stream
+   node, where each stream latches independently and a mixed co-channel latch
+   leaves the selection unbound (originator 0) rather than naming one; an empty
+   channel → nothing. §11.7 "no bootstrap" is unchanged: seeing is not
+   commanding.
 3. §15.5 — `GET /api/v1/link/selection` may now report `spectating`. Role
    routing is the caller's: the hub `POST /move {target,mhz}` 409s a target that
    is not its local `wblink.role`.
