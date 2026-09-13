@@ -24,6 +24,136 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 204 — §11.2's dt is ONE generous value, and T_switch is the ack deadline (2026-09-13)
+
+**Verdict.** The class-0 / class-1 `dt_to_switch_ms` split (300 / 500 ms) is
+deleted. `dt` is a single generous value (`CsaIssuer::kDtToSwitchMs` = 5000 ms)
+for every campaign, with **no per-die rules** — an explicit operator
+requirement of this spec. `retune_class` stays on the wire and still selects
+the radio's fast/slow retune path; it no longer picks a budget. The separate
+`policy.csa.ack_timeout_ms` is replaced by **`T_switch` itself** and is now
+inert (§11.7's `policy.cmd.ack_timeout_ms` is unrelated and still live).
+
+**Why.** The classes existed only to size the real-time deadline Pass 202
+deleted, so they were sizing nothing — but 300 ms was still actively breaking
+campaigns. `dt` must cover the craft catching a copy through its §7.2 quiet
+gap, that craft's `CSA_ARMED` returning before it departs, and the issuer's own
+`retune_all` (serial; 1643 ms on three ears). At 300 ms the copy window is
+250 ms and a campaign succeeds only if the craft accepts one of the FIRST
+copies; a craft accepting a late retransmit jumped before its ACK could land,
+the issuer aborted, and — with Pass 202's revert gone — nothing undid the
+split. Device-observed repeatedly 2026-09-13: cross-channel retunes landed
+**0 of N** while same-channel claims landed every time, across two ground
+builds, two ground compositions, and quiet-gap both on and off.
+
+**Evidence.** After the change, 5 consecutive class-0 cross-channel campaigns
+**converged 5/5**, verified by reading `link.channel` from BOTH control planes;
+craft `csa_accepted` 1 → 6. One of the five closed `campaign UNCONFIRMED`
+(armed=1 landed=0 video=0) and **held the target** — Pass 203's branch firing
+in production conditions, converging where the old build would have reverted
+away from a committed craft.
+
+**Accepted cost, stated not discovered.** The issuer pre-positions on
+`CSA_ARMED` (Pass 69) and then waits out the rest of `dt` on the target, so a
+channel change carries a video gap of up to `dt`. That is the trade: a
+deterministic gap on a switch that works, instead of a short gap on a switch
+that strands the pair. Shortening it per adapter is exactly the min-maxing the
+operator ruled out.
+
+**Spec sections:** §11.2 (dt, ack deadline, the gap cost), §11.6.
+**Evidence:** `docs/findings.md` 2026-09-13 "VERIFIED: the 300 ms dt was the
+bench blocker"; branch `spec/csa-final-jump`; `tests/csa_test.cpp` re-timed off
+`kDtToSwitchMs` rather than literals, plus a direct assertion that a campaign
+outlives the old 1000 ms ack timeout and is still retransmitting into it.
+
+## Pass 203 — a refusal set must be EXHAUSTIVE, and a final jump must report itself (2026-09-13)
+
+**Verdict.** Two rulings, both forced by Pass 202's first device run, which
+failed and was initially misdiagnosed as an accept-path regression. There was
+no regression.
+
+**1. §15.3 — every exit from the follower's CSA acceptance is counted.** Pass
+201's counter set left the §11.6 rendezvous-beacon exit (`dt_to_switch_ms == 0`)
+bare while §11.4, the header and the commit message all asserted that an
+all-zero set with `csa_accepted == 0` proves the copies are not arriving. It
+does not: a craft hearing only beacons reads identically. `csa_beacon` is added
+and the exhaustiveness is now the stated contract, enforced by a test that
+drives all eight exits and requires the counter total to equal the call count.
+`csa_beacon` and `csa_nonce_replay` are both EXPECTED nonzero and named as such.
+Beacons climbing while accepted stays flat is itself the diagnosis of a split
+pair.
+
+**2. §11.6 — the issuer's campaign close carries two outcomes and MUST NOT
+collapse them.** With no revert, `kSuccess` fires whether or not the craft
+followed. `video_seen` true is a confirmed switch; false is a jump this ground
+took alone, and the selection MUST NOT then be reported as committed. The
+implementation reported both as "campaign confirmed", so a ground that had just
+jumped away from its craft told the operator it held the link — three campaigns
+running. The unconfirmed close now holds the target (no retreat) but reports
+`select_failed` and names `armed`/`landed`/`video`.
+
+**Consequence accepted, not fixed.** The old revert self-healed a missed
+campaign by putting the ground back on the craft, so the next campaign was
+always co-channel. The final jump removes that; re-acquisition is real and is
+operator-triggered (§11.5a ordering bounds it to ~1 s). Auto-scout on an
+unconfirmed close is deliberately NOT introduced here — it is an operator
+decision, not a contract gap to paper over.
+
+**Spec sections:** §11.5 (verify window is an observation, not a backout — the
+stale "jump-failed backout (kept)" bullet Pass 202 left behind is corrected),
+§11.6 (no-video close, forged-`CSA_ARMED` backstop now explicitly gone with
+§11.4 named as the only guard, Pass 70 feed-stall asymmetry resolved), §15.3
+(`csa_beacon`).
+
+**Evidence:** `docs/findings.md` 2026-09-13 "the *undiagnosed regression* was a
+BLIND COUNTER and a ground that lies"; branch `spec/csa-final-jump`;
+`tests/csa_test.cpp` exhaustiveness + evidence-survives-close cases,
+mutation-tested.
+
+## Pass 202 — the channel switch is a FINAL JUMP, not a verified handshake (2026-09-13)
+
+§11's switch was two-sided and *verified*: both ends jump at T_switch, each
+waits for evidence of the other, and each backs out alone on its own timer —
+craft at `csa.cpp` kVerify (revert to `prev_chan`), ground at kVerify
+(revert-on-no-video). Two ends deciding the same question from different
+evidence on independent timers can disagree, and when they do one reverts while
+the other holds. `rx_node.cpp` already recorded the shape for retune class 1:
+*"the craft reaches COMMITTED on the target while the issuer reverts."*
+**Stranding was the design, not a fault in it.**
+
+**Ruling: both back-out edges are removed.** Agree `(channel, T_switch)`, both
+go, both stay. The craft commits and holds (keeping its binding — dropping it
+would re-open the craft to another issuer on a channel it had just followed
+this one onto). The issuer succeeds on the TARGET. `video_seen_` is unchanged
+and still published, so a confirmed switch remains distinguishable from an
+unconfirmed one; it is no longer *acted on*.
+
+**Recovery is re-acquisition, not backout.** A craft that missed the jump keeps
+transmitting on a channel inside the shared allowlist, so a ground scan always
+finds it. The scout now orders its sweep by last-latched channel, then last
+campaign target, then the rest — a stable reorder, never an addition, so the
+allowlist stays the only authority on what may be tuned. A full sweep costs
+10.9 s (8812AU) / 33.6 s (MT7612U uplink); the two plausible channels cost ~1 s.
+
+**What is given up, stated plainly.** The revert was a second line of defence
+against a campaign the peer never followed, and against a forged `CSA_ARMED`
+committing the issuer to a ghost. §11.4 authentication is now the only guard
+on the forged case, and it is unchanged. The cost of a genuinely missed jump is
+a re-acquisition outage rather than an automatic backout.
+
+**This dissolves Pass 201 rather than fixing it.** With no verify deadline
+there is no deadline to miss, so a slow radio is merely slow. Measured against
+a baseline that passes: an 8812AU ground lands class-0 **3/3**, and the same
+ground with two MT7612U **diversity** ears lands **0/2** (`landed=0`) because
+`retune_all` is serial and sums to 1643 ms against a 300 ms budget. No per-die
+rule is introduced anywhere.
+
+**Deployment is fleet-wide.** A new ground against an old craft leaves the
+craft reverting underneath it. The craft-side change is a deletion, which is
+the safe direction, but both ends must move together. Evidence:
+`specs/2026-09-13-csa-final-jump/`, `docs/findings.md` 2026-09-13.
+
+
 ## Pass 201 — §3.0 enumeration is vendor-SET, and §11.2 class 0 is a die capability (2026-09-12)
 
 Two rulings, both forced by admitting the first non-Realtek family (MediaTek

@@ -4073,10 +4073,50 @@ IDLE ─valid+MAC'd CSA─▶ ARMED ─T_switch─▶ retune+ReApplyTxPower ─�
                                                                                                 csa_settle_s)
 ```
 COMMITTED is terminal until reboot — it has no automatic outgoing edge (no
-mid-flight revert). The only backout is VERIFY → `prev_chan` on a failed jump.
-- **Jump-failed backout (kept):** in VERIFY, no valid traffic within
-  `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note below) → revert
-  to `prev_chan` and return to IDLE.
+mid-flight revert). **Pass 202: there is now no backout at all.** VERIFY closing
+without confirmation commits and STAYS; it no longer reverts to `prev_chan`,
+and the binding is kept. The switch is a final jump — agree
+`(channel, T_switch)`, both ends go, both ends stay — because two ends deciding
+the same question from different evidence on independent timers can disagree,
+and when they do one reverts while the other holds. Recovery for a genuinely
+missed jump is RE-ACQUISITION by scan, not backout: a craft that missed it
+keeps transmitting on a channel inside the allowlist, so a ground always finds
+it, and §11.5a's scout ordering (last-latched channel, then last campaign
+target) bounds that to ~1 s against a 10.9-33.6 s full sweep.
+- **`dt_to_switch_ms` is ONE generous value (Pass 204), not a per-class budget.**
+  The 300 ms / 500 ms class-0 / class-1 split existed only to size the
+  real-time deadline Pass 202 deleted, so it was sizing nothing. `retune_class`
+  stays on the wire and still means something — it selects the radio's
+  fast/slow retune path — but it no longer picks a budget. What `dt` must
+  cover is **agreement latency**: the craft catching one copy through its §7.2
+  quiet gap, that craft's `CSA_ARMED` getting back before it departs, and the
+  issuer's own `retune_all`, which is **serial** (measured 1643 ms on a
+  three-ear ground). At 300 ms a campaign could only succeed if the craft
+  accepted one of the FIRST copies; a craft that accepted a late retransmit
+  jumped before its ACK could arrive, and the issuer aborted and stranded the
+  pair — device-observed repeatedly on 2026-09-13. **No per-die rules**: one
+  value, generous enough for the slowest adapter, is an explicit requirement.
+
+  **The ack deadline is `T_switch` itself**, not a separate
+  `policy.csa.ack_timeout_ms`. Two timers deciding one question is the pattern
+  this rework deletes, and at a generous `dt` the old 1000 ms ack timer fired
+  seconds before `T_switch` and killed campaigns whose copies were still going
+  out. `policy.csa.ack_timeout_ms` is still accepted and is now **inert**
+  (§11.7's `policy.cmd.ack_timeout_ms` is unrelated and still live).
+
+  **The cost, stated plainly:** the issuer pre-positions on `CSA_ARMED` (Pass
+  69) and then waits out the rest of `dt` on the target channel, so a channel
+  change now carries a video gap of up to `dt`. That is the trade a generous
+  budget buys, and it is deliberate — a deterministic gap on a switch that
+  works, instead of a short gap on a switch that strands the pair.
+
+- **Verify window (Pass 202: no longer a backout):** in VERIFY, no valid
+  traffic within `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note
+  below) → **COMMIT on the target and stay**, binding kept. The window is now
+  purely an observation: it decides what the node REPORTS about the switch, not
+  where the node ends up. The sizing note below is kept because the quantity it
+  measures is unchanged and still bounds how long a node waits before it stops
+  calling a switch confirmed — but missing it no longer moves anybody.
 
   **Sizing (Pass 89, measured 2026-07-24).** The former 150 ms was derived from
   a *median* ("bench median 85 ms + margin"), which is the wrong statistic: the
@@ -4217,8 +4257,10 @@ direction** lets us make the strand class *never happen* rather than recover aft
 - **Issuer failure posture is INTENT-SCOPED (Pass 199).** Two operator-visible
   operations share this one campaign machine and need opposite failures:
   - **RETUNE** — move the craft we already fly to another channel
-    (`POST /api/v1/csa`). The operator never asked to leave it, so a failed
-    move MUST NOT strand it: revert to `prev_chan` as below.
+    (`POST /api/v1/csa`). **Pass 202: the intent split no longer changes the
+    failure posture** — with no backout on either side there is one posture,
+    and a failed move leaves both ends on the target rather than stranding
+    them on opposite channels, which is what the revert actually produced.
   - **ACQUIRE** — leave the current craft and take a different one
     (`POST /api/v1/scout/quickconnect`). The operator explicitly abandoned the
     previous craft, so a revert UNDOES the request. It also lands them on a
@@ -4240,19 +4282,23 @@ direction** lets us make the strand class *never happen* rather than recover aft
   reverted the first. A `target_chan` that is neither absent nor the craft's
   own channel is refused. Moving a craft is `POST /api/v1/csa`, once it is
   yours.
-- **Issuer revert-on-no-video (RETUNE intent):** if ground did commit (craft
-  ACKed) but then sees
-  no craft video on `target_chan` within its verify deadline, ground reverts to
-  `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
-  **The revert MUST name which half failed (Pass 197):** "no craft video"
-  covers three outcomes with one operator-visible symptom — the craft never
-  ACKed, it ACKed and never landed, or it landed and never cleared `CSA_ARMED`
-  in time — so the log line carries the issuer's own `armed_seen` /
-  `landing_seen` / `video_seen` bits. Without them, telling the three apart
-  required reading the issuer's source, and the reverted ground lands on
-  `prev_chan`, which for a `home_chan` no craft occupies is silence that then
-  trips the `rx_liveness_ms` guard below into a full backend re-init: the
-  operator sees a few frames and then nothing, with no stated cause.
+- **Issuer no-video close (Pass 202/203): the ground stays, and must SAY it is
+  unconfirmed.** If ground committed (craft ACKed) but then sees no craft video
+  on `target_chan` within its verify deadline, the campaign closes on the
+  target — no revert to `prev_chan`. **The close therefore carries two
+  distinguishable outcomes on one code path, and a node MUST NOT collapse
+  them.** `video_seen` true is a confirmed switch; `video_seen` false is a jump
+  this ground took alone, and the selection MUST NOT be reported as committed.
+  Pass 203 records the cost of getting this wrong: an implementation that
+  reported both as "campaign confirmed" told an operator it held a link it had
+  just jumped away from, three campaigns running.
+
+  **The close MUST name which half failed (Pass 197):** "no craft video" covers
+  three outcomes with one operator-visible symptom — the craft never ACKed, it
+  ACKed and never landed, or it landed and never cleared `CSA_ARMED` in time —
+  so the log line carries the issuer's own `armed_seen` / `landing_seen` /
+  `video_seen` bits. Those bits outlive the campaign close precisely so the
+  caller can make the confirmed/unconfirmed split above.
   The deadline anchors at **`max(T_switch, landing) + verify_timeout_ms`**
   (Pass 69): pre-positioning must not shrink the window in which the craft can
   legitimately show up — the craft does not move before T_switch. **"Landing"
@@ -4353,23 +4399,29 @@ direction** lets us make the strand class *never happen* rather than recover aft
   together at its commit point — a straggler adapter follows because a
   sibling heard it.
 
-Because a forged `CSA_ARMED` (unauthenticated DATA flag) could make ground commit
-to a switch the real craft won't follow, the **issuer revert-on-no-video is the
-backstop** for that case: no craft video on the new channel → ground returns.
+A forged `CSA_ARMED` (unauthenticated DATA flag) can make ground commit to a
+switch the real craft won't follow. **Pass 202 removed the backstop that used
+to cover this** — the issuer no longer returns on no-video — so **§11.4
+authentication of the campaign itself is now the only guard**, and the residual
+exposure is stated rather than discovered: a forged ARMED moves this ground to
+a channel of the CAMPAIGN's choosing, which the ground authenticated and issued
+itself. The forgery can therefore waste a jump, not redirect one. Recovery is
+re-acquisition by scan, and the unconfirmed close above is what makes the
+operator aware a scan is needed.
 
-**Accepted asymmetry — craft feed stall during a campaign (Pass 70 ruling):**
-the two ends confirm on different evidence — the craft on the issuer's §11.6
-rendezvous beacon (guaranteed present), the issuer on craft *video* only. If
-the craft's input feed stalls after `CSA_ARMED` (a TX node emits nothing
-without a feed, §16), the craft COMMITs on beacons while the issuer reverts on
-no-video: ground on `prev_chan`, craft on `target_chan`, until an explicit
-re-scout + re-claim (§15.5a; the §11.5a binding self-releases after
-`bind_release`). This split is **accepted, not fixed**: counting the craft's
-unauthenticated HEARTBEAT/ANNOUNCE as issuer-side confirmation would hollow
-out the forged-`CSA_ARMED` backstop above, and delaying the craft's COMMIT
-past the beacon would reopen the §11.6 rendezvous gap the beacon closed. The
-exposure is one campaign window on a craft whose encoder stopped feeding —
-already a failed link by definition.
+**Asymmetry — craft feed stall during a campaign (Pass 70, resolved by Pass
+202):** the two ends confirm on different evidence — the craft on the issuer's
+§11.6 rendezvous beacon (guaranteed present), the issuer on craft *video* only.
+If the craft's input feed stalls after `CSA_ARMED` (a TX node emits nothing
+without a feed, §16), the issuer sees no video. Under the old design that split
+the pair — craft COMMITs on beacons on `target_chan` while the issuer reverts
+to `prev_chan`. **Under the final jump both ends stay on `target_chan`, so the
+stall costs a confirmation, not a channel.** The evidence asymmetry itself is
+unchanged and still deliberate: counting the craft's unauthenticated
+HEARTBEAT/ANNOUNCE as issuer-side confirmation would weaken §11.4's guard, and
+delaying the craft's COMMIT past the beacon would reopen the §11.6 rendezvous
+gap the beacon closed. What changed is that disagreeing about the evidence no
+longer puts the two ends on different channels.
 
 ### 11.7 Remote vehicle commands (VEHICLE_CMD, type `0xD`)
 
@@ -5312,6 +5364,28 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   is the device set outright, so the array-parallelism rule that governs it in
   the array form does not apply.
 
+  **§11.4 refusal accounting (follower side, §15.3).** Every rejection path in
+  the follower's CSA acceptance is silent by construction — it drops the copy
+  and returns. A craft that declines every campaign is therefore
+  indistinguishable on the wire from one that never heard a copy, which cost
+  the 2026-09-13 bench three sessions on a campaign that landed 0/4. The
+  counters `csa_no_key`, `csa_bad_mac`, `csa_issuer_lock`, `csa_nonce_replay`,
+  `csa_not_allowlisted`, `csa_rate_limited` and `csa_beacon` name which exit
+  the copy took, and `csa_accepted` is the denominator that separates
+  "declined" from "never arrived". **Every** exit is counted — that
+  exhaustiveness is the contract, not an implementation detail: only when no
+  copy can enter the follower and leave without moving a counter does an
+  all-zero set with `csa_accepted == 0` prove the copies are not arriving.
+  Pass 203 records what a single uncounted exit cost.
+
+  Two of these are EXPECTED nonzero on a healthy craft and must not be read as
+  faults. `csa_nonce_replay` takes copies 2..N of an accepted campaign.
+  `csa_beacon` takes §11.6 rendezvous beacons (`dt_to_switch_ms == 0`), which
+  is how a follower confirms its own pending VERIFY. `csa_beacon` climbing
+  while `csa_accepted` stays flat is a diagnosis in itself: this craft can hear
+  an issuer that has **already jumped**, so the pair is split and no campaign
+  copy is reaching it.
+
   **Enumeration is filtered by interface descriptor**, not by PID: a candidate
   is a device of a *supported vendor* exposing a **vendor-specific (`0xFF`)
   interface with at least one bulk IN and one bulk OUT** endpoint. Supported
@@ -5809,6 +5883,9 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "lockout_active_mask": 32, "lockout_latched_mask": 0,
     "lockout_conflict": false,
     "flap_freeze": false, "csa_state": "IDLE",
+    "csa_accepted": 0, "csa_no_key": 0, "csa_bad_mac": 0,
+    "csa_issuer_lock": 0, "csa_nonce_replay": 0,
+    "csa_not_allowlisted": 0, "csa_rate_limited": 0, "csa_beacon": 0,
     "channel": 5805,
     "venc_bitrate_kbps": 14000, "venc_pushes": 6, "venc_failures": 0,
     "venc_live_fallback": false, "venc_persisted_writes": 0,

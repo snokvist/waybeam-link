@@ -53,11 +53,13 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     if (policy_.psk.empty()) {
         if (!policy_.allow_unauthenticated) {
             ++unauth_rejected_;
+            ++refusals_.no_key;
             return false;
         }
     } else {
         const auto want = mac_of(pkt, policy_.psk);
         if (!want || *want != pkt.csa_mac) {
+            ++refusals_.bad_mac;
             return false;
         }
     }
@@ -67,6 +69,7 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     const std::optional<uint16_t> lock = latched_issuer ? latched_issuer
                                                         : latched_;
     if (lock && *lock != pkt.prefix.originator) {
+        ++refusals_.issuer_lock;
         return false;
     }
     // §11.6 rendezvous beacon (Pass 69): dt == 0 never arms. A MAC-valid
@@ -75,6 +78,11 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     // side effects (no §11.5a binding refresh — a recorded beacon must not
     // hold the binding alive).
     if (pkt.dt_to_switch_ms == 0) {
+        // Pass 203: counted, not silent. This was the one exit from on_csa
+        // with no counter, and it is the exit a craft takes when the issuer
+        // has already jumped without it — so "every counter zero" read as
+        // "nothing is arriving" when the truth was "only beacons are".
+        ++refusals_.beacon;
         if (state_ == State::kVerify &&
             pkt.prefix.originator == campaign_.prefix.originator &&
             pkt.prefix.session_id == campaign_.prefix.session_id &&
@@ -88,19 +96,26 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
                                     pkt.prefix.session_id);
     const auto it = last_applied_.find(key);
     if (it != last_applied_.end() && pkt.csa_nonce <= it->second) {
+        // Also the ordinary case for copies 2..5 of an accepted campaign, so
+        // this one is expected to be NONZERO on a healthy craft — it is the
+        // only refusal here that is not a fault.
+        ++refusals_.nonce_replay;
         return false;  // replay, or another copy of an accepted campaign
     }
     if (!allowed(policy_.allowlist, pkt.target_chan)) {
+        ++refusals_.not_allowlisted;
         return false;
     }
     if (last_accept_us_ != 0 &&
         now_us - last_accept_us_ <
             static_cast<uint64_t>(policy_.min_interval_ms) * 1000) {
+        ++refusals_.rate_limited;
         return false;
     }
 
     // Accept. §11.2 TSF anchor: elapsed since the copy left the air, from the
     // SAME adapter's TSF; no TSF read → host-arrival approximation.
+    ++refusals_.accepted;
     last_applied_[key] = pkt.csa_nonce;
     last_accept_us_ = now_us;
     latched_ = pkt.prefix.originator;
@@ -169,16 +184,29 @@ CsaAction CsaFollower::tick(uint64_t now_us) {
                 verify_deadline_us_ = now_us + static_cast<uint64_t>(vt) * 1000;
             }
             if (now_us >= verify_deadline_us_) {
-                // §11.5 jump-failed backout: the retune landed on a dead
-                // channel — revert to prev_chan, drop the incomplete claim,
-                // return to IDLE. No mid-flight rendezvous (Pass 59).
-                a.kind = CsaAction::Kind::kRevert;
-                a.chan_mhz = campaign_.prev_chan;
-                a.bw = campaign_.prev_bw;
-                a.fast = campaign_.retune_class == 0;
-                a.power_intent = campaign_.power_intent;
-                latched_ = std::nullopt;
-                state_ = State::kIdle;
+                // §11.5 FINAL JUMP (Pass 202): the window closing without
+                // confirmation no longer backs out. It used to revert to
+                // prev_chan, which is what made the switch a two-sided
+                // VERIFIED handshake — and two ends deciding the same
+                // question from different evidence on independent timers can
+                // disagree, at which point one reverts and the other holds.
+                // That stranding was the design, not a bug in it, and
+                // rx_node.cpp recorded the exact shape: "the craft reaches
+                // COMMITTED on the target while the issuer reverts".
+                //
+                // We commit instead and stay. Recovery for a genuinely
+                // missed jump is RE-ACQUISITION, not backout: this node keeps
+                // transmitting on a channel inside the shared allowlist, so a
+                // ground scan always finds it. Losing the deadline is also
+                // what stops a slow radio being a protocol-level fault —
+                // measured, two MT7612U diversity ears took a 3-ear ground's
+                // serial retune_all to 1643 ms against a 300 ms budget and
+                // broke every campaign (0/2 against 3/3 without them).
+                //
+                // The binding is KEPT: dropping it here would re-open the
+                // craft to a different issuer on a channel it just followed
+                // this one onto.
+                state_ = State::kCommitted;
             }
             break;
         case State::kCommitted:
@@ -262,11 +290,10 @@ bool CsaIssuer::start(const CommonPrefix& prefix, uint16_t target_chan_mhz,
     tmpl_.prev_chan = prev_chan_mhz;
     tmpl_.prev_bw = prev_bw;
     tmpl_.power_intent = power_intent;
-    // §11.2 dt budget: campaign span + max retune for the class + margin.
-    // §11.2 (Pass 91): class 0 is 300 ms, not 150. The budget must hold both
-    // the copy window and the 50 ms ack-lead cutoff; at 150 ms those conflict
-    // and the window collapses to roughly the pre-Pass-90 burst.
-    const uint32_t dt0_ms = retune_class == 0 ? 300 : 500;
+    // §11.2 (Pass 204): one generous dt, no class split. See kDtToSwitchMs —
+    // retune_class survives only as the fast/slow retune-path hint it passes
+    // to the radio, not as a budget anyone can miss.
+    const uint32_t dt0_ms = kDtToSwitchMs;
     started_us_ = now_us;
     switch_at_us_ = now_us + static_cast<uint64_t>(dt0_ms) * 1000;
     copies_left_ = kCopies;
@@ -440,8 +467,18 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                 // computed lazily there (0 = not yet landed), never here.
                 verify_deadline_us_ = 0;
                 state_ = State::kVerify;
-            } else if (now_us - started_us_ >=
-                       static_cast<uint64_t>(policy_.ack_timeout_ms) * 1000) {
+            } else if (now_us >= switch_at_us_) {
+                // §11.6 (Pass 204): the campaign's OWN T_switch is the ack
+                // deadline — no separate ack_timeout_ms timer. Two timers
+                // deciding one question is the pattern this whole rework
+                // deletes, and here the second one was actively harmful: at
+                // the generous dt the 1000 ms ack_timeout fired 4 s before
+                // T_switch and aborted campaigns whose copies were still
+                // going out. Waiting to T_switch is also the RIGHT answer on
+                // its own terms: no CSA_ARMED by the instant we agreed to
+                // move means the craft is not coming, so we must not move —
+                // jumping anyway would strand us, which under the final jump
+                // has no backout.
                 a.kind = IssuerAction::Kind::kAbort;
                 state_ = State::kIdle;
             }
@@ -462,11 +499,20 @@ CsaIssuer::IssuerAction CsaIssuer::tick(uint64_t now_us) {
                     state_ = State::kIdle;
                     break;
                 }
-                // Issuer revert-on-no-video (§11.6 backstop, also covers a
-                // forged CSA_ARMED making us commit to a ghost).
-                a.kind = IssuerAction::Kind::kRevert;
-                a.chan_mhz = tmpl_.prev_chan;
-                a.bw = tmpl_.prev_bw;
+                // §11.6 FINAL JUMP (Pass 202): no video inside the window no
+                // longer retreats to prev_chan. The revert was a backstop
+                // against a jump the craft did not follow (and against a
+                // forged CSA_ARMED committing us to a ghost) — but it is the
+                // half of the handshake that strands the pair when the two
+                // ends disagree, and §11.4 authentication is what actually
+                // guards the forged case.
+                //
+                // `video_seen_` stays false here and is still reported, so an
+                // operator can tell a confirmed switch from an unconfirmed
+                // one. What changed is that we no longer ACT on it.
+                a.kind = IssuerAction::Kind::kSuccess;
+                a.chan_mhz = tmpl_.target_chan;
+                a.bw = tmpl_.target_bw;
                 a.fast = tmpl_.retune_class == 0;
                 a.power_intent = tmpl_.power_intent;
                 state_ = State::kIdle;

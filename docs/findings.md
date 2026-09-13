@@ -12,6 +12,306 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — VERIFIED: the 300 ms dt was the bench blocker, and the final jump now converges 5/5
+
+**Device-verified on `.242` (8812AU ground) + `.232` (SSC338Q craft), both ends
+on the final-jump build.** This is the run the two entries below were missing.
+
+**What the bench showed first: cross-channel retunes NEVER landed, while claims
+always did.** Same craft, same channel, minutes apart, reproduced across two
+ground builds, two ground compositions (1-ear and 3-ear) and with the §7.2
+quiet gap both ON and OFF — so the quiet-gap hold was NOT the cause, which is
+what it looked like:
+
+| campaign | outcome |
+|---|---|
+| claim / acquire (target == craft's channel) | accepted, **every time** |
+| retune (cross-channel) | `csa: aborted (no CSA_ARMED)`, **every time** |
+
+**The craft was accepting them.** Mid-investigation the craft turned up on 5560
+with `csa_accepted` incremented and `csa_state COMMITTED`, while the ground sat
+on 5540 reporting an abort. So the copies arrived, the craft armed and jumped —
+and its `CSA_ARMED` never got back to the issuer before it departed.
+
+**Root cause: the 300 ms class-0 dt.** `dt` has to cover the craft catching a
+copy through its quiet gap, the craft's ACK getting back, AND the issuer's own
+`retune_all` (serial, 1643 ms on three ears). At 300 ms the copy window is
+250 ms and a campaign can only succeed if the craft accepts one of the FIRST
+copies; accept a late retransmit and the craft jumps before its ACK can land.
+The issuer then aborts — and under the final jump there is no revert to undo
+the split.
+
+**Fix (Pass 204), exactly what the operator ruled: one generous dt, no per-die
+rules.** `kDtToSwitchMs = 5000`, the 300/500 class split deleted (it sized a
+deadline Pass 202 removed), and the separate `ack_timeout_ms` replaced by
+`T_switch` itself — at the generous dt the old 1000 ms ack timer fired 4 s
+early and killed campaigns whose copies were still going out.
+
+**Result — 5 consecutive class-0 cross-channel campaigns, CONVERGENCE read from
+BOTH control planes:**
+
+| # | target | ground | craft | verdict |
+|---|---|---|---|---|
+| 1 | 5560 | 5560 | 5560 | `campaign confirmed` |
+| 2 | 5580 | 5580 | 5580 | `campaign confirmed` |
+| 3 | 5540 | 5540 | 5540 | **`campaign UNCONFIRMED`** (armed=1 landed=0 video=0) |
+| 4 | 5600 | 5600 | 5600 | `campaign confirmed` |
+| 5 | 5540 | 5540 | 5540 | `campaign confirmed` |
+
+**5/5 converged**, craft `csa_accepted` 1 → 6, against **0/N before the change**.
+
+**Campaign 3 is the most valuable row.** It is the Pass 203 unconfirmed branch
+firing in production conditions: the issuer saw no video inside its window,
+reported honestly, and **held the target instead of retreating** — and the pair
+converged anyway, because the craft was already there. That same event on the
+old build is `csa: selection reverted`, which takes the ground AWAY from a
+craft that had committed. One run, showing both halves of the rework doing
+their job.
+
+**Also verified in the same session:**
+- `csa_beacon` (Pass 203) counts on device: 0 → 343 across the run. Those
+  packets were previously invisible, and their invisibility is what made a
+  split pair read as a dead link.
+- **A craft that jumps alone STAYS** (Increment 2, on hardware): the craft
+  reached 5560 and held `COMMITTED` while the ground was elsewhere. The old
+  build reverts to `prev_chan` here.
+- **No MT7612U regression**: 3-ear ground read `diversity/uniq` **1.99**
+  (= ears − 1) with MT7612U retunes re-measured at **809 / 788 ms** against the
+  8812AU's 0 ms — Pass 201's numbers reproduced.
+- Post-diversity loss 0‰, 214818 uniq, 1 unrecoverable frame over the run.
+
+**Bench trap worth keeping: the ground's TX power is the first thing to check,
+not the last.** The shipped `.242` config pins `power_offset_qdb: -72`, its own
+comment saying "BENCH-LOW for 50 cm geometry — raise before any range test".
+The craft heard the ground at −64 dBm and every campaign failed while reports
+still flowed; at offset 0 it heard −46 dBm and the claim landed immediately.
+Reports are retried at 10 Hz forever and so survive a marginal uplink; a
+5-copy campaign burst does not. **A link that looks up can still be too weak
+for the one burst that matters.**
+
+**Not covered by this run:** the MT7612U-ears overrun arm (Matrix B) — one
+MT7612U wedged its MCU (`mcu command timed out`) after repeated restarts and
+the arm was dropped rather than fought. Matrix C (MT7612U-only) untested here.
+rk3566 remains compile-only.
+
+---
+
+## 2026-09-13 — the "undiagnosed regression" was a BLIND COUNTER and a ground that lies
+
+**Diagnosed. There is no regression in the accept path — there never was one.**
+The entry below this one recorded `csa_accepted 0` with every refusal counter
+also 0 and called it "the signature meaning the copies never reached
+`on_csa`". **That inference was wrong, and the counter set I had just added is
+what made it wrong.**
+
+**1. One exit from `on_csa` was uncounted.** `csa.cpp:78` — the §11.6
+rendezvous beacon path, `dt_to_switch_ms == 0` — returned false with no
+counter. Six guards were counted; this one was not. So a craft hearing **only
+beacons** produced a byte-identical reading to a craft hearing **nothing**.
+Reproduced as a unit test before fixing: a MAC-valid `dt=0` packet leaves every
+counter at zero.
+
+**2. Beacons are exactly what a craft hears from a ground that has already
+jumped without it.** They are sent in the issuer's VERIFY state, on
+`target_chan`, MAC-valid, at copy spacing. So the observed shape — counters all
+zero *while the craft's ear rx climbs 87 → 368* — is not a contradiction to be
+explained. It is the direct signature of a **split pair**: the ground is
+transmitting at the craft, the craft can hear it, and none of it is a campaign
+copy.
+
+**3. What split them is the final jump itself, and the ground could not tell.**
+Removing the issuer's revert means `kSuccess` now fires whether or not the
+craft followed. `rx_node.cpp` took that action, set `selection_state =
+"committed"` and logged **"campaign confirmed"** — under a comment still
+asserting "craft video was seen inside the window", which the deletion had made
+false. `issuer.evidence()` carried the truth (`video_seen`) the whole time and
+was read **only** on the revert and abort paths, both of which the final jump
+had just made unreachable for this case.
+
+So the run did exactly what the code says: campaign 1 was missed by the craft
+for ordinary RF reasons, the ground jumped and held, and from then on the two
+were on different channels with the ground reporting success each time. The old
+design self-healed this — a missed campaign reverted the ground back onto the
+craft, so the next campaign was always issued co-channel. **The final jump
+removes that self-healing property, and nothing replaced it.** That is the real
+defect the bench found, and it is a design gap in the spec, not a coding bug.
+
+**Fixed (Pass 203), both halves:**
+
+- `csa_beacon` counts the last bare exit and is published in §15.3. The
+  exhaustiveness — *no copy enters `on_csa` and leaves without moving a
+  counter* — is now a unit test that drives all eight exits and requires the
+  counter total to equal the call count, so the next uncounted `return false`
+  fails the suite rather than costing a session.
+- The ground reads `evidence().video_seen` at `kSuccess`. Confirmed →
+  `committed` as before. Unconfirmed → it **stays on the target** (final jump,
+  no retreat) but reports `select_failed` and logs `campaign UNCONFIRMED ...
+  (armed/landed/video)`. `select_failed` is the existing state that lets §11.6
+  Pass 199 first-latch promote the craft if it does turn up, and it is visible
+  to the operator, who owns the re-acquire.
+
+**What this does NOT fix, stated rather than hidden:** re-acquisition is still
+operator-triggered. Increment 3's priority scan makes it ~1 s *when run*, but
+nothing runs it automatically. Under the old design a missed jump was invisible
+because it self-corrected; under the final jump it is now *visible* and manual.
+Whether the ground should auto-scout on an unconfirmed close is a design
+question for the operator, not something to invent here.
+
+**Method note — the one worth keeping.** A counter set whose value is "all
+zeros means X" is only worth that if it is *exhaustive*, and I shipped it one
+exit short while asserting the conclusion in the commit message, the header,
+and PROTOCOL.md. The instrument was wrong in the exact place the investigation
+needed it, and I believed it over the arithmetic (a craft with rx climbing is
+receiving *something*). Check that every path out of a function is counted
+before writing down what a zero reading proves.
+
+---
+
+## 2026-09-13 — the final-jump device run FAILED, and it made "confirmed" a weaker word
+
+Increments 1–3 built and gated clean (39/0/0, 87/87, mutation-tested) and then
+did not survive the bench. Recorded before any of it is believed.
+
+**1. final-jump ground + final-jump craft: the craft accepted NOTHING.**
+Three class-0 campaigns, and `csa_accepted` stayed **0** with every refusal
+counter also 0 — the signature that means the copies never reached `on_csa` at
+all, not that they were declined. The craft was hearing the ground throughout
+(ear rx climbing 87 → 368, `report_latch_holder = 9`). `git diff` over
+`core/src/csa.cpp` shows the change touches ONLY the two kVerify deadline
+branches; the accept path is untouched. **So this is a real regression I have
+not diagnosed**, and the increments are NOT ready.
+
+**2. Bisect: the previous craft build accepted immediately** — `campaign
+confirmed -> 5560`, `csa_accepted 1`, same ground, same channel. So the
+regression is craft-side and arrived with the final-jump build.
+
+**3. But that bisect was ALSO invalid, and the reason matters more than the
+result.** Ground on 5560, craft on 5540: **stranded**. A final-jump ground
+paired with an old craft is exactly the asymmetric case `plan.md` warned about
+— "deleting only the ground's revert would leave a craft that still backs out
+underneath a ground that now holds". Reproduced on hardware. The spec's
+insistence that the two increments deploy together is now evidence-backed
+rather than reasoning.
+
+**4. The trap this exposed, which the spec did not anticipate: removing the
+revert makes `campaign confirmed` a WEAKER claim.** The issuer now reports
+success whether or not the craft followed — that is the intended behaviour, but
+it means the ground's own verdict can no longer be used as the pass criterion
+for any CSA test. `validation.md` asked for "no `selection reverted`", and that
+check would have passed on a stranded pair. **The criterion must be
+CONVERGENCE: read the channel from both control planes and require them equal.**
+Updated there.
+
+**Not invalidated:** the earlier "MT7612U diversity ears break class-0 0/2 vs
+3/3" result used the OLD ground build, which still reverted, so `landed=0` was
+still load-bearing there. That finding stands.
+
+**Bench left clean:** craft rolled back to the counters build (stable,
+instrumented), re-latched, on 5540, transmitting, radios released.
+
+---
+
+## 2026-09-13 — the 0/4 was STALE CRAFT STATE; with a working baseline, MT7612U ears break CSA 0/2 vs 3/3
+
+The refusal counters (§11.4, this branch) were deployed to craft `.232` and
+answered the question in one campaign. **The craft was never refusing.**
+
+| | csa_accepted | refusals | verdict |
+|---|---|---|---|
+| claim campaign | 1 | 0 (+4 nonce_replay) | accepted |
+| retune campaign | 2 | 0 (+3 nonce_replay) | accepted, armed, jumped |
+
+`csa_nonce_replay` tracking `kCopies − 1` per campaign is the instrument
+reading exactly as designed — copies 2..5 of an accepted campaign. Every real
+refusal counter stayed **0** across 7 campaigns.
+
+**And then the campaigns started working.** Deploying the counters required
+restarting the craft's hub, which had been up since 2026-08-30. After that
+restart, class-0 retune campaigns on a single-adapter 8812AU ground confirmed
+**3 of 3** (5580, 5560, 5540) — ground and craft both `COMMITTED` on the
+target, verified from both control planes.
+
+So **the 0/4 was stale craft-side CSA state**, cleared by the restart, not a
+design fault. Every conclusion drawn while it was in effect was drawn on a
+broken baseline — including "class-0 campaigns fail bench-wide", which was
+wrong.
+
+**With a baseline that works, the MT7612U consequence isolates cleanly** —
+same craft, same channels, same binary, back to back:
+
+| ground | class-0 campaigns | signature |
+|---|---|---|
+| 8812AU alone | **3 / 3 confirmed** | — |
+| 8812AU + 2× MT7612U | **0 / 2** | `armed=1 landed=0 video=0` |
+
+The only variable is the presence of two MediaTek **diversity RX ears** — the
+uplink is the same 8812AU retuning in 41 ms in both arms. `landed=0` is the
+ground failing to arrive inside the class-0 deadline, because `retune_all` is
+serial and sums to ~1643 ms. **Pass 201's consequence is now confirmed against
+a control that actually passes**, which is what every earlier attempt lacked.
+
+No stranding in either arm: the craft reverted with the ground and both ended
+on 5540. The craft accepted all 7 campaigns; the failures were entirely
+ground-side.
+
+**What this changes for the final-jump spec.** The rework is still the right
+call — a design where each side independently backs out on its own timer is
+what makes a slow ear fatal rather than merely slow. But its justification is
+now narrower and more honest: CSA is **not** broken bench-wide, it works 3/3 on
+a Realtek ground. What it cannot survive is a slow radio anywhere in the node,
+and that is the thing the deadline removal fixes.
+
+**Method note.** A long-lived craft accumulating state that silently breaks a
+subsystem is not visible from the ground, and cost this investigation several
+wrong conclusions. Restart the craft before trusting a negative CSA result —
+and note the counters would have shown "accepted, not refused" on day one.
+
+---
+
+## 2026-09-13 — craft-side CSA is observable after all, and every refusal is silent
+
+**Increment 0 of the CSA-final-jump spec, and it changes the diagnosis.**
+
+**The craft's link control plane IS listening — on `127.0.0.1:8091`.** Earlier
+notes recorded it as absent because a probe from the ground got no answer; it
+is bound to loopback, so it is reachable over SSH and nowhere else:
+`ssh root@<craft> curl -s http://127.0.0.1:8091/api/v1/stats`. That gives
+`link.csa_state`, `channel` and `report_latch_holder` — the craft-side view the
+whole CSA investigation had been missing. Nothing needed instrumenting.
+
+**Measured with it.** Ground and craft both reach `COMMITTED` on 5540 after a
+quickconnect (`report_latch_holder = 9`, i.e. our ground). A class-0 campaign
+to 5560 was then issued while sampling the craft every 150 ms for 9 s:
+**the craft stayed `COMMITTED` on 5540 for all 60 samples — it never armed and
+never moved**, while the ground reported `aborted (no CSA_ARMED)`.
+
+**It is not a "committed craft refuses" rule.** `CsaFollower::on_csa` has no
+state guard: it accepts from any state and sets `kArmed`. The refusal is one of
+four guards, in order — §11.4 authentication, nonce replay
+(`csa_nonce <= last_applied_[originator, session]`), the channel allowlist, and
+the `min_interval_ms` rate limit (5000 ms).
+
+**And that is the actual defect: all of them are a bare `return false`.**
+`core/src/csa.cpp` has 14 `return false` paths and **zero** refusal counters or
+log lines. A craft that declines every campaign is indistinguishable from a
+craft that never heard one, from the ground *and* from the craft. This is the
+same shape as the FCS bug — a failure with no counter anywhere — and it is why
+0/4 took three sessions and several wrong conclusions to chase.
+
+**Next, and it is cheap:** give each refusal path a counter (or one counter
+plus a reason enum) exposed in `/api/v1/stats`. That single change would have
+answered this in one campaign instead of three sessions, and it is a
+prerequisite for validating the final-jump rework — `validation.md` cannot
+distinguish "the rework works" from "the craft refused for an unrelated
+reason" without it.
+
+Ruled out along the way: craft channel allowlist (identical 25 channels,
+target included), craft not claimed (`claimed True by 9`), ground verify window
+too short (500 → 3000 ms, no change), and the nonce counter resetting across
+ground restarts (the key includes the ground's session, which is fresh per run).
+
+---
+
 ## 2026-09-13 — `retune_all` is SERIAL: an MT7612U diversity ear breaks CSA node-wide
 
 **Pass 201 scoped the §11.2 constraint to "a ground where MT7612U is the only

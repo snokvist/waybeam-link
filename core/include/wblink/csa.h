@@ -122,6 +122,40 @@ class CsaFollower {
     uint64_t freeze_until_us() const { return freeze_until_us_; }  // §11.3
     // The issuer this follower latched onto (established by a MAC-valid CSA).
     std::optional<uint16_t> latched_issuer() const { return latched_; }
+
+    // §11.4 refusal accounting. EVERY rejection path in on_csa() is a bare
+    // `return false` — fourteen of them in csa.cpp, and before this none left
+    // a trace. A craft declining every campaign was therefore indistinguishable
+    // from one that never heard a copy, from the ground AND from the craft: the
+    // 2026-09-13 bench spent three sessions on a 0/4 that any one of these
+    // would have answered in a single campaign. `accepted` is the denominator
+    // and is the field that separates "never heard one" from "heard, declined".
+    //
+    // `beacon` closes the LAST silent exit (Pass 203). The first version of
+    // this set left the §11.6 dt==0 path bare, and then asserted that an
+    // all-zero set with accepted == 0 proved "the copies are not arriving at
+    // all". That is false, and it misdiagnosed a device run: a craft the
+    // ground has already jumped away from hears the issuer's rendezvous
+    // beacons and nothing else, and every one of those took the bare exit. The
+    // signature is only unambiguous now that EVERY exit from on_csa is
+    // counted — which is the property this set is for, not a detail of it.
+    struct Refusals {
+        uint32_t no_key = 0;          // §11.4a empty key, fail closed
+        uint32_t bad_mac = 0;         // MAC mismatch
+        uint32_t issuer_lock = 0;     // bound to a different command source
+        uint32_t nonce_replay = 0;    // csa_nonce <= last applied for this key
+        uint32_t not_allowlisted = 0; // target outside policy.csa allowlist
+        uint32_t rate_limited = 0;    // inside min_interval_ms of the last
+        // §11.6 rendezvous beacon (dt == 0). NOT a fault and EXPECTED nonzero
+        // on a healthy craft — it is how a follower confirms its own pending
+        // VERIFY. It is a fault signal only in the shape that matters here:
+        // beacons climbing while accepted stays flat means this craft can hear
+        // an issuer that has ALREADY jumped, i.e. the pair is split and no
+        // campaign copy is reaching us.
+        uint32_t beacon = 0;
+        uint32_t accepted = 0;
+    };
+    const Refusals& refusals() const { return refusals_; }
     // §11.4a fail-closed rejections (empty key, non-spectator).
     uint64_t unauth_rejected() const { return unauth_rejected_; }
     const char* state_str() const;
@@ -150,6 +184,7 @@ class CsaFollower {
     CsaParams policy_;
     State state_ = State::kIdle;
     std::optional<uint16_t> latched_;
+    Refusals refusals_{};
     uint64_t unauth_rejected_ = 0;
     // §11.4 anti-replay: last accepted nonce per (originator, session).
     std::map<std::pair<uint16_t, uint32_t>, uint32_t> last_applied_;
@@ -167,6 +202,21 @@ class CsaFollower {
 
 class CsaIssuer {
   public:
+    // §11.2 FINAL JUMP (Pass 204): ONE dt for every campaign, deliberately
+    // generous. The old 300/500 ms class split existed only to size a
+    // real-time deadline, and Pass 202 deleted that deadline — so the classes
+    // were sizing nothing. What dt must still cover is agreement latency:
+    // the craft catching one copy through its §7.2 quiet gap, the craft's
+    // CSA_ARMED getting back before it departs, and the issuer's own
+    // retune_all, which is SERIAL and measured 1643 ms on a three-ear ground
+    // (41 + 815 + 787). At 300 ms a campaign could only succeed if the craft
+    // accepted one of the FIRST copies; a craft that accepted a late
+    // retransmit jumped before its ARMED could reach the issuer, which then
+    // aborted and stranded the pair. Device-observed 2026-09-13, repeatedly.
+    // 5000 ms is the operator's ruling and is not min-maxed per adapter: no
+    // per-die rules is an explicit requirement of this spec.
+    static constexpr uint32_t kDtToSwitchMs = 5000;
+
     explicit CsaIssuer(const CsaParams& policy);
 
     // §15.5a claim re-key: swap the CSA PSK (a cached announced token per §11.4a,
