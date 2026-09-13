@@ -36,11 +36,6 @@ Scripts under `tools/` support the §17 bench gates:
   stream's own seq deltas (immune to craft/ground start-time skew). Reports
   per-adapter mean/P95 loss, joint post-diversity loss vs. the independence
   product, and Pearson ρ between adapters.
-- `tools/gate3_rtt.py <ground-stats.jsonl> [iframe-deadline-ms=50]` — the §17
-  gate-3 NACK→RETRANSMIT latency report, diffed from the run's cumulative
-  `nack_rtt_*`/`arq_rec_*` histograms and segment-aware across stream
-  relatches. Reports P50/P90 plus the share provably inside the I-frame
-  deadline.
 
 Bench knob: `air.rx_drop_permille` (per-adapter independent synthetic RX
 drop; bench-only, default off) — used to manufacture known-independent loss
@@ -68,7 +63,7 @@ RX_DROP_PERMILLE=100 BITRATES=4000 tools/frame_shm_udp_bench.sh
 
 The clean sweep defaults to 1/4/8 Mbit/s. It checks frame metadata, Annex-B,
 PTS monotonicity, decoder EOS, frame counts, both UDP adapter counters, FEC,
-ARQ, malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
+malformed/decode outcomes, and SHM producer drops. `FRAMES`, `BITRATES`,
 `WARMUP_FRAMES`, `RX_DROP_PERMILLE`, and `BUILD` are overridable. Set
 `KEEP_TMP=1` to retain configs, logs, and stats JSONL after a failure.
 Synthetic `x265enc` uses periodic IDRs and deliberately fails on a 512 KB SHM
@@ -76,13 +71,13 @@ oversize. Stress-only runs may set `ALLOW_PRODUCER_OVERSIZE=1`; this accepts
 only an oversize-only producer result with no full-ring drops and enough usable
 frames for the consumer. Normal runs continue to fail on every oversize.
 
-ARQ stress uses one listener (fully correlated/single-path loss), disables FEC,
-and permits the consumer to finish with fewer frames while requiring the actual
-NACK/retransmit/recovery counters to advance:
+Loss stress uses one listener (fully correlated/single-path loss), disables FEC,
+and permits the consumer to finish with fewer frames (Pass 205 removed the NACK
+plane, so no retransmit counters are asserted):
 
 ```sh
 FRAMES=300 BITRATES=8000 AIR_KIND=udp-broadcast RX_LISTENERS=1 \
-RX_DROP_PERMILLE=20 FEC_SCHEME=none ALLOW_FRAME_LOSS=1 EXPECT_ARQ=1 \
+RX_DROP_PERMILLE=20 FEC_SCHEME=none ALLOW_FRAME_LOSS=1 \
 CONSUMER_TIMEOUT_MS=15000 ARQ_IFRAME_DEADLINE_MS=16 \
 ARQ_PFRAME_DEADLINE_MS=16 tools/frame_shm_udp_bench.sh
 ```
@@ -110,8 +105,8 @@ python3 tools/link_monitor.py --label 192.168.2.201=vehicle --label 192.168.2.24
 
 Open `http://localhost:8099/`. Each instance gets a card: link state /
 profile / MCS / tx-power / CSA, per-adapter RSSI/SNR/tx-fail/wedged, per-stream
-delivered-rate / pre+post loss / ARQ + FEC recovery / superseded+deadline
-drops / decode-errors / NACK-RTT, and return-path health — all SSE-live with
+delivered-rate / pre+post loss / FEC + cache recovery / superseded+deadline
+drops / decode-errors, and return-path health — all SSE-live with
 staleness dots. The bridge never touches the binaries; it only consumes the
 stats push (`GET /api/instances` for a JSON snapshot, `GET /api/stream` for the
 SSE feed).
@@ -131,15 +126,15 @@ Finite runs also enable the capped UDP packet-event observer and emit
 `{tx,rx}-packets.jsonl`, `controller-packet-trace.jsonl`, and
 `controller-packet-decisions.jsonl`. `PACKET_TRACE_MAX` defaults to 75,000
 events per process; `trace_end.events_dropped` makes an incomplete capture
-explicit. `controller-matrix.json` contains the standard nine recorded/loss
-scenarios crossed with four FEC/ARQ/deadline ablations.
+explicit. `controller-matrix.json` contains the standard recorded/loss
+scenarios crossed with five FEC/deadline ablations.
 Vehicle packet traces default to the SD card at
 `/mnt/mmcblk0p1/waybeam-link-traces` and are removed after retrieval. Override
 the location with `REMOTE_TRACE_DIR`; avoid `/tmp` for extended captures because
 it is a small RAM-backed filesystem on the SSC338Q.
-`FEC_I_RATE_PERMILLE`, `FEC_P_RATE_PERMILLE`, and `FEC_MIN_K` override only the
+`FEC_I_RATE_PERMILLE` and `FEC_P_RATE_PERMILLE` override only the
 generated/deployed waybeam-link bench config. They never edit venc settings;
-set both rates to zero for an ARQ-only hardware run.
+set both rates to zero for a deliberately unprotected run.
 
 ## Frame-SHM video transport setup
 
@@ -157,7 +152,7 @@ venc(frame-shm://venc_frame) → wl tx (FrameFramer+FEC) → AIR → wl rx (reas
 ```
 
 FEC is transparent to the RX (it decodes whatever the TX emits); `fec.scheme
-"none"` fragments + ARQs without repair symbols. Both ends must share
+"none"` fragments without repair symbols. Both ends must share
 `node.net_id` on the radio path. Adaptive MTU: symbols are sized from the
 active profile's `max_payload` (jumbo rungs keep large IDRs under the GF(256)
 k+r≤256 cap). Example configs: `examples/config.frame-shm-{tx,rx}.sample.json`.
@@ -213,7 +208,7 @@ Run (repo root as cwd for `profiles/`): `waybeam-link tx -c <tx>.json`.
 ```
 
 **(a) Devourer RX** — one or more adapters on the craft's channel (extra
-`role":"rx"` adapters add diversity; one `role":"tx"` carries NACK/LINK_REPORT
+`role":"rx"` adapters add diversity; one `role":"tx"` carries LINK_REPORT/JSCC
 returns). Adapters are matched by USB `bus` — or by `mac`, the per-unit EFUSE
 identity (§15.2 Pass 154) — never by netdev name:
 
@@ -238,17 +233,17 @@ the configured receiver originator and exact UDP source endpoint.
 "air": { "kind": "udp", "rx": ["0.0.0.0:5801"], "tx": ["<craft-ip>:5810"] }
 ```
 
-For UDP benches with ARQ, generate the reciprocal pair from one topology file
+For UDP benches, generate the reciprocal pair from one topology file
 so node identities, diversity endpoints, return injection, and preferred peers
 cannot drift independently:
 
 ```sh
-tools/expand_arq_topology.py examples/topology.frame-shm-udp.sample.json \
+tools/expand_udp_topology.py examples/topology.frame-shm-udp.sample.json \
   --out-dir /tmp/waybeam-pair
 ```
 
 The expander writes `tx.json` and `rx.json`. `udp.downlink_ports` defines the
-virtual diversity paths and `udp.return_port` defines the matched NACK/report
+virtual diversity paths and `udp.return_port` defines the matched report/return
 path. It rejects duplicate identities, duplicate downlink ports, and collisions
 between the forward and return paths.
 Once the named SHM producer exists, validate each generated node with
@@ -334,10 +329,9 @@ tools/jscc_ethernet_bench.sh recover-video
 RAMP_DWELL_S=4 tools/jscc_ethernet_bench.sh loss-ramp
 ```
 
-For the opt-in P-frame ARQ Ethernet experiment, restart with
-`ARQ_MODE=all-frames tools/jscc_ethernet_bench.sh start`. This stamps
-non-IDRs retransmit-eligible while retaining the P-frame deadline; the default
-is `idr-only`.
+For the opt-in P-frame Ethernet experiment, restart with
+`FEC_P_RATE_PERMILLE=<n> tools/jscc_ethernet_bench.sh start`. This raises the
+P-frame FEC rate for the run; the default comes from the bench config.
 
 The stable application SHM name is `venc_frame_out` (POSIX object
 `/venc_frame_out`). `status` prints the active name and consumer mode. To run
@@ -366,22 +360,19 @@ python3 tools/jscc_replay.py replay \
 ```
 
 Each frame records its encoded size, raw SDK PTS/arrival cadence, calculated
-symbol size, `k`, target/emitted parity, and whether `k+m <= 256`. Per-frame
-path delivery and RTT are explicitly `null` until packet-event and uplink
-tracing are added; replay does not infer data the Ethernet frame trace cannot
-observe.
+symbol size, `k`, target/emitted parity, and whether `k+m <= 256`. Path
+delivery is explicitly `null` until packet-event and uplink tracing are added;
+replay does not infer data the Ethernet frame trace cannot observe.
 
-Packet-event traces group the existing DATA/NACK wire records by frame block.
-They retain source/repair symbol identity, both virtual listener outcomes,
-synthetic drops, retransmissions, NACK timing, and final replay outcome. Replay
-can replace recorded delivery with deterministic failure models and pin FEC,
-ARQ, or deadline discard for ablation:
+Packet-event traces group the existing DATA wire records by frame block. They
+retain source/repair symbol identity, both virtual listener outcomes, and
+synthetic drops. Replay can replace recorded delivery with deterministic failure
+models and pin FEC or deadline discard for ablation:
 
 ```sh
 python3 tools/jscc_replay.py replay controller-packet-trace.jsonl \
   --loss-model burst --loss-period 100 --burst-length 12 \
-  --path-correlation correlated --fec on --arq eligible \
-  --rtt-ms 4 --deadline-ms 16
+  --path-correlation correlated --fec on --deadline-ms 16
 ```
 
 Loss models are `recorded`, `none`, `burst`, `incremental`, `low-frequency`,
@@ -418,7 +409,7 @@ HEARTBEAT-derived nodes plus DATA-derived stream candidates/latches). **Write**
 | `POST /api/v1/video/recover` | `{"stream_id":0}` (optional with one latch) | rx / ground; request one decoder-bootstrap IDR from the matched TX |
 | `POST /api/v1/stats/reset` | `{}` | any (fresh measurement window) |
 
-Additional endpoints in the same surface: `/api/v1/arq`, `/api/v1/channel`,
+Additional endpoints in the same surface: `/api/v1/channel`,
 `/api/v1/calibration`, `/api/v1/link/{fps,mtu,selection}`, `/api/v1/mode`,
 `/api/v1/modes`, `/api/v1/psk`, `/api/v1/reports/latch`,
 `/api/v1/scout/{start,stop,results,quickconnect}`,

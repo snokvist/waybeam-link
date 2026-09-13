@@ -6,7 +6,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
-    "expand_arq_topology", ROOT / "tools" / "expand_arq_topology.py")
+    "expand_udp_topology", ROOT / "tools" / "expand_udp_topology.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 

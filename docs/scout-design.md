@@ -48,7 +48,7 @@ new metric (channel occupancy) and one new wire packet (ANNOUNCE, §4).
   - Craft: `filter = its net_id` (drops other craft at L2 before parse).
   - Ground while scouting: `filter = unset` (hears all net_ids).
   - Ground once locked: `stamp = filter = the craft's net_id` — **both**, because
-    a craft filtering strictly only hears the ground's CSA/NACK if the ground
+    a craft filtering strictly only hears the ground's CSA/LINK_REPORT if the ground
     stamps that net_id on its uplink. Ground learns the value from the craft's
     source address during scout.
 - **`net_id` is not access control** (§13 unchanged) — it is an L2 partition/

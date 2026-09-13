@@ -162,7 +162,6 @@ def build_trace(args):
             "relative_delay_us": relative_delay_us,
             "deadline_ms": args.deadline_ms,
             "path_delivery": None,
-            "rtt_ms": None,
             "symbol_bytes": symbol_bytes,
             "source_k": k,
             "parity_target_m": target_m,
@@ -209,13 +208,12 @@ def build_event_trace(args):
                 row.get("direction") != "tx" or row.get("outcome") != "submitted"):
             continue
         key = (int(row["session"]), int(row["stream"]), int(row["block"]))
-        block = blocks.setdefault(key, {"packets": {}, "retransmissions": [],
+        block = blocks.setdefault(key, {"packets": {},
                                         "first_tx_us": int(row["t_us"])})
         block["first_tx_us"] = min(block["first_tx_us"], int(row["t_us"]))
         if row.get("retransmit", False):
-            block["retransmissions"].append(dict(row))
-        else:
-            block["packets"].setdefault(int(row["seq"]), dict(row))
+            continue  # decode-only swallow; no retransmit plane (Pass 205)
+        block["packets"].setdefault(int(row["seq"]), dict(row))
     if not blocks:
         raise ValueError("TX packet trace contains no submitted DATA")
 
@@ -245,19 +243,16 @@ def build_event_trace(args):
         packets = []
         source_bytes = 0
         k = 0
-        arq = False
         for seq, packet in sorted(block["packets"].items(), key=lambda item: item[1]["t_us"]):
             if packet["kind"] == "source":
                 source_bytes += max(0, int(packet["bytes"]) - DATA_HEADER_BYTES - 4)
             k = max(k, int(packet.get("k", 0)))
-            arq = arq or bool(packet.get("arq", False))
             paths = []
             for event in rx_by_packet.get((key, seq), []):
                 paths.append({
                     "adapter": int(event["adapter"]),
                     "outcome": event["outcome"],
                     "arrival_offset_us": int(event["t_us"]) - rx_first[key],
-                    "retransmit": bool(event.get("retransmit", False)),
                 })
             packets.append({
                 "seq": seq,
@@ -265,24 +260,6 @@ def build_event_trace(args):
                 "symbol": int(packet["symbol"]),
                 "tx_offset_us": int(packet["t_us"]) - block["first_tx_us"],
                 "paths": paths,
-            })
-        nacks = []
-        packet_seqs = set(block["packets"])
-        for event in rx_rows:
-            if (event.get("type") != "packet" or event.get("packet") != "nack" or
-                    event.get("direction") != "tx" or
-                    event.get("outcome") != "submitted"):
-                continue
-            bitmap = bytes.fromhex(event.get("bitmap", ""))
-            missing = [int(event["base_seq"]) + bit
-                       for bit in range(len(bitmap) * 8)
-                       if bitmap[bit // 8] & (1 << (bit % 8))]
-            relevant = sorted(packet_seqs.intersection(missing))
-            if relevant:
-                nacks.append({
-                    "offset_us": int(event["t_us"]) - rx_first.get(key, int(event["t_us"])),
-                    "base_seq": int(event["base_seq"]),
-                    "missing_seq": relevant,
                 })
         records.append({
             "type": "block",
@@ -293,14 +270,8 @@ def build_event_trace(args):
             "frame_bytes": source_bytes - FRAME_META_BYTES,
             "source_k": k,
             "parity_m": sum(packet["kind"] == "repair" for packet in packets),
-            "arq_eligible": arq,
             "deadline_ms": args.deadline_ms,
             "packets": packets,
-            "nacks": nacks,
-            "retransmissions": [{
-                "seq": int(packet["seq"]),
-                "tx_offset_us": int(packet["t_us"]) - block["first_tx_us"],
-            } for packet in block["retransmissions"]],
         })
     write_jsonl(args.output, records)
     return records
@@ -378,7 +349,7 @@ def replay_blocks(records, args):
     global_packet = 0
     decisions = []
     counts = {name: 0 for name in
-              ("fast", "fec", "arq", "deadline_discard", "unrecoverable")}
+              ("fast", "fec", "deadline_discard", "unrecoverable")}
     parity_available_total = 0
     parity_selected_total = 0
     estimator_underpredicted = 0
@@ -411,35 +382,16 @@ def replay_blocks(records, args):
         parity_available_total += recorded_parity
         parity_selected_total += selected_parity
         received = set()
-        retransmitted = set()
-        arrival_finish_us = 0
-        retransmit_finish_us = 0
         any_received = False
         for packet in block["packets"]:
             if args.loss_model == "recorded":
                 accepted = [path for path in packet.get("paths", [])
-                            if path["outcome"] == "accepted" and
-                            not path.get("retransmit", False)]
-                accepted_retx = [path for path in packet.get("paths", [])
-                                 if path["outcome"] == "accepted" and
-                                 path.get("retransmit", False)]
+                            if path["outcome"] == "accepted"]
                 delivered = bool(accepted)
-                if accepted:
-                    arrival_finish_us = max(
-                        arrival_finish_us,
-                        min(int(path["arrival_offset_us"]) for path in accepted))
-                if accepted_retx:
-                    retransmitted.add((packet["kind"], int(packet["symbol"])))
-                    retransmit_finish_us = max(
-                        retransmit_finish_us,
-                        min(int(path["arrival_offset_us"]) for path in accepted_retx))
             else:
                 delivered = any(injector.delivered(
                                     global_packet, adapter, block_ordinal)
                                 for adapter in range(paths))
-                if delivered:
-                    arrival_finish_us = max(arrival_finish_us,
-                                            int(packet["tx_offset_us"]))
             if delivered:
                 received.add((packet["kind"], int(packet["symbol"])))
                 any_received = True
@@ -465,27 +417,16 @@ def replay_blocks(records, args):
                 adaptive_parity < observed_demand and not guard_active):
             transition_guard_remaining = args.transition_guard_blocks
             transition_guard_activations += 1
-        deadline_us = deadline_ms * 1000
         if sources >= k:
             outcome, reason = "fast", "all_sources_received"
         elif selected_parity and available >= k:
             outcome, reason = "fec", "source_plus_repair_rank"
-        elif (args.loss_model == "recorded" and retransmitted and
-              sum(kind == "source" for kind, _ in received | retransmitted) >= k and
-              retransmit_finish_us <= deadline_us):
-            outcome, reason = "arq", "recorded_retransmit_completed"
+        elif args.deadline_discard == "on":
+            outcome, reason = "deadline_discard", (
+                "no_loss_observation" if not any_received else
+                "insufficient_symbols_before_deadline")
         else:
-            eligible = args.arq == "force" or (
-                args.arq == "eligible" and block.get("arq_eligible", False))
-            arq_finish_us = arrival_finish_us + args.rtt_ms * 1000
-            if eligible and any_received and arq_finish_us <= deadline_us:
-                outcome, reason = "arq", "rtt_inside_remaining_deadline"
-            elif args.deadline_discard == "on":
-                outcome, reason = "deadline_discard", (
-                    "no_loss_observation" if not any_received else
-                    "insufficient_symbols_before_deadline")
-            else:
-                outcome, reason = "unrecoverable", "recovery_disabled_or_late"
+            outcome, reason = "unrecoverable", "recovery_disabled_or_late"
         counts[outcome] += 1
         decisions.append({
             "type": "decision",
@@ -525,8 +466,6 @@ def replay_blocks(records, args):
             "margin": args.estimator_margin,
             "transition_guard_blocks": args.transition_guard_blocks,
         } if args.fec == "adaptive" else None),
-        "arq": args.arq,
-        "rtt_ms": args.rtt_ms,
         "deadline_ms": deadline_ms,
         "parity_available_symbols": parity_available_total,
         "parity_selected_symbols": parity_selected_total,
@@ -560,22 +499,20 @@ def replay_matrix(records, args):
         ("high-frequency", "correlated"),
     )
     ablations = (
-        ("fec_only", "on", "off", "off", 0),
-        ("fec_arq", "on", "eligible", "off", 0),
-        ("fec_arq_discard", "on", "eligible", "on", 0),
-        ("adaptive_fec_arq_discard", "adaptive", "eligible", "on", 0),
-        ("adaptive_guarded_fec_arq_discard", "adaptive", "eligible", "on",
+        ("fec_only", "on", "off", 0),
+        ("fec_discard", "on", "on", 0),
+        ("adaptive_fec_discard", "adaptive", "on", 0),
+        ("adaptive_guarded_fec_discard", "adaptive", "on",
          args.transition_guard_blocks),
-        ("arq_discard", "off", "eligible", "on", 0),
+        ("no_fec_discard", "off", "on", 0),
     )
     results = []
     for loss_model, correlation in loss_scenarios:
-        for name, fec, arq, discard, guard_blocks in ablations:
+        for name, fec, discard, guard_blocks in ablations:
             run = copy.copy(args)
             run.loss_model = loss_model
             run.path_correlation = correlation
             run.fec = fec
-            run.arq = arq
             run.deadline_discard = discard
             run.transition_guard_blocks = guard_blocks
             summary = replay_blocks(records, run)[-1]
@@ -686,9 +623,7 @@ def parse_args(argv):
     run.add_argument("--loss-step-levels",
                      default="0,50,100,150,200,150,100,50")
     run.add_argument("--loss-step-dwell-blocks", type=int, default=40)
-    run.add_argument("--rtt-ms", type=int, default=4)
     run.add_argument("--fec", choices=("on", "off", "adaptive"), default="on")
-    run.add_argument("--arq", choices=("off", "eligible", "force"), default="eligible")
     run.add_argument("--deadline-discard", choices=("on", "off"), default="on")
     add_estimator_args(run)
     matrix = sub.add_parser("matrix", help="run the standard loss/ablation matrix")
@@ -704,7 +639,6 @@ def parse_args(argv):
     matrix.add_argument("--loss-step-levels",
                         default="0,50,100,150,200,150,100,50")
     matrix.add_argument("--loss-step-dwell-blocks", type=int, default=40)
-    matrix.add_argument("--rtt-ms", type=int, default=4)
     add_estimator_args(matrix, transition_guard_blocks=20)
     return parser.parse_args(argv)
 

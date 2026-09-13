@@ -176,7 +176,7 @@ still 992; every conceal-on egress decoded clean on ffmpeg + GStreamer;
 
 **Re-run once with a real `.232` capture as `CONCEAL_ES`** (after Phase A) —
 the synthetic-content pass does not re-prove the SSC338Q stream shape.
-Carry-over for Phase E: IDR ARQ convergence is partial under blanket loss
+Carry-over for Phase E: IDR convergence is partial under blanket loss
 (6/10 IDR AUs at 20%) — the freeze stands in and the stream rides ref-gaps
 to the next IDR; if that looks bad on RF, raise IDR protection
 (i_rate/min_r), don't touch the concealment.

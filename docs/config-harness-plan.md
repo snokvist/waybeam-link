@@ -18,7 +18,7 @@ where hand-editing goes wrong. Derived from `deploy/`:
 
 | Archetype | `node.role` | `node.spectator` | adapters | streams | distinguishing blocks |
 |---|---|---|---|---|---|
-| `tx-vehicle` | `tx` | — | exactly one, `role:"tx"` | `dir:"in"` (frame-shm or udp) | `venc`, `policy.select`, per-stream `fec`/`arq_mode` |
+| `tx-vehicle` | `tx` | — | exactly one, `role:"tx"` | `dir:"in"` (frame-shm or udp) | `venc`, `policy.select`, per-stream `fec` |
 | `tx-ground` | **`rx`** | false | one `role:"tx"` uplink + N `role:"rx"` ears | `dir:"out"` | `scout`, optional `cache.repair` |
 | `rx-spectator` | `rx` | **true** | all `role:"rx"` | `dir:"out"` | no uplink at all (§3.8 heartbeat suppression) — kernel-monitor only today, see §2a |
 | `rx-cache` | `rx` | false | all `role:"rx"` | **empty** | `cache.store` (+ `controller`, `status_to`) |
@@ -295,7 +295,7 @@ Two things make this safe to adopt:
 - Every node config in `deploy/` and `examples/` was checked against the key
   set in `config.cpp`: **no unknown keys today**. The only hit is
   `examples/topology.frame-shm-udp.sample.json`, which is not a node config —
-  it is input to `tools/expand_arq_topology.py`. Strict mode can therefore be
+  it is input to `tools/expand_udp_topology.py`. Strict mode can therefore be
   turned on without breaking anything we currently fly.
 
 Suggested staging: `--check --strict` warns first, and becomes an error once
@@ -346,8 +346,8 @@ not have learned about. It is also a key the harness specifically wants, since
 Pass 146's whole finding is that a devourer identity must be declared rather
 than derived.
 
-Prior art worth noting: `tools/expand_arq_topology.py` already expands one
-topology description into matched TX/RX configs for the UDP ARQ bench. The
+Prior art worth noting: `tools/expand_udp_topology.py` already expands one
+topology description into matched TX/RX configs for the UDP bench. The
 fleet file in §5 is the same idea generalised to the shipping archetypes — and
 the reason to move it into the binary is precisely the drift problem above.
 

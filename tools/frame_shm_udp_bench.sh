@@ -15,7 +15,6 @@ PACKET_TRACE=${PACKET_TRACE:-0}
 PACKET_TRACE_MAX=${PACKET_TRACE_MAX:-75000}
 ALLOW_PRODUCER_OVERSIZE=${ALLOW_PRODUCER_OVERSIZE:-0}
 ALLOW_FRAME_LOSS=${ALLOW_FRAME_LOSS:-0}
-EXPECT_ARQ=${EXPECT_ARQ:-0}
 FEC_SCHEME=${FEC_SCHEME:-rlc256}
 RX_LISTENERS=${RX_LISTENERS:-2}
 CONSUMER_TIMEOUT_MS=${CONSUMER_TIMEOUT_MS:-30000}
@@ -36,10 +35,6 @@ if [[ "$ALLOW_PRODUCER_OVERSIZE" != 0 && "$ALLOW_PRODUCER_OVERSIZE" != 1 ]]; the
 fi
 if [[ "$ALLOW_FRAME_LOSS" != 0 && "$ALLOW_FRAME_LOSS" != 1 ]]; then
     echo "ALLOW_FRAME_LOSS must be 0 or 1" >&2
-    exit 2
-fi
-if [[ "$EXPECT_ARQ" != 0 && "$EXPECT_ARQ" != 1 ]]; then
-    echo "EXPECT_ARQ must be 0 or 1" >&2
     exit 2
 fi
 if [[ "$FEC_SCHEME" != none && "$FEC_SCHEME" != rlc256 ]]; then
@@ -137,7 +132,7 @@ PY
   "streams":[{"stream_id":0,"stream_type":"RTP","dir":"in",
     "bind":{"kind":"frame-shm","name":"$in_ring"},
     "fec":{"scheme":"$FEC_SCHEME","i_rate_permille":250,
-           "p_rate_permille":100,"min_k":3}}],
+           "p_rate_permille":100}}],
   "air":$tx_air,
   "policy":{"select":{"min_profile":0,"max_profile":0}},
   "stats":{"hz":5}
@@ -213,7 +208,7 @@ PY
 
     python3 - "$TMP/tx-${index}.jsonl" "$TMP/rx-${index}.jsonl" \
               "$FRAMES" "$total_frames" "$RX_DROP_PERMILLE" \
-              "$expected_adapters" "$EXPECT_ARQ" <<'PY'
+              "$expected_adapters" <<'PY'
 import json
 import sys
 
@@ -232,7 +227,6 @@ def last(path):
 tx, rx = last(sys.argv[1]), last(sys.argv[2])
 expected, generated, loss = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 expected_adapters = int(sys.argv[6])
-expect_arq = int(sys.argv[7])
 txs = tx["streams"][0]
 rxs = rx["streams"][0]
 assert txs["delivered"] == generated, ("TX frames", txs["delivered"], generated)
@@ -243,17 +237,12 @@ if loss == 0:
     assert all(a["kernel_drop"] == 0 for a in tx["adapters"] + rx["adapters"])
     assert rxs["frames_fast"] + rxs["recovered_fec"] >= expected, rxs
     assert rxs["decode_errors"] == 0 and rxs["malformed"] == 0, rxs
-if expect_arq:
-    assert rxs["nacks_sent"] > 0, rxs
-    assert txs["resends_sent"] > 0, txs
-    assert rxs["recovered_arq"] > 0, rxs
-print("stats tx_frames=%d rx_fast=%d rx_fec=%d arq_packets=%d "
-      "unrecoverable=%d deadline=%d loss_milli=%d nacks=%d resends=%d" %
+print("stats tx_frames=%d rx_fast=%d rx_fec=%d "
+      "unrecoverable=%d deadline=%d loss_milli=%d" %
       (txs["delivered"], rxs["frames_fast"], rxs["recovered_fec"],
-       rxs["recovered_arq"], rxs["frames_unrecoverable"],
+       rxs["frames_unrecoverable"],
        rxs["dropped_deadline"],
-       rxs["loss_postdiv_prearq_milli"], rxs["nacks_sent"],
-       txs["resends_sent"]))
+       rxs["loss_postdiv_prearq_milli"]))
 PY
     echo "bitrate=${bitrate}kbps air=${AIR_KIND} drop=${RX_DROP_PERMILLE}permille"
     cat "$TMP/producer-${index}.log"

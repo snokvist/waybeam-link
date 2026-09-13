@@ -393,6 +393,12 @@ not fps.
 
 ## 11. DERIVED (§17): the block target — and why there isn't one
 
+> **Pass 205 (2026-09-13) closed B11 by removing the `k <= min_k` ARQ-only
+> branch entirely** (ruling O1): `r = max(ceil(k·rate), min_r)` at every `k`,
+> and `rate = 0` still means bare. The root-cause and proposed-ruling
+> subsections below are the historical derivation that led there; the
+> `arq_mode`/ARQ-eligibility condition they propose no longer exists.
+
 The §17 derivation §9.11 has always owed. Run two ways that agree:
 
 - **Offline**, driving the real `FrameFramer` (§5.1a) and `FrameReassembler`
@@ -597,9 +603,10 @@ track the `ceil()` inflation at small k, which the sweep measured at up to
   skew — larger than the effect — and produced negative loss rates. Use
   single-source ground-side counters (§11.5).
 - **The cache repair path is inert.** With `caches_configured: 1` and
-  `caches_following: 1`, `arq_recovered_source_symbols` and
-  `arq_recovered_repair_symbols` were both **0** for the whole session, so it
-  did not contaminate these measurements. Worth its own look: at 100 fps the
+  `caches_following: 1`, the ARQ attribution counters
+  (`arq_recovered_source_symbols`/`arq_recovered_repair_symbols`, since removed
+  in Pass 205) were both **0** for the whole session, so cache repair did not
+  contaminate these measurements. Worth its own look: at 100 fps the
   §14.3 `hard_close_ms: 8` budget is shorter than a frame interval.
 - **Encode resolution is independent of sensor mode.** The craft runs sensor
   mode 3 (2176×1224, 100 fps) encoding to 1280×720 — the ISP downscales. So

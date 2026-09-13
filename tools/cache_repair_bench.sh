@@ -10,11 +10,11 @@
 #
 # The aggregator takes rx_drop_permille synthetic loss; the spatially-"clean"
 # cache node hears the same broadcast losslessly and answers CACHE_REQUESTs
-# over localhost UDP. MODE=cache-only (default) points the aggregator's NACK
-# return at a dead port so recovered_arq must stay 0 and every repaired block
-# is attributable to the cache path; MODE=combined leaves vehicle ARQ live in
-# parallel (§14.3 rule 8). The consumer verifies every delivered frame
-# byte-exact (§6.3a reassembly), not just counts.
+# over localhost UDP. The aggregator's return port is dead-ported so no return
+# traffic reaches the TX and every repaired block is attributable to the cache
+# path (Pass 205 removed the NACK/retransmit plane, so there is no vehicle ARQ
+# to isolate from). The consumer verifies every delivered frame byte-exact
+# (§6.3a reassembly), not just counts.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -26,15 +26,10 @@ FPS=${FPS:-30}
 P_BYTES=${P_BYTES:-12000}
 IDR_EVERY=${IDR_EVERY:-30}
 DROP=${DROP:-150}
-MODE=${MODE:-cache-only}
 MIN_DELIVERED_PCT=${MIN_DELIVERED_PCT:-85}
 BASE_PORT=${BASE_PORT:-25200}
 STATUS_INTERVAL_MS=${STATUS_INTERVAL_MS:-200}
 
-if [[ "$MODE" != cache-only && "$MODE" != combined ]]; then
-    echo "MODE must be cache-only or combined" >&2
-    exit 2
-fi
 if [[ ! -x "$LINK" || ! -x "$FEED" ]]; then
     echo "bench binaries missing under $BUILD" >&2
     echo "run: cmake --preset dev && cmake --build --preset dev -j" >&2
@@ -45,10 +40,7 @@ AIRP=$BASE_PORT              # shared broadcast data channel
 DEADP=$((BASE_PORT + 1))     # nobody listens here
 CACHEC=$((BASE_PORT + 2))    # cache.store listen
 AGGC=$((BASE_PORT + 3))      # cache.repair listen (replies + status)
-RETP=$AIRP
-if [[ "$MODE" == cache-only ]]; then
-    RETP=$DEADP              # NACKs go nowhere => recovered_arq must be 0
-fi
+RETP=$DEADP                  # returns go nowhere; cache repair is isolated
 
 IN_RING="wblink_cache_in_$$"
 OUT_RING="wblink_cache_out_$$"
@@ -75,7 +67,7 @@ cat >"$TMP/tx.json" <<EOF
   "streams": [{"stream_id": 0, "stream_type": "RTP", "dir": "in",
     "bind": {"kind": "frame-shm", "name": "$IN_RING"},
     "fec": {"scheme": "rlc256", "i_rate_permille": 250,
-            "p_rate_permille": 100, "min_k": 3}}],
+            "p_rate_permille": 100}}],
   "air": {"kind": "udp-broadcast", "tx": ["127.255.255.255:$AIRP"],
           "rx": ["0.0.0.0:$AIRP"], "pace_mbps": 100},
   "policy": {"select": {"min_profile": 0, "max_profile": 0}},
@@ -147,7 +139,7 @@ if (( consumer_rc != 0 )); then
     exit 1
 fi
 
-python3 - "$TMP/agg.jsonl" "$TMP/cache.jsonl" "$MODE" <<'PY'
+python3 - "$TMP/agg.jsonl" "$TMP/cache.jsonl" <<'PY'
 import json
 import sys
 
@@ -163,7 +155,7 @@ def last(path):
         raise SystemExit(f"no stats in {path}")
     return rows[-1]
 
-agg, cache, mode = last(sys.argv[1]), last(sys.argv[2]), sys.argv[3]
+agg, cache = last(sys.argv[1]), last(sys.argv[2])
 cr = agg["cache_repair"]
 cs = cache["cache_store"]
 aggs = agg["streams"][0]
@@ -174,16 +166,13 @@ assert cr["blocks_repaired"] > 0, cr
 assert cs["requests_answered"] > 0, cs
 assert cs["symbols_sent"] > 0, cs
 assert cs["health_permille"] > 900, cs   # the cache hears a clean broadcast
-if mode == "cache-only":
-    # NACK return is dead-ported: every repair is the cache path's (§14.3-8).
-    assert aggs["recovered_arq"] == 0, aggs
 print("cache stats: requests=%d replies=%d accepted=%d repaired_blocks=%d "
       "futile=%d suppressed=%d | store answered=%d sent=%d health=%d | "
-      "agg fast=%d fec=%d arq=%d unrecoverable=%d" %
+      "agg fast=%d fec=%d unrecoverable=%d" %
       (cr["requests"], cr["replies"], cr["symbols_accepted"],
        cr["blocks_repaired"], cr["blocks_futile"], cr["requests_suppressed"],
        cs["requests_answered"], cs["symbols_sent"], cs["health_permille"],
-       aggs["frames_fast"], aggs["recovered_fec"], aggs["recovered_arq"],
+       aggs["frames_fast"], aggs["recovered_fec"],
        aggs["frames_unrecoverable"]))
 PY
-echo "cache repair bench ($MODE, drop=${DROP}permille): PASS"
+echo "cache repair bench (drop=${DROP}permille): PASS"

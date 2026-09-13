@@ -4,6 +4,13 @@ Review date: 2026-07-12. This reviews `docs/waybeam-jscc-controller.md` against
 the current protocol and implementation. The investigative brief is useful
 direction, but it is not yet an implementation specification.
 
+> **ARQ removed (Pass 205, 2026-09-13).** Every NACK/retransmit gate, ablation
+> and measurement below is historical: the retransmit plane is deleted, the JSCC
+> RTT-readiness gate is gone (its only source was the NACK RTT estimator), and
+> `jscc_input_resend_us`/`jscc_input_guard_us`/`jscc_output_arq_eligible` are no
+> longer emitted. The FEC-shadow findings and the replay matrix are kept, with
+> the ARQ ablations dropped.
+
 ## Findings
 
 1. **The controller objective needs a measurable deadline definition.** A

@@ -47,7 +47,7 @@ class JsccReplayTest(unittest.TestCase):
                        "originator": 17, "session": 99, "stream": 0,
                        "block": block, "seq": seq, "kind": kind,
                        "symbol": symbol if kind == "source" else 0, "k": 3,
-                       "frame_len": 3000, "arq": True, "retransmit": False,
+                       "frame_len": 3000,
                        "eob": symbol == 2, "bytes": 1030}
                 tx.append(row)
                 for adapter in range(2):
@@ -114,7 +114,6 @@ class JsccReplayTest(unittest.TestCase):
         self.assertEqual(2, decisions[-1]["parity_selected_symbols"])
 
         replay_args.fec = "off"
-        replay_args.arq = "off"
         decisions = jscc_replay.replay_blocks(records, replay_args)
         self.assertEqual("deadline_discard", decisions[1]["outcome"])
         self.assertEqual(1000, decisions[-1]["parity_reduction_permille"])
@@ -135,7 +134,6 @@ class JsccReplayTest(unittest.TestCase):
 
         replay_args.loss_model = "low-frequency"
         replay_args.loss_period = 2
-        replay_args.arq = "off"
         replay_args.path_correlation = "independent"
         independent = jscc_replay.replay_blocks(records, replay_args)[-1]
         replay_args.path_correlation = "correlated"
@@ -146,7 +144,7 @@ class JsccReplayTest(unittest.TestCase):
             "matrix", str(self.root / "events.jsonl"),
             "--output", str(self.root / "matrix.json")])
         matrix = jscc_replay.replay_matrix(records, matrix_args)
-        self.assertEqual(66, len(matrix))
+        self.assertEqual(55, len(matrix))
         self.assertEqual("recorded:independent", matrix[0]["scenario"])
         self.assertEqual("fec_only", matrix[0]["ablation"])
 
@@ -158,7 +156,6 @@ class JsccReplayTest(unittest.TestCase):
         records = jscc_replay.build_event_trace(args)
         replay_args = jscc_replay.parse_args([
             "replay", str(self.root / "events.jsonl"), "--fec", "adaptive",
-            "--arq", "off",
             "--loss-model", "recorded", "--estimator-window", "2",
             "--estimator-min-samples", "1", "--estimator-quantile", "1",
             "--estimator-cold-start", "0"])
@@ -220,7 +217,7 @@ class JsccReplayTest(unittest.TestCase):
         records = jscc_replay.build_event_trace(args)
         replay_args = jscc_replay.parse_args([
             "replay", str(self.root / "events.jsonl"), "--fec", "adaptive",
-            "--arq", "off", "--estimator-cold-start", "0",
+            "--estimator-cold-start", "0",
             "--estimator-min-samples", "20", "--transition-guard-blocks", "2"])
         decisions = jscc_replay.replay_blocks(records, replay_args)
 

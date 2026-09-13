@@ -1,5 +1,5 @@
 {
-  "_comment": "devourer radio, GROUND side (\u00a73.0): N diversity RX adapters + one designated uplink TX (role tx) for NACK/LINK_REPORT returns. quiet_gap schedules those returns at the middle of the craft's \u00a77.2 listen window, anchored on the EOB receive-TSF. Delivered RTP goes to the local decoder on :5600.",
+  "_comment": "devourer radio, GROUND side (\u00a73.0): N diversity RX adapters + one designated uplink TX (role tx) for LINK_REPORT/JSCC returns. quiet_gap schedules those returns at the middle of the craft's \u00a77.2 listen window, anchored on the EOB receive-TSF. Delivered RTP goes to the local decoder on :5600.",
   "node": {
     "originator": 9,
     "role": "rx",

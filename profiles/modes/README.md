@@ -191,11 +191,14 @@ while both `/fps/live` and `/api/v1/modes` report the nominal rate.
 
 ## Dependencies
 
-These bitrates assume **Pass 94** (§14.1 `min_k` gate conditioned on ARQ
-eligibility) and **Pass 95** (§9.5 `fec_overhead_frac` non-zero). Without
-Pass 94 the Range-High column is unsafe at its floor rung — that is exactly
-the B11 failure. Without Pass 95 every bitrate here is ~18 % optimistic and
-the floor cells do not actually clear 0.04.
+These bitrates assume **Pass 94** (§14.1 `min_k` gate — Pass 205 removed ARQ
+and the gate with it, so every frame class now carries
+`r = max(ceil(k·rate), min_r)` at every `k`) and **Pass 95**
+(§9.5 `fec_overhead_frac` non-zero). The Range-High column was derived under
+the old conditional gate; the floor-rung hole that gate left — the B11
+failure — is exactly what Pass 205 closes unconditionally. Without Pass 95
+every bitrate here is ~18 % optimistic and the floor cells do not actually
+clear 0.04.
 
 The IMX662 numbers carry one further caveat: `table-8733b.json`'s airtime and
 FEC constants are still 8812-calibrated seeds (§17 re-derive pending), so its

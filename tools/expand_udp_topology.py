@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expand one UDP ARQ topology into matched waybeam-link TX/RX configs."""
+"""Expand one UDP topology into matched waybeam-link TX/RX configs."""
 
 import argparse
 import copy
@@ -121,7 +121,7 @@ def main():
         (args.out_dir / "tx.json").write_text(json.dumps(tx, indent=2) + "\n", encoding="utf-8")
         (args.out_dir / "rx.json").write_text(json.dumps(rx, indent=2) + "\n", encoding="utf-8")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        print(f"expand_arq_topology: {exc}", file=sys.stderr)
+        print(f"expand_udp_topology: {exc}", file=sys.stderr)
         return 2
     return 0
 

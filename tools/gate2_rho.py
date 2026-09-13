@@ -7,7 +7,7 @@ the ground's own view of the craft seq (streams[0].seq), so craft/ground
 start-time skew cannot contaminate the series. Per active window:
 
   per-adapter loss  = 1 - (adapter rx delta / seq delta)
-  joint pre-ARQ loss = 1 - (uniq delta / seq delta)   [post-diversity]
+  joint loss        = 1 - (uniq delta / seq delta)   [post-diversity]
 
 Reports mean + P95 per adapter, the joint loss vs the independence
 prediction (product of per-adapter means), and Pearson rho of the two
@@ -54,7 +54,7 @@ def main(path, min_dseq=30):
     for n in names:
         print(f"loss {n}: mean {statistics.mean(series[n]):.3f}  "
               f"P95 {p95(series[n]):.3f}")
-    print(f"joint post-div pre-ARQ: mean {statistics.mean(joint):.4f}  "
+    print(f"joint post-div: mean {statistics.mean(joint):.4f}  "
           f"P95 {p95(joint):.4f}")
     indep = 1.0
     for n in names:
@@ -66,8 +66,7 @@ def main(path, min_dseq=30):
             print(f"pearson rho: "
                   f"{statistics.correlation(series[a], series[b]):+.3f}")
     last = rows[-1]["streams"][0]
-    print(f"totals: uniq={last['uniq']} diversity={last['diversity']} "
-          f"nacks={last['nacks_sent']} recovered_arq={last['recovered_arq']}")
+    print(f"totals: uniq={last['uniq']} diversity={last['diversity']}")
     return 0
 
 

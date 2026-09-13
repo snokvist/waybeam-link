@@ -1,5 +1,5 @@
 {
-  "_comment": "frame-shm RX side (§6.3a/§15.4): two listen sockets = two diversity adapters (:5801/:5802), NACKs sent back to the TX on :5810. The RTP out-stream is reassembled from DATA symbols (FEC-decoded when source symbols are lost) into whole [VencFrameMeta][Annex-B] blobs and written to a SHM ring 'venc_frame_out' (this process is the ring's producer; a downstream consumer — e.g. a decoder — attaches it) instead of a UDP egress. Pin the latch to originator 17 (optional).",
+  "_comment": "frame-shm RX side (§6.3a/§15.4): two listen sockets = two diversity adapters (:5801/:5802), LINK_REPORT/JSCC returns sent back to the TX on :5810. The RTP out-stream is reassembled from DATA symbols (FEC-decoded when source symbols are lost) into whole [VencFrameMeta][Annex-B] blobs and written to a SHM ring 'venc_frame_out' (this process is the ring's producer; a downstream consumer — e.g. a decoder — attaches it) instead of a UDP egress. Pin the latch to originator 17 (optional).",
   "node": { "originator": 9, "role": "rx" },
   "profile_table": "profiles/table.example.json",
   "streams": [

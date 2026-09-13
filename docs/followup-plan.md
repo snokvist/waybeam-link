@@ -16,6 +16,12 @@ over. A DONE row on the retired backend is a record of a past run, **not
 coverage of the shipping path** — read the mark before citing a row as
 evidence.
 
+**ARQ note (2026-09-13, Pass 205).** The NACK/retransmit plane is deleted:
+`policy.arq.*` (including `arq_max_fps`), `streams[].arq_mode`,
+`cache.repair.nack_grace_ms`, and the `nacks_sent`/`recovered_arq`/`resends_sent`/
+`nack_rtt_*` counters are gone. Rows below that cite them are history; their
+cache/JSCC/FEC content (where marked LIVE) still stands without the ARQ half.
+
 | id | item | status |
 |---|---|---|
 | R-D | Dynamic 20/40 MHz width | **RULED (Pass 40):** v1 is fleet-wide 20 MHz; 40 MHz revisited later behind a hardware verdict + CSA-shaped design |

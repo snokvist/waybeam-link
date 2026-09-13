@@ -60,6 +60,11 @@ matched airtime. Success = no regression in `frames_unrecoverable`/delivered;
 that measures the §14.1 rate re-tune that absorbs the freed ARQ airtime.
 *Hardware-required.*
 
+**Closure (2026-09-13).** Spec landed as commit `665e81e` and the core/node/io/
+app/test deletion as commit `0d94149` ("code: remove the NACK/retransmit plane
+(Pass 205)"); the tools/data/docs sweep follows. The airtime re-tune above
+remains open and hardware-gated.
+
 ## 2026-09-13 — VERIFIED: the 300 ms dt was the bench blocker, and the final jump now converges 5/5
 
 **Device-verified on `.242` (8812AU ground) + `.232` (SSC338Q craft), both ends
