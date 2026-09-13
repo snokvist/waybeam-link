@@ -453,14 +453,30 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         return err.empty() ? reply(200, "OK", json_ok())
                            : reply(400, "Bad Request", json_err(err));
     };
+    // §15.5 Pass 206: `value<int>` throws on a string/null and static-casts a
+    // wide number before the handler's range check can see it, so validate the
+    // JSON type and read through int64 here (same guard /reports/latch uses).
+    const auto read_mhz = [&](int64_t* out) -> const char* {
+        if (!j.contains("mhz")) return "mhz required";
+        if (!j["mhz"].is_number_integer()) return "mhz must be an integer";
+        const int64_t mhz = j["mhz"].get<int64_t>();
+        if (mhz <= 0 || mhz > 0xFFFF) return "mhz out of range";
+        *out = mhz;
+        return nullptr;
+    };
 
     if (path == "/api/v1/csa") {
         if (!h_.csa) return na();
-        const uint32_t mhz = j.value("mhz", 0u);
-        const uint32_t klass = j.value("class", 0u);
-        if (mhz == 0) {
-            return reply(400, "Bad Request", json_err("mhz required"));
+        int64_t mhz_i = 0;
+        if (const char* e = read_mhz(&mhz_i)) {
+            return reply(400, "Bad Request", json_err(e));
         }
+        if (j.contains("class") && !j["class"].is_number_integer()) {
+            return reply(400, "Bad Request",
+                         json_err("class must be an integer"));
+        }
+        const uint32_t mhz = static_cast<uint32_t>(mhz_i);
+        const uint32_t klass = j.value("class", 0u);
         const auto [code, jbody] = h_.csa(mhz, klass);
         return reply(code,
                      code == 200 ? "OK"
@@ -722,10 +738,23 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
     }
     if (path == "/api/v1/channel") {  // §15.5 Pass 113
         if (!h_.channel_set) return na();
-        if (!j.contains("mhz")) {
-            return reply(400, "Bad Request", json_err("mhz required"));
+        int64_t mhz = 0;
+        if (const char* e = read_mhz(&mhz)) {
+            return reply(400, "Bad Request", json_err(e));
         }
-        return done(h_.channel_set(j.value("mhz", 0)));
+        return done(h_.channel_set(static_cast<int>(mhz)));
+    }
+    if (path == "/api/v1/move") {  // §15.5 Pass 206
+        if (!h_.move) return na();
+        int64_t mhz = 0;
+        if (const char* e = read_mhz(&mhz)) {
+            return reply(400, "Bad Request", json_err(e));
+        }
+        const auto [code, jbody] = h_.move(static_cast<int>(mhz));
+        return reply(code,
+                     code == 200 ? "OK"
+                                 : (code == 409 ? "Conflict" : "Bad Request"),
+                     jbody);
     }
     if (path == "/api/v1/psk") {  // §11.4a Pass 113
         if (!h_.psk_enable) return na();

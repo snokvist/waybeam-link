@@ -178,6 +178,12 @@ class RxEngine {
     void select_originator(uint16_t originator);
     std::optional<uint16_t> selected_originator() const;
 
+    // §15.5 Pass 206: drop every output want's sender pin and tear down the
+    // current subscription, so normal §2 admission resolves the first tuple
+    // heard. Unlike select_originator(0) — a no-op, 0 being "no pin" already —
+    // this always clears the latched streams: a move detaches unconditionally.
+    void unpin_originator();
+
   private:
     struct Held {
         std::vector<uint8_t> payload;

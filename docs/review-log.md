@@ -24,6 +24,51 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 206 — `/move` is a local detach-and-retune, and a spectating rx node auto-adopts by sticky first-admitted (2026-09-13)
+
+The link could be moved two ways and neither was a plain operator override:
+`/csa` moves the craft but only toward a *selected* target and always runs a
+campaign; on the ground the receiver's own channel was boot-config only. There
+was no way to "flick through channels" and let a receiver show whatever craft is
+transmitting, the way an analog RX does.
+
+Ruled:
+
+1. §15.5 — `POST /api/v1/move {mhz}` is a new local primitive on **both** roles:
+   retune → detach → (rx) un-pin → `spectating` (the retune runs first so a 400
+   is a no-op). It contacts no peer, binds nothing, and starts no campaign, and
+   is **not** restricted to `csa.channel_allowlist` (operator override; the TX
+   `/channel` form stays allowlist-respecting). `mhz<=0` or `mhz>65535` is 400.
+   On rx it **409**s while an issuer, vehicle-command, or bi-directional
+   calibration campaign is in flight rather than silently cancelling it (a
+   mid-commit abort strands the craft, and a calibration abort emits a §11.7
+   `CALIBRATE=0`); the tx form clears unconditionally like `/channel`. It is not
+   exposed on a receiver-owned cache controller. It releases every §11.5a/§11.7
+   binding, so a peer that does not follow is lost until re-scout.
+2. §15.5/§15.5a — `spectating` is a new selection state: the receiver holds a
+   channel, not a craft. It is not bound/latched/committed and not a
+   `vehicle/command` target. The §2 latch picker resolves **sticky
+   first-admitted**: the first tuple to clear normal admission is adopted while
+   the state **stays** `spectating` (the engine stream latch holds the craft,
+   not a state promotion); nothing re-selects until that stream tears down. Two
+   craft on one channel → whichever wins admission, except on a multi-out-stream
+   node, where each stream latches independently and a mixed co-channel latch
+   leaves the selection unbound (originator 0) rather than naming one; an empty
+   channel → nothing. §11.7 "no bootstrap" is unchanged: seeing is not
+   commanding.
+3. §15.5 — `GET /api/v1/link/selection` may now report `spectating`. Role
+   routing is the caller's: the hub `POST /move {target,mhz}` 409s a target that
+   is not its local `wblink.role`.
+
+Strongest-RSSI selection was rejected in review: the RX engine tracks per-adapter
+RSSI only, and a picker that re-ranks would flap between two co-channel craft — a
+stable lock, re-resolved only on teardown, is the analog behaviour worth having.
+
+Spec: §15.5, §15.5a. Evidence: branch `feature/move-endpoint` (waybeam-link +
+waybeam-hub), rebased onto `main` @ `09b5d24` (Pass 205); core gap found during
+design — `RxEngine::select_originator(0)` is a no-op (`core/src/rx.cpp`), so the
+un-pin is a new `unpin_originator()` API.
+
 ## Pass 205 — the NACK/retransmit plane is DELETED; repair is FEC + cache + concealment (2026-09-13)
 
 **Verdict.** Remove ARQ entirely — NACK generation, resend ring, scheduler, §12

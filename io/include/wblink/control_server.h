@@ -133,6 +133,15 @@ struct ControlHandlers {
     // true = locked / stop announcing).
     std::function<std::string(int mhz)> channel_set;
     std::function<std::string(bool enabled)> psk_enable;
+    // §15.5 Pass 206 (both roles, null → 409): the operator's manual channel
+    // override. Detach this node's radio from any bound craft and retune to
+    // any valid channel (not allowlist-restricted, unlike channel_set above).
+    // Returns {200, "{\"ok\":true}"} on success, else {400|409, json_err}.
+    // On an rx node 409 is reserved for a move that cannot proceed because an
+    // issuer campaign, a vehicle-command campaign, or a bi-directional
+    // calibration is in flight (no campaign-cancel API); 400 covers a bad or
+    // out-of-range mhz. A tx node clears unconditionally, like channel_set.
+    std::function<std::pair<int, std::string>(int mhz)> move;
     // §15.5 Pass 115 (tx/craft only, null → 409): §3.5 report-authority
     // override. clear = release the LINK_REPORT + JSCC_FEEDBACK latch so the
     // next reporter takes it within relatch_ms; otherwise force it to

@@ -491,6 +491,19 @@ struct RxCore {
         word_source_.reset();  // §3.15: the latch never crosses crafts
     }
 
+    // §15.5 Pass 206: detach the current subscription and leave the wants
+    // unpinned for §2 first-admitted resolution. Same link-scoped resets as
+    // select_originator — the reporting/selector word state belongs to the
+    // craft being left, not the channel being moved to.
+    void unpin_originator() {
+        engine_.unpin_originator();
+        reporter_.reset_link();
+        next_feedback_ms_ = 0;
+        remote_selector_state_.reset();
+        remote_selector_state_ms_ = 0;
+        word_source_.reset();
+    }
+
     std::optional<uint16_t> selected_originator() const {
         return engine_.selected_originator();
     }

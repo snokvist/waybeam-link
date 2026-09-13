@@ -801,6 +801,42 @@ int run_tx(Loaded& l, const std::atomic<int>& stop,
                     chan);
             return "";
         };
+        // §15.5 Pass 206: the operator's manual override — same local retune
+        // as channel_set but NOT allowlist-restricted (an operator may move the
+        // craft anywhere), dropping the §11.5a binding and any campaign. The
+        // channel is not announced: a ground that does not follow loses it.
+        h.move = [&](int mhz) -> std::pair<int, std::string> {
+            const auto err = [](const std::string& msg) {
+                return std::pair<int, std::string>{
+                    400, "{\"ok\":false,\"error\":\"" + msg + "\"}"};
+            };
+            if (mhz <= 0) {
+                return err("mhz required");
+            }
+            if (mhz > 0xFFFF) {
+                return err("mhz out of range");
+            }
+            const uint16_t chan = static_cast<uint16_t>(mhz);
+            if (!air.value->retune_all(chan, cur_bw, false)) {
+                return err("retune failed");
+            }
+            tx.reassert_power();  // §10.5: retune may reset TXAGC/nl80211
+            const uint64_t now = now_ms();
+            tx.on_rf_environment(chan, cur_bw, now);
+            if (l.cfg.policy.csa.rx_liveness_ms > 0) {
+                csa_liveness_deadline_ms = now + l.cfg.policy.csa.rx_liveness_ms;
+                csa_liveness_rx_baseline = air.value->rx_frames_total();
+                csa_liveness_chan = chan;
+                csa_liveness_bw = cur_bw;
+            }
+            csa.clear_campaign();
+            csa.release_binding();
+            tx.reset_negotiated_mtu();
+            tx.report_authority_clear();
+            cur_chan = chan;
+            wb_logf("move: local retune -> %u MHz (Pass 206)\n", chan);
+            return {200, "{\"ok\":true}"};
+        };
         // §11.4a Pass 113 runtime pairing gate. false = fresh token + new
         // pairing epoch (announce); true = keep the key, stop announcing.
         h.psk_enable = [&](bool enabled) -> std::string {
