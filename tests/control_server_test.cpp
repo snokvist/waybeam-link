@@ -778,6 +778,32 @@ int main() {
             "POST /api/v1/move HTTP/1.0\r\nContent-Length: 2\r\n\r\n{}";
         CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
     }
+    {  // §15.5 Pass 206: a non-integer mhz must be refused at the route, not
+       // thrown out of dispatch (a string/null used to unwind the server).
+        for (const char* body : {"{\"mhz\":\"5805\"}", "{\"mhz\":null}",
+                                 "{\"mhz\":5745.5}", "{\"mhz\":true}"}) {
+            const std::string req =
+                "POST /api/v1/move HTTP/1.0\r\nContent-Length: " +
+                std::to_string(std::string(body).size()) + "\r\n\r\n" + body;
+            CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        }
+        CHECK_EQ_U(move_state, 2412);  // unchanged
+    }
+    {  // a wide number used to wrap through value<int> before the range check.
+        const std::string body = "{\"mhz\":4294967301}";
+        const std::string req =
+            "POST /api/v1/move HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+        CHECK_EQ_U(move_state, 2412);  // unchanged
+    }
+    {  // §15.5 Pass 113: /channel gets the same type guard.
+        const std::string body = "{\"mhz\":\"5745\"}";
+        const std::string req =
+            "POST /api/v1/channel HTTP/1.0\r\nContent-Length: " +
+            std::to_string(body.size()) + "\r\n\r\n" + body;
+        CHECK_EQ_U(status_of(roundtrip(s, port, req)), 400);
+    }
     {  // an in-flight issuer campaign refuses the move with 409.
         move_conflict = true;
         const std::string body = "{\"mhz\":5805}";

@@ -720,19 +720,32 @@ void ControlServer::dispatch(Conn& c, const std::string& method,
         }
         return done(h_.mode_set(name));
     }
+    // §15.5 Pass 206: `value<int>` throws on a string/null and static-casts a
+    // wide number before the handler's range check can see it, so validate the
+    // JSON type and read through int64 here (same guard /reports/latch uses).
+    const auto read_mhz = [&](int64_t* out) -> const char* {
+        if (!j.contains("mhz")) return "mhz required";
+        if (!j["mhz"].is_number_integer()) return "mhz must be an integer";
+        const int64_t mhz = j["mhz"].get<int64_t>();
+        if (mhz <= 0 || mhz > 0xFFFF) return "mhz out of range";
+        *out = mhz;
+        return nullptr;
+    };
     if (path == "/api/v1/channel") {  // §15.5 Pass 113
         if (!h_.channel_set) return na();
-        if (!j.contains("mhz")) {
-            return reply(400, "Bad Request", json_err("mhz required"));
+        int64_t mhz = 0;
+        if (const char* e = read_mhz(&mhz)) {
+            return reply(400, "Bad Request", json_err(e));
         }
-        return done(h_.channel_set(j.value("mhz", 0)));
+        return done(h_.channel_set(static_cast<int>(mhz)));
     }
     if (path == "/api/v1/move") {  // §15.5 Pass 206
         if (!h_.move) return na();
-        if (!j.contains("mhz")) {
-            return reply(400, "Bad Request", json_err("mhz required"));
+        int64_t mhz = 0;
+        if (const char* e = read_mhz(&mhz)) {
+            return reply(400, "Bad Request", json_err(e));
         }
-        const auto [code, jbody] = h_.move(j.value("mhz", 0));
+        const auto [code, jbody] = h_.move(static_cast<int>(mhz));
         return reply(code,
                      code == 200 ? "OK"
                                  : (code == 409 ? "Conflict" : "Bad Request"),

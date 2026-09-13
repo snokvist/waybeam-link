@@ -2313,14 +2313,21 @@ int run_rx(Loaded& l, const std::atomic<int>& stop,
                     return err(409, "calibration campaign active");
                 }
                 const uint16_t chan = static_cast<uint16_t>(mhz);
-                cancel_calibration("move");
+                const uint16_t prev_chan = operating_chan;
                 // The retune is the only fallible step, so it runs before any
                 // detach: a 400 must not leave the engine un-pinned, or a scout
                 // sweep stranded on its last dwell with the filter still widened
-                // (tx /move orders it the same way).
+                // (tx /move orders it the same way). retune_all is not
+                // all-or-nothing, so on failure put the adapters back on the
+                // pre-move channel before reporting.
                 if (!air.value->retune_all(chan, op_bw_mhz, false)) {
+                    air.value->retune_all(prev_chan, op_bw_mhz, false);
                     return err(400, "retune failed");
                 }
+                // Only safe AFTER the retune: a plain uplink calibration abort
+                // is side-effect-free, but this must not run before the only
+                // fallible step (a 400 has to leave the node untouched).
+                cancel_calibration("move");
                 if (scout.scanning()) {
                     scout.abandon(now_ms());
                 }
@@ -3112,6 +3119,7 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
             } else if (active_selection.originator != 0) {
                 active_selection.originator = 0;
+                selected_craft_session = 0;  // §3.16 craft-scoped state
                 desired_cache_assignment.reset();
                 next_cache_assignment_ms = 0;
                 if (cache_ctl) cache_ctl->reset_link();
