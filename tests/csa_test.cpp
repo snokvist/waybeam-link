@@ -1014,5 +1014,88 @@ int main() {
         CHECK(!idle.restamp_copy(old_copy, 1000));
     }
 
+    // --- Pass 203: every exit from on_csa is counted -----------------------
+    // The device run of 2026-09-13 read csa_accepted 0 with every refusal
+    // counter also 0, and that was diagnosed as "the copies never reached
+    // on_csa". It was not: the §11.6 dt==0 beacon path was the one bare exit
+    // in the set, so a craft hearing ONLY beacons produced a byte-identical
+    // signature. Under the final jump that is precisely what a craft the
+    // ground has jumped away from hears, which is why it mattered.
+    {
+        CsaFollower f(pol);
+        // A MAC-valid beacon for a campaign this craft never accepted.
+        const CsaPacket beacon = make_csa(pol, 1, 5745, /*dt_ms=*/0);
+        CHECK(!f.on_csa(beacon, 1000, std::nullopt, 0, std::nullopt));
+        const CsaFollower::Refusals& r = f.refusals();
+        // It is counted, and counted as ITSELF — not as any refusal.
+        CHECK_EQ_U(r.beacon, 1);
+        CHECK_EQ_U(r.accepted, 0);
+        CHECK_EQ_U(r.no_key + r.bad_mac + r.issuer_lock + r.nonce_replay +
+                       r.not_allowlisted + r.rate_limited,
+                   0);
+        // The property the whole set exists for: nothing can enter on_csa and
+        // leave without moving a counter. Drive every exit and require the
+        // total to equal the number of calls.
+        CsaFollower g(pol);
+        uint32_t calls = 0;
+        CsaPacket bad = make_csa(pol, 1, 5745, 150);
+        bad.csa_mac ^= 1;
+        g.on_csa(bad, 1000, std::nullopt, 0, std::nullopt); ++calls;
+        g.on_csa(make_csa(pol, 1, 5900, 150), 1000, std::nullopt, 0,
+                 std::nullopt); ++calls;                      // not allowlisted
+        g.on_csa(make_csa(pol, 1, 5745, 0), 1000, std::nullopt, 0,
+                 std::nullopt); ++calls;                      // beacon
+        g.on_csa(make_csa(pol, 5, 5745, 150), 1000, std::nullopt, 0,
+                 uint16_t{7}); ++calls;                       // issuer lock
+        g.on_csa(make_csa(pol, 5, 5745, 150), 1000, std::nullopt, 0,
+                 std::nullopt); ++calls;                      // accepted
+        g.on_csa(make_csa(pol, 5, 5745, 150), 1'100'000, std::nullopt, 0,
+                 std::nullopt); ++calls;                      // nonce replay
+        g.on_csa(make_csa(pol, 6, 5825, 150), 1'200'000, std::nullopt, 0,
+                 std::nullopt); ++calls;                      // rate limited
+        const CsaFollower::Refusals& q = g.refusals();
+        CHECK_EQ_U(q.no_key + q.bad_mac + q.issuer_lock + q.nonce_replay +
+                       q.not_allowlisted + q.rate_limited + q.beacon +
+                       q.accepted,
+                   calls);
+    }
+    // A beacon for the craft's OWN pending campaign still confirms the switch
+    // (§11.6) — the counter must not change that behaviour, only observe it.
+    {
+        CsaFollower f(pol);
+        const CsaPacket c = make_csa(pol, 1, 5745, 150);
+        CHECK(f.on_csa(c, 0, std::nullopt, 0, std::nullopt));
+        f.tick(150'000);  // retune -> VERIFY
+        CsaPacket beacon = c;
+        beacon.csa_seq = 0;
+        beacon.dt_to_switch_ms = 0;
+        beacon.csa_mac = mac_for(pol, beacon);
+        CHECK(!f.on_csa(beacon, 160'000, std::nullopt, 0, std::nullopt));
+        CHECK(std::string_view(f.state_str()) == "COMMITTED");
+        CHECK_EQ_U(f.refusals().beacon, 1);
+    }
+    // --- Pass 203: the issuer's own evidence survives the campaign close ----
+    // The ground has to be able to tell a followed jump from a missed one, and
+    // under the final jump kSuccess is returned for BOTH. If evidence() did
+    // not outlive the close, rx_node could not make that distinction at all
+    // and every jump would report as confirmed.
+    {
+        CsaIssuer is(pol);
+        CHECK(is.start({9, 0, 1234}, 5745, 0, 0, 5805, 0, 4, 0));
+        for (uint64_t t = 0; t <= 200'000; t += 20'000) is.tick(t);
+        is.note_craft_armed(200'000);
+        CHECK_EQ_U(is.tick(220'000).kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kCommit));
+        is.tick(300'000);  // landing
+        const auto a = is.tick(300'000 + 151'000);
+        CHECK_EQ_U(a.kind,
+                   static_cast<unsigned>(CsaIssuer::IssuerAction::Kind::kSuccess));
+        CHECK(!is.active());
+        // Succeeded on the target, and readable as UNCONFIRMED after the fact.
+        CHECK_EQ_U(a.chan_mhz, 5745);
+        CHECK(is.evidence().armed_seen);
+        CHECK(!is.evidence().video_seen);
+    }
+
     return wbtest_finish("csa_test");
 }

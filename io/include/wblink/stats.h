@@ -345,16 +345,20 @@ struct LinkStats {
     // §11.4 refusal accounting (craft/follower side). Every rejection path in
     // CsaFollower::on_csa is a bare `return false`; without these a craft that
     // declines every campaign is indistinguishable from one that never heard a
-    // copy. `csa_accepted` is the denominator — all-zero refusals AND zero
-    // accepted means the copies are not arriving, a different fault entirely.
-    // csa_nonce_replay is EXPECTED nonzero on a healthy craft: copies 2..5 of
-    // an accepted campaign land on it.
+    // copy. `csa_accepted` is the denominator.
+    //
+    // Two of these are EXPECTED nonzero on a healthy craft and are not faults:
+    // csa_nonce_replay (copies 2..5 of an accepted campaign) and csa_beacon
+    // (§11.6 rendezvous beacons). csa_beacon exists because it was the one
+    // uncounted exit, and its absence made an all-zero set look like "nothing
+    // is arriving" when a split pair was arriving as beacons only (Pass 203).
     uint32_t csa_no_key = 0;
     uint32_t csa_bad_mac = 0;
     uint32_t csa_issuer_lock = 0;
     uint32_t csa_nonce_replay = 0;
     uint32_t csa_not_allowlisted = 0;
     uint32_t csa_rate_limited = 0;
+    uint32_t csa_beacon = 0;
     uint32_t csa_accepted = 0;
     // §11 follow-me: current RF operating channel (center MHz). 0 when the node
     // does not track a runtime channel (tx/loopback); the rx node reports its

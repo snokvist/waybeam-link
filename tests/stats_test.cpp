@@ -352,7 +352,7 @@ const char* kGolden =
     "\"lockout_conflict\":false,\"flap_freeze\":false,"
     "\"csa_state\":\"IDLE\",\"csa_accepted\":0,\"csa_no_key\":0,"
     "\"csa_bad_mac\":0,\"csa_issuer_lock\":0,\"csa_nonce_replay\":0,"
-    "\"csa_not_allowlisted\":0,\"csa_rate_limited\":0,"
+    "\"csa_not_allowlisted\":0,\"csa_rate_limited\":0,\"csa_beacon\":0,"
     "\"channel\":5805,\"venc_bitrate_kbps\":14000,"
     "\"venc_pushes\":6,\"venc_failures\":0,"
     "\"venc_live_fallback\":true,\"venc_persisted_writes\":2,"

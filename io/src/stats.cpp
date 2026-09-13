@@ -573,6 +573,8 @@ void format_stats_line(const StatsSnapshot& snap, std::string& out) {
     append_u64(out, snap.link.csa_not_allowlisted);
     out += ",\"csa_rate_limited\":";
     append_u64(out, snap.link.csa_rate_limited);
+    out += ",\"csa_beacon\":";
+    append_u64(out, snap.link.csa_beacon);
     out += ",\"channel\":";
     append_u64(out, snap.link.channel_mhz);
     out += ",\"venc_bitrate_kbps\":";

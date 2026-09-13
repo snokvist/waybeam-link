@@ -3263,9 +3263,37 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                 }
                 break;
             }
-            case CsaIssuer::IssuerAction::Kind::kSuccess:
-                // §11.6 beacon tail complete: craft video was seen inside the
-                // window and the campaign closed at the deadline.
+            case CsaIssuer::IssuerAction::Kind::kSuccess: {
+                // §11.6 campaign close. Under the FINAL JUMP (Pass 202) this
+                // arm is reached with video_seen either way — the deadline no
+                // longer retreats — so the evidence has to be READ here. It
+                // used to be sound to assert "craft video was seen inside the
+                // window" at this point; deleting the revert made that a lie,
+                // and the first device run believed it: the ground logged
+                // "campaign confirmed" three times while the craft never left
+                // the channel it started on (Pass 203).
+                const CsaIssuer::Evidence ev = issuer.evidence();
+                pending_selection.reset();
+                previous_selection.reset();
+                if (!ev.video_seen) {
+                    // The jump was final for US. The craft never confirmed it,
+                    // so it is most likely still on prev_chan, and we must not
+                    // report holding a link we do not have. We stay (that is
+                    // the whole point of the final jump — no retreat) but the
+                    // selection is NOT committed: "select_failed" is the
+                    // existing vocabulary for "we tried and do not have it",
+                    // and it is the state that lets §11.6 Pass 199 first-latch
+                    // promote the craft if it does turn up here. Re-acquisition
+                    // is the operator's scout, now ordered by §11.5a so the two
+                    // plausible channels are tried first.
+                    selection_state = "select_failed";
+                    wb_logf("csa: campaign UNCONFIRMED -> %u MHz — holding, "
+                            "craft never confirmed (armed=%d landed=%d "
+                            "video=%d)\n",
+                            operating_chan, int(ev.armed_seen),
+                            int(ev.landing_seen), int(ev.video_seen));
+                    break;
+                }
                 if (selection_state == "verifying") {
                     selection_state = "committed";
                     // Every successful claim reasserts the local preference,
@@ -3273,11 +3301,10 @@ art.craft_adapter_fingerprint = craft_tally_fp;
                     // and reclaims before the craft's old binding expires.
                     mtu_reissue_pending = true;
                 }
-                pending_selection.reset();
-                previous_selection.reset();
                 wb_logf("csa: campaign confirmed -> %u MHz\n",
                         operating_chan);
                 break;
+            }
             case CsaIssuer::IssuerAction::Kind::kRevert:
                 // §11.6 (Pass 199): an ACQUIRE parks instead of reverting.
                 // The operator explicitly left the previous craft, so putting

@@ -24,6 +24,50 @@ Pass 153. The two-tier split itself is defined in `CLAUDE.md` ("The law").
 
 ## Passes
 
+## Pass 203 — a refusal set must be EXHAUSTIVE, and a final jump must report itself (2026-09-13)
+
+**Verdict.** Two rulings, both forced by Pass 202's first device run, which
+failed and was initially misdiagnosed as an accept-path regression. There was
+no regression.
+
+**1. §15.3 — every exit from the follower's CSA acceptance is counted.** Pass
+201's counter set left the §11.6 rendezvous-beacon exit (`dt_to_switch_ms == 0`)
+bare while §11.4, the header and the commit message all asserted that an
+all-zero set with `csa_accepted == 0` proves the copies are not arriving. It
+does not: a craft hearing only beacons reads identically. `csa_beacon` is added
+and the exhaustiveness is now the stated contract, enforced by a test that
+drives all eight exits and requires the counter total to equal the call count.
+`csa_beacon` and `csa_nonce_replay` are both EXPECTED nonzero and named as such.
+Beacons climbing while accepted stays flat is itself the diagnosis of a split
+pair.
+
+**2. §11.6 — the issuer's campaign close carries two outcomes and MUST NOT
+collapse them.** With no revert, `kSuccess` fires whether or not the craft
+followed. `video_seen` true is a confirmed switch; false is a jump this ground
+took alone, and the selection MUST NOT then be reported as committed. The
+implementation reported both as "campaign confirmed", so a ground that had just
+jumped away from its craft told the operator it held the link — three campaigns
+running. The unconfirmed close now holds the target (no retreat) but reports
+`select_failed` and names `armed`/`landed`/`video`.
+
+**Consequence accepted, not fixed.** The old revert self-healed a missed
+campaign by putting the ground back on the craft, so the next campaign was
+always co-channel. The final jump removes that; re-acquisition is real and is
+operator-triggered (§11.5a ordering bounds it to ~1 s). Auto-scout on an
+unconfirmed close is deliberately NOT introduced here — it is an operator
+decision, not a contract gap to paper over.
+
+**Spec sections:** §11.5 (verify window is an observation, not a backout — the
+stale "jump-failed backout (kept)" bullet Pass 202 left behind is corrected),
+§11.6 (no-video close, forged-`CSA_ARMED` backstop now explicitly gone with
+§11.4 named as the only guard, Pass 70 feed-stall asymmetry resolved), §15.3
+(`csa_beacon`).
+
+**Evidence:** `docs/findings.md` 2026-09-13 "the *undiagnosed regression* was a
+BLIND COUNTER and a ground that lies"; branch `spec/csa-final-jump`;
+`tests/csa_test.cpp` exhaustiveness + evidence-survives-close cases,
+mutation-tested.
+
 ## Pass 202 — the channel switch is a FINAL JUMP, not a verified handshake (2026-09-13)
 
 §11's switch was two-sided and *verified*: both ends jump at T_switch, each

@@ -78,6 +78,11 @@ bool CsaFollower::on_csa(const CsaPacket& pkt, uint64_t now_us,
     // side effects (no §11.5a binding refresh — a recorded beacon must not
     // hold the binding alive).
     if (pkt.dt_to_switch_ms == 0) {
+        // Pass 203: counted, not silent. This was the one exit from on_csa
+        // with no counter, and it is the exit a craft takes when the issuer
+        // has already jumped without it — so "every counter zero" read as
+        // "nothing is arriving" when the truth was "only beacons are".
+        ++refusals_.beacon;
         if (state_ == State::kVerify &&
             pkt.prefix.originator == campaign_.prefix.originator &&
             pkt.prefix.session_id == campaign_.prefix.session_id &&

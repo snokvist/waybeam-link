@@ -4083,9 +4083,13 @@ missed jump is RE-ACQUISITION by scan, not backout: a craft that missed it
 keeps transmitting on a channel inside the allowlist, so a ground always finds
 it, and §11.5a's scout ordering (last-latched channel, then last campaign
 target) bounds that to ~1 s against a 10.9-33.6 s full sweep.
-- **Jump-failed backout (kept):** in VERIFY, no valid traffic within
-  `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note below) → revert
-  to `prev_chan` and return to IDLE.
+- **Verify window (Pass 202: no longer a backout):** in VERIFY, no valid
+  traffic within `verify_timeout_ms` (**500 ms** — see the Pass 89 sizing note
+  below) → **COMMIT on the target and stay**, binding kept. The window is now
+  purely an observation: it decides what the node REPORTS about the switch, not
+  where the node ends up. The sizing note below is kept because the quantity it
+  measures is unchanged and still bounds how long a node waits before it stops
+  calling a switch confirmed — but missing it no longer moves anybody.
 
   **Sizing (Pass 89, measured 2026-07-24).** The former 150 ms was derived from
   a *median* ("bench median 85 ms + margin"), which is the wrong statistic: the
@@ -4251,19 +4255,23 @@ direction** lets us make the strand class *never happen* rather than recover aft
   reverted the first. A `target_chan` that is neither absent nor the craft's
   own channel is refused. Moving a craft is `POST /api/v1/csa`, once it is
   yours.
-- **Issuer revert-on-no-video (RETUNE intent):** if ground did commit (craft
-  ACKed) but then sees
-  no craft video on `target_chan` within its verify deadline, ground reverts to
-  `prev_chan` (an issuer abandoning a failed campaign is not "unasked revert").
-  **The revert MUST name which half failed (Pass 197):** "no craft video"
-  covers three outcomes with one operator-visible symptom — the craft never
-  ACKed, it ACKed and never landed, or it landed and never cleared `CSA_ARMED`
-  in time — so the log line carries the issuer's own `armed_seen` /
-  `landing_seen` / `video_seen` bits. Without them, telling the three apart
-  required reading the issuer's source, and the reverted ground lands on
-  `prev_chan`, which for a `home_chan` no craft occupies is silence that then
-  trips the `rx_liveness_ms` guard below into a full backend re-init: the
-  operator sees a few frames and then nothing, with no stated cause.
+- **Issuer no-video close (Pass 202/203): the ground stays, and must SAY it is
+  unconfirmed.** If ground committed (craft ACKed) but then sees no craft video
+  on `target_chan` within its verify deadline, the campaign closes on the
+  target — no revert to `prev_chan`. **The close therefore carries two
+  distinguishable outcomes on one code path, and a node MUST NOT collapse
+  them.** `video_seen` true is a confirmed switch; `video_seen` false is a jump
+  this ground took alone, and the selection MUST NOT be reported as committed.
+  Pass 203 records the cost of getting this wrong: an implementation that
+  reported both as "campaign confirmed" told an operator it held a link it had
+  just jumped away from, three campaigns running.
+
+  **The close MUST name which half failed (Pass 197):** "no craft video" covers
+  three outcomes with one operator-visible symptom — the craft never ACKed, it
+  ACKed and never landed, or it landed and never cleared `CSA_ARMED` in time —
+  so the log line carries the issuer's own `armed_seen` / `landing_seen` /
+  `video_seen` bits. Those bits outlive the campaign close precisely so the
+  caller can make the confirmed/unconfirmed split above.
   The deadline anchors at **`max(T_switch, landing) + verify_timeout_ms`**
   (Pass 69): pre-positioning must not shrink the window in which the craft can
   legitimately show up — the craft does not move before T_switch. **"Landing"
@@ -4364,23 +4372,29 @@ direction** lets us make the strand class *never happen* rather than recover aft
   together at its commit point — a straggler adapter follows because a
   sibling heard it.
 
-Because a forged `CSA_ARMED` (unauthenticated DATA flag) could make ground commit
-to a switch the real craft won't follow, the **issuer revert-on-no-video is the
-backstop** for that case: no craft video on the new channel → ground returns.
+A forged `CSA_ARMED` (unauthenticated DATA flag) can make ground commit to a
+switch the real craft won't follow. **Pass 202 removed the backstop that used
+to cover this** — the issuer no longer returns on no-video — so **§11.4
+authentication of the campaign itself is now the only guard**, and the residual
+exposure is stated rather than discovered: a forged ARMED moves this ground to
+a channel of the CAMPAIGN's choosing, which the ground authenticated and issued
+itself. The forgery can therefore waste a jump, not redirect one. Recovery is
+re-acquisition by scan, and the unconfirmed close above is what makes the
+operator aware a scan is needed.
 
-**Accepted asymmetry — craft feed stall during a campaign (Pass 70 ruling):**
-the two ends confirm on different evidence — the craft on the issuer's §11.6
-rendezvous beacon (guaranteed present), the issuer on craft *video* only. If
-the craft's input feed stalls after `CSA_ARMED` (a TX node emits nothing
-without a feed, §16), the craft COMMITs on beacons while the issuer reverts on
-no-video: ground on `prev_chan`, craft on `target_chan`, until an explicit
-re-scout + re-claim (§15.5a; the §11.5a binding self-releases after
-`bind_release`). This split is **accepted, not fixed**: counting the craft's
-unauthenticated HEARTBEAT/ANNOUNCE as issuer-side confirmation would hollow
-out the forged-`CSA_ARMED` backstop above, and delaying the craft's COMMIT
-past the beacon would reopen the §11.6 rendezvous gap the beacon closed. The
-exposure is one campaign window on a craft whose encoder stopped feeding —
-already a failed link by definition.
+**Asymmetry — craft feed stall during a campaign (Pass 70, resolved by Pass
+202):** the two ends confirm on different evidence — the craft on the issuer's
+§11.6 rendezvous beacon (guaranteed present), the issuer on craft *video* only.
+If the craft's input feed stalls after `CSA_ARMED` (a TX node emits nothing
+without a feed, §16), the issuer sees no video. Under the old design that split
+the pair — craft COMMITs on beacons on `target_chan` while the issuer reverts
+to `prev_chan`. **Under the final jump both ends stay on `target_chan`, so the
+stall costs a confirmation, not a channel.** The evidence asymmetry itself is
+unchanged and still deliberate: counting the craft's unauthenticated
+HEARTBEAT/ANNOUNCE as issuer-side confirmation would weaken §11.4's guard, and
+delaying the craft's COMMIT past the beacon would reopen the §11.6 rendezvous
+gap the beacon closed. What changed is that disagreeing about the evidence no
+longer puts the two ends on different channels.
 
 ### 11.7 Remote vehicle commands (VEHICLE_CMD, type `0xD`)
 
@@ -5329,11 +5343,21 @@ Recommended seeds (config, §15.2; RE-DERIVE §17): `tail_grace_ms 1`,
   indistinguishable on the wire from one that never heard a copy, which cost
   the 2026-09-13 bench three sessions on a campaign that landed 0/4. The
   counters `csa_no_key`, `csa_bad_mac`, `csa_issuer_lock`, `csa_nonce_replay`,
-  `csa_not_allowlisted` and `csa_rate_limited` name which guard fired, and
-  `csa_accepted` is the denominator that separates "declined" from "never
-  arrived": all-zero refusals AND zero accepted means the copies are not
-  reaching the craft at all, a different fault. `csa_nonce_replay` is EXPECTED
-  nonzero on a healthy craft — copies 2..N of an accepted campaign land on it.
+  `csa_not_allowlisted`, `csa_rate_limited` and `csa_beacon` name which exit
+  the copy took, and `csa_accepted` is the denominator that separates
+  "declined" from "never arrived". **Every** exit is counted — that
+  exhaustiveness is the contract, not an implementation detail: only when no
+  copy can enter the follower and leave without moving a counter does an
+  all-zero set with `csa_accepted == 0` prove the copies are not arriving.
+  Pass 203 records what a single uncounted exit cost.
+
+  Two of these are EXPECTED nonzero on a healthy craft and must not be read as
+  faults. `csa_nonce_replay` takes copies 2..N of an accepted campaign.
+  `csa_beacon` takes §11.6 rendezvous beacons (`dt_to_switch_ms == 0`), which
+  is how a follower confirms its own pending VERIFY. `csa_beacon` climbing
+  while `csa_accepted` stays flat is a diagnosis in itself: this craft can hear
+  an issuer that has **already jumped**, so the pair is split and no campaign
+  copy is reaching it.
 
   **Enumeration is filtered by interface descriptor**, not by PID: a candidate
   is a device of a *supported vendor* exposing a **vendor-specific (`0xFF`)
@@ -5834,7 +5858,7 @@ table mismatch, phantom diversity, a stalled adapter, or a failing return path:
     "flap_freeze": false, "csa_state": "IDLE",
     "csa_accepted": 0, "csa_no_key": 0, "csa_bad_mac": 0,
     "csa_issuer_lock": 0, "csa_nonce_replay": 0,
-    "csa_not_allowlisted": 0, "csa_rate_limited": 0,
+    "csa_not_allowlisted": 0, "csa_rate_limited": 0, "csa_beacon": 0,
     "channel": 5805,
     "venc_bitrate_kbps": 14000, "venc_pushes": 6, "venc_failures": 0,
     "venc_live_fallback": false, "venc_persisted_writes": 0,

@@ -65,6 +65,33 @@ sightings.
   campaign, and that §11.4 authentication is now the only guard there.
 - Close Pass 201 by pointer — its constraint dissolves rather than being fixed.
 
+## Increment 4b — the close must report itself (ADDED after the first device run)
+
+Not anticipated. Deleting the issuer's revert made `kSuccess` fire whether or
+not the craft followed, and `rx_node.cpp:3266` kept reporting it as
+`campaign confirmed` / `selection_state = "committed"` — so a ground that had
+just jumped away from its craft told the operator it held the link. Three
+campaigns ran that way before the bench noticed.
+
+- `kSuccess` reads `issuer.evidence().video_seen`. Confirmed → unchanged.
+  Unconfirmed → hold the target (no retreat) but report `select_failed` and log
+  `campaign UNCONFIRMED (armed/landed/video)`.
+- `CsaFollower`'s §11.6 beacon exit gains a counter (`csa_beacon`, §15.3). It
+  was the one uncounted `return false`, and it is the exit a craft takes when
+  the issuer has already jumped without it — which is why an all-zero counter
+  set was read as "nothing is arriving" when the truth was "a split pair".
+- **Verify:** a campaign the craft cannot follow produces `UNCONFIRMED` and
+  `select_failed`, and the craft's `csa_beacon` climbs while `csa_accepted`
+  stays flat. Both were unobservable on the first run.
+- **Recorded as Pass 203.**
+
+**Consequence this increment does NOT remove.** The old revert self-healed a
+missed campaign: the ground returned to the craft, so the next campaign was
+always issued co-channel. The final jump deletes that, and re-acquisition is
+operator-triggered. Increment 3 makes it ~1 s when run; nothing runs it
+automatically. Auto-scout on an unconfirmed close is an operator decision and
+is deliberately not invented here.
+
 ## Increment 5 — fleet
 
 Ground and craft must move together; a new ground against an old craft leaves

@@ -12,6 +12,77 @@ has closed, with a pointer to the Pass.
 
 ---
 
+## 2026-09-13 — the "undiagnosed regression" was a BLIND COUNTER and a ground that lies
+
+**Diagnosed. There is no regression in the accept path — there never was one.**
+The entry below this one recorded `csa_accepted 0` with every refusal counter
+also 0 and called it "the signature meaning the copies never reached
+`on_csa`". **That inference was wrong, and the counter set I had just added is
+what made it wrong.**
+
+**1. One exit from `on_csa` was uncounted.** `csa.cpp:78` — the §11.6
+rendezvous beacon path, `dt_to_switch_ms == 0` — returned false with no
+counter. Six guards were counted; this one was not. So a craft hearing **only
+beacons** produced a byte-identical reading to a craft hearing **nothing**.
+Reproduced as a unit test before fixing: a MAC-valid `dt=0` packet leaves every
+counter at zero.
+
+**2. Beacons are exactly what a craft hears from a ground that has already
+jumped without it.** They are sent in the issuer's VERIFY state, on
+`target_chan`, MAC-valid, at copy spacing. So the observed shape — counters all
+zero *while the craft's ear rx climbs 87 → 368* — is not a contradiction to be
+explained. It is the direct signature of a **split pair**: the ground is
+transmitting at the craft, the craft can hear it, and none of it is a campaign
+copy.
+
+**3. What split them is the final jump itself, and the ground could not tell.**
+Removing the issuer's revert means `kSuccess` now fires whether or not the
+craft followed. `rx_node.cpp` took that action, set `selection_state =
+"committed"` and logged **"campaign confirmed"** — under a comment still
+asserting "craft video was seen inside the window", which the deletion had made
+false. `issuer.evidence()` carried the truth (`video_seen`) the whole time and
+was read **only** on the revert and abort paths, both of which the final jump
+had just made unreachable for this case.
+
+So the run did exactly what the code says: campaign 1 was missed by the craft
+for ordinary RF reasons, the ground jumped and held, and from then on the two
+were on different channels with the ground reporting success each time. The old
+design self-healed this — a missed campaign reverted the ground back onto the
+craft, so the next campaign was always issued co-channel. **The final jump
+removes that self-healing property, and nothing replaced it.** That is the real
+defect the bench found, and it is a design gap in the spec, not a coding bug.
+
+**Fixed (Pass 203), both halves:**
+
+- `csa_beacon` counts the last bare exit and is published in §15.3. The
+  exhaustiveness — *no copy enters `on_csa` and leaves without moving a
+  counter* — is now a unit test that drives all eight exits and requires the
+  counter total to equal the call count, so the next uncounted `return false`
+  fails the suite rather than costing a session.
+- The ground reads `evidence().video_seen` at `kSuccess`. Confirmed →
+  `committed` as before. Unconfirmed → it **stays on the target** (final jump,
+  no retreat) but reports `select_failed` and logs `campaign UNCONFIRMED ...
+  (armed/landed/video)`. `select_failed` is the existing state that lets §11.6
+  Pass 199 first-latch promote the craft if it does turn up, and it is visible
+  to the operator, who owns the re-acquire.
+
+**What this does NOT fix, stated rather than hidden:** re-acquisition is still
+operator-triggered. Increment 3's priority scan makes it ~1 s *when run*, but
+nothing runs it automatically. Under the old design a missed jump was invisible
+because it self-corrected; under the final jump it is now *visible* and manual.
+Whether the ground should auto-scout on an unconfirmed close is a design
+question for the operator, not something to invent here.
+
+**Method note — the one worth keeping.** A counter set whose value is "all
+zeros means X" is only worth that if it is *exhaustive*, and I shipped it one
+exit short while asserting the conclusion in the commit message, the header,
+and PROTOCOL.md. The instrument was wrong in the exact place the investigation
+needed it, and I believed it over the arithmetic (a craft with rx climbing is
+receiving *something*). Check that every path out of a function is counted
+before writing down what a zero reading proves.
+
+---
+
 ## 2026-09-13 — the final-jump device run FAILED, and it made "confirmed" a weaker word
 
 Increments 1–3 built and gated clean (39/0/0, 87/87, mutation-tested) and then

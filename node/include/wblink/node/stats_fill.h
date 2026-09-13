@@ -296,6 +296,7 @@ inline void emit_stats(StatsEmitter& emitter, const Loaded& l, uint32_t session,
         snap.link.csa_nonce_replay = csa_refusals->nonce_replay;
         snap.link.csa_not_allowlisted = csa_refusals->not_allowlisted;
         snap.link.csa_rate_limited = csa_refusals->rate_limited;
+        snap.link.csa_beacon = csa_refusals->beacon;
     }
     snap.link.channel_mhz = channel_mhz;  // §11 current operating channel (0 = not tracked)
     if (tx != nullptr) {

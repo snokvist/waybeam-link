@@ -77,11 +77,16 @@ ground can always re-find it by scanning.
   authentication is what actually guards that, and it is unchanged — but this
   removes the second line of defence, and that should be stated in the Pass
   rather than discovered.
-- **Blocked on a separate craft-side bug.** Campaigns currently fail with
-  intermittent `no CSA_ARMED` and `video=0` even on a single-adapter Realtek
-  ground with the craft healthy and claimed. That is unexplained and is *not*
-  MT7612U-related. It must be understood first, or a pass/fail on this rework
-  cannot be attributed. See `docs/findings.md` 2026-09-13.
+- ~~**Blocked on a separate craft-side bug.**~~ **RESOLVED.** The intermittent
+  `no CSA_ARMED` / `video=0` on a clean Realtek ground was **stale craft state**
+  — the craft's hub had been up since 2026-08-30. After a restart the same
+  ground confirmed 3/3. Increment 0's counters are what showed it; see
+  `docs/findings.md` 2026-09-13 ("the 0/4 was STALE CRAFT STATE").
+- **A missed campaign no longer self-heals, and that is a real cost.** The
+  revert being deleted means a ground that jumps without its craft stays split
+  until someone re-acquires. Under the old design the same miss corrected
+  itself silently. This is the trade being made deliberately; Increment 3
+  bounds the recovery and Increment 4b makes the need for it visible.
 
 ## Definition of done
 
@@ -91,5 +96,9 @@ ground can always re-find it by scanning.
    per-die rule anywhere in the code.
 3. A deliberately missed jump recovers by scan in ~1 s, not a full sweep.
 4. §11 amended and a numbered Pass recorded, naming the lost backstop.
+4b. A jump the craft did not confirm is REPORTED as unconfirmed, not as a
+   committed selection — the ground stays on the target but never claims a link
+   it does not have (Pass 203, added after the first device run reported three
+   unfollowed jumps as "campaign confirmed").
 5. Device-verified on `.232` across both ground compositions (Realtek-only and
    with MT7612U ears present).

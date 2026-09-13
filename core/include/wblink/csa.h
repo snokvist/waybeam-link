@@ -129,9 +129,16 @@ class CsaFollower {
     // from one that never heard a copy, from the ground AND from the craft: the
     // 2026-09-13 bench spent three sessions on a 0/4 that any one of these
     // would have answered in a single campaign. `accepted` is the denominator
-    // and is the field that separates "never heard one" from "heard, declined"
-    // — a refusal set that is all zeros while accepted is also zero means the
-    // copies are not arriving at all, which is a different fault entirely.
+    // and is the field that separates "never heard one" from "heard, declined".
+    //
+    // `beacon` closes the LAST silent exit (Pass 203). The first version of
+    // this set left the §11.6 dt==0 path bare, and then asserted that an
+    // all-zero set with accepted == 0 proved "the copies are not arriving at
+    // all". That is false, and it misdiagnosed a device run: a craft the
+    // ground has already jumped away from hears the issuer's rendezvous
+    // beacons and nothing else, and every one of those took the bare exit. The
+    // signature is only unambiguous now that EVERY exit from on_csa is
+    // counted — which is the property this set is for, not a detail of it.
     struct Refusals {
         uint32_t no_key = 0;          // §11.4a empty key, fail closed
         uint32_t bad_mac = 0;         // MAC mismatch
@@ -139,6 +146,13 @@ class CsaFollower {
         uint32_t nonce_replay = 0;    // csa_nonce <= last applied for this key
         uint32_t not_allowlisted = 0; // target outside policy.csa allowlist
         uint32_t rate_limited = 0;    // inside min_interval_ms of the last
+        // §11.6 rendezvous beacon (dt == 0). NOT a fault and EXPECTED nonzero
+        // on a healthy craft — it is how a follower confirms its own pending
+        // VERIFY. It is a fault signal only in the shape that matters here:
+        // beacons climbing while accepted stays flat means this craft can hear
+        // an issuer that has ALREADY jumped, i.e. the pair is split and no
+        // campaign copy is reaching us.
+        uint32_t beacon = 0;
         uint32_t accepted = 0;
     };
     const Refusals& refusals() const { return refusals_; }

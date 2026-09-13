@@ -26,10 +26,18 @@ failure and explain it from craft evidence. Until this passes, no other row
 below is interpretable.
 
 **Inc 1 — ground revert deleted.** Matrix A/B/C, class-0 campaign:
-- no `csa: selection reverted` in any run
+- **convergence** (both control planes on the target) and `csa: campaign
+  confirmed` — NOT merely the absence of `selection reverted`, which a
+  stranded pair also satisfies
 - `landed` reads 1 on B and C, where it read 0 before
 - **negative control:** with the change reverted, B reverts again. A fix never
   seen to change the outcome is not a fix.
+
+**Inc 1b — the unconfirmed close is reachable and honest (Pass 203).** Issue a
+campaign the craft cannot follow (craft parked on another channel). Ground must
+log `campaign UNCONFIRMED`, hold the target, and report `select_failed` — not
+`committed`. This is the arm the first device run failed silently, so it is a
+required row, not a nicety.
 
 **Inc 2 — craft revert deleted.** Issue a campaign the ground deliberately
 does not follow (park its radio elsewhere). Craft must hold the target — check
@@ -73,6 +81,19 @@ craft:  ssh <craft> curl -s 127.0.0.1:8091/api/v1/stats | jq .link.channel
 Plus `csa_accepted` on the craft, which separates "followed" from "never heard
 it". A campaign is a PASS only when both channels match the target AND
 `csa_accepted` advanced.
+
+**Read `csa_beacon` alongside it (Pass 203).** `csa_accepted` flat with
+`csa_beacon` CLIMBING is the split-pair signature: this craft can hear an
+issuer that has already jumped without it, so no campaign copy is reaching it.
+That reading did not exist on the first device run — the beacon exit was
+uncounted — and its absence is what turned a split pair into an
+"undiagnosed regression". Flat *and* zero beacons is the genuinely deaf case.
+
+**And read the ground's log line, which is now two lines.** `campaign
+confirmed` means the craft's video was seen on the target. `campaign
+UNCONFIRMED` means this ground jumped alone and is holding; the selection reads
+`select_failed`, not `committed`. A run that produces `UNCONFIRMED` has failed
+even though the ground stayed put — that is the whole point of the distinction.
 
 ## Deploy both ends together — now evidence, not reasoning
 
