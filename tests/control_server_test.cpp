@@ -968,6 +968,21 @@ int main() {
                 CHECK_EQ_U(status_of(r), 400);
                 CHECK_EQ_U(csa_mhz, 5745u);  // hook not reached
             }
+            {  // §15.5 Pass 206: non-integer mhz 400s instead of throwing out of
+               // dispatch (value<int> on a string/null used to abort the link).
+                for (const char* body : {"{\"mhz\":\"5745\"}",
+                                         "{\"mhz\":null}",
+                                         "{\"mhz\":5745.5}"}) {
+                    const std::string r = csa_post(body);
+                    CHECK_EQ_U(status_of(r), 400);
+                    CHECK_EQ_U(csa_mhz, 5745u);  // hook not reached
+                }
+            }
+            {  // reading through int64 rejects a wide value before the cast.
+                const std::string r = csa_post("{\"mhz\":4294967301}");
+                CHECK_EQ_U(status_of(r), 400);
+                CHECK_EQ_U(csa_mhz, 5745u);
+            }
         }
     }
 
